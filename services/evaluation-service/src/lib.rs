@@ -1,5 +1,8 @@
 //! Evaluation-owned immutable submission collection.
 
+#[path = "../../service_runtime.rs"]
+pub mod service_runtime;
+
 pub mod agent_client;
 pub mod ansible_probe;
 pub mod ansible_probe_executor;

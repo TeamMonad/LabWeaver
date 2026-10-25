@@ -638,6 +638,7 @@ async fn smtp_failure_is_visible_bounded_and_cannot_repeat_owner_operations() ->
         from: "notices@example.invalid".into(),
         portal_base_url: "https://portal.example.invalid".into(),
     })?;
+    let shutdown = control_service::service_runtime::subscribe_shutdown();
     let notice_id = notifications::list(
         &pool,
         request.requester_id,
@@ -668,7 +669,7 @@ async fn smtp_failure_is_visible_bounded_and_cannot_repeat_owner_operations() ->
             notifications::mark_read(&pool, request.requester_id, notice_id).await,
             Err(NotificationError::NotFound)
         ));
-        assert!(!worker.deliver_one(&pool).await?);
+        assert!(!worker.deliver_one(&pool, &shutdown).await?);
         let attempts: i16 = sqlx::query_scalar(
             "SELECT email_attempts FROM control.notifications WHERE notification_id=$1",
         )
@@ -687,7 +688,7 @@ async fn smtp_failure_is_visible_bounded_and_cannot_repeat_owner_operations() ->
     .await?;
     for attempt in 1..=5 {
         notifications::project(&pool, &bytes, &[86400], true).await?;
-        assert!(worker.deliver_one(&pool).await?);
+        assert!(worker.deliver_one(&pool, &shutdown).await?);
         let page = notifications::list(
             &pool,
             request.requester_id,
@@ -714,7 +715,7 @@ async fn smtp_failure_is_visible_bounded_and_cannot_repeat_owner_operations() ->
         .execute(&pool)
         .await?;
     }
-    assert!(!worker.deliver_one(&pool).await?);
+    assert!(!worker.deliver_one(&pool, &shutdown).await?);
     assert_eq!(store.load(request.id).await?.revision, request.revision);
     let outbox: i64 = sqlx::query_scalar("SELECT count(*) FROM resource.outbox_events")
         .fetch_one(&pool)
@@ -728,7 +729,7 @@ async fn smtp_failure_is_visible_bounded_and_cannot_repeat_owner_operations() ->
     )
     .await?;
     sqlx::query("UPDATE control.notifications SET email_state='pending',email_attempts=0,email_next_at=clock_timestamp()-interval '1 second'").execute(&pool).await?;
-    assert!(worker.deliver_one(&pool).await?);
+    assert!(worker.deliver_one(&pool, &shutdown).await?);
     let notice = notifications::list(
         &pool,
         request.requester_id,
@@ -739,7 +740,7 @@ async fn smtp_failure_is_visible_bounded_and_cannot_repeat_owner_operations() ->
     .remove(0);
     assert_eq!(notice.email_state, NotificationEmailState::NoVerifiedEmail);
     assert!(notice.email_diagnostic.is_none());
-    assert!(!worker.deliver_one(&pool).await?);
+    assert!(!worker.deliver_one(&pool, &shutdown).await?);
     // A new verified recipient and a separate delivery attempt exercise SMTP DATA/ACK success.
     auth::update_notification_email(
         &pool,
@@ -748,7 +749,7 @@ async fn smtp_failure_is_visible_bounded_and_cannot_repeat_owner_operations() ->
     )
     .await?;
     sqlx::query("UPDATE control.notifications SET email_state='pending',email_attempts=0,email_next_at=clock_timestamp()-interval '1 second'").execute(&pool).await?;
-    assert!(worker.deliver_one(&pool).await?);
+    assert!(worker.deliver_one(&pool, &shutdown).await?);
     let sent = notifications::list(
         &pool,
         request.requester_id,
@@ -758,14 +759,14 @@ async fn smtp_failure_is_visible_bounded_and_cannot_repeat_owner_operations() ->
     .items
     .remove(0);
     assert_eq!(sent.email_state, NotificationEmailState::Sent);
-    assert!(!worker.deliver_one(&pool).await?);
+    assert!(!worker.deliver_one(&pool, &shutdown).await?);
     for (label, expected) in [
         ("permanent_550", NotificationEmailState::Failed),
         ("disconnect", NotificationEmailState::DeliveryUnknown),
         ("timeout", NotificationEmailState::DeliveryUnknown),
     ] {
         sqlx::query("UPDATE control.notifications SET email_state='pending',email_attempts=0,email_next_at=clock_timestamp()-interval '1 second'").execute(&pool).await?;
-        assert!(worker.deliver_one(&pool).await?, "{label}");
+        assert!(worker.deliver_one(&pool, &shutdown).await?, "{label}");
         let notice = notifications::list(
             &pool,
             request.requester_id,
@@ -776,10 +777,13 @@ async fn smtp_failure_is_visible_bounded_and_cannot_repeat_owner_operations() ->
         .remove(0);
         assert_eq!(notice.email_state, expected, "{label}");
         assert_eq!(notice.email_attempts, 1);
-        assert!(!worker.deliver_one(&pool).await?, "{label} must not resend");
+        assert!(
+            !worker.deliver_one(&pool, &shutdown).await?,
+            "{label} must not resend"
+        );
     }
     sqlx::query("UPDATE control.notifications SET email_state='sending',email_attempts=1,email_next_at=clock_timestamp()-interval '1 second'").execute(&pool).await?;
-    assert!(!worker.deliver_one(&pool).await?);
+    assert!(!worker.deliver_one(&pool, &shutdown).await?);
     let recovered = notifications::list(
         &pool,
         request.requester_id,
@@ -793,7 +797,7 @@ async fn smtp_failure_is_visible_bounded_and_cannot_repeat_owner_operations() ->
         NotificationEmailState::DeliveryUnknown
     );
     assert_eq!(recovered.email_attempts, 1);
-    assert!(!worker.deliver_one(&pool).await?);
+    assert!(!worker.deliver_one(&pool, &shutdown).await?);
     let (attempts, body) = tokio::time::timeout(Duration::from_secs(15), server).await???;
     assert_eq!(attempts, 9);
     let (headers, encoded) = body
@@ -885,5 +889,603 @@ fn bundle_derived_notification_windows_are_validated_without_enabling_email() ->
             assert!(matches!(actual, Err(NotificationError::Invalid)));
         }
     }
+    Ok(())
+}
+
+struct NotificationNats {
+    _server: testcontainers::ContainerAsync<GenericImage>,
+    endpoint: String,
+    publisher: async_nats::jetstream::Context,
+    operator: async_nats::jetstream::Context,
+}
+
+impl NotificationNats {
+    async fn new() -> Result<Self> {
+        let config = std::process::Command::new("python3")
+            .arg(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/fixtures/notification_nats.py"),
+            )
+            .output()?;
+        assert!(config.status.success(), "NATS permission fixture failed");
+        let server = GenericImage::new("nats", "2.11.8-alpine")
+            .with_exposed_port(4222.tcp())
+            .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+            .with_copy_to("/etc/nats/notifications.json", config.stdout)
+            .with_cmd(["-c", "/etc/nats/notifications.json"])
+            .start()
+            .await?;
+        let endpoint = format!(
+            "nats://127.0.0.1:{}",
+            server.get_host_port_ipv4(4222).await?
+        );
+        let operator = async_nats::ConnectOptions::new()
+            .user_and_password("operator".into(), "operator-fixture".into())
+            .connect(&endpoint)
+            .await?;
+        let publisher = async_nats::ConnectOptions::new()
+            .user_and_password("resource-service".into(), "identity-fixture".into())
+            .connect(&endpoint)
+            .await?;
+        let operator = async_nats::jetstream::new(operator);
+        operator
+            .create_stream(async_nats::jetstream::stream::Config {
+                name: "LABWEAVER_RESOURCE_EVENTS".into(),
+                subjects: vec!["labweaver.resource.>".into()],
+                ..Default::default()
+            })
+            .await?
+            .create_consumer(async_nats::jetstream::consumer::pull::Config {
+                durable_name: Some("control-notifications-v1".into()),
+                filter_subjects: vec!["labweaver.resource.>".into()],
+                max_deliver: 3,
+                ack_wait: Duration::from_secs(5),
+                ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
+                ..Default::default()
+            })
+            .await?;
+        Ok(Self {
+            _server: server,
+            endpoint,
+            publisher: async_nats::jetstream::new(publisher),
+            operator,
+        })
+    }
+    async fn publish(&self, bytes: Vec<u8>) -> Result<EventId> {
+        let event: CloudEvent<serde_json::Value> = serde_json::from_slice(&bytes)?;
+        self.publisher
+            .publish(event.subject, bytes.into())
+            .await?
+            .await?;
+        Ok(event.id)
+    }
+}
+
+async fn owner_notification_event(
+    pool: &PgPool,
+    request: &ResourceRequest,
+    key: &str,
+) -> Result<Vec<u8>> {
+    let store = resource_service::store::PgResourceStore::new(pool.clone());
+    member(pool, request).await?;
+    store
+        .create_task(key, request, 60_000, "notification-process-test")
+        .await?;
+    let payload: serde_json::Value = sqlx::query_scalar(
+        "SELECT payload FROM resource.outbox_events WHERE aggregate_id=$1 AND subject=$2",
+    )
+    .bind(request.id.as_uuid())
+    .bind(subjects::RESOURCE_REQUEST_SUBMITTED)
+    .fetch_one(pool)
+    .await?;
+    Ok(serde_json::to_vec(&payload)?)
+}
+
+#[tokio::test]
+#[ignore = "real process entrypoint launched by the notification shutdown regressions"]
+async fn notification_worker_process() -> Result {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&std::env::var("LW_NOTIFICATION_TEST_DATABASE")?)
+        .await?;
+    let client = async_nats::ConnectOptions::new()
+        .user_and_password("control-service".into(), "identity-fixture".into())
+        .connect(std::env::var("LW_NOTIFICATION_TEST_NATS")?)
+        .await?;
+    let consumer = NotificationConsumer::bind(client).await?;
+    let smtp = std::env::var("LW_NOTIFICATION_TEST_SMTP")
+        .ok()
+        .map(|config| serde_json::from_str::<SmtpConfiguration>(&config))
+        .transpose()?
+        .map(SmtpWorker::new)
+        .transpose()?;
+    let email = smtp.is_some();
+    let shutdown = control_service::service_runtime::subscribe_shutdown();
+    let smtp_shutdown = shutdown.clone();
+    let mut observers = tokio::task::JoinSet::new();
+    observers.spawn(async {
+        control_service::service_runtime::wait_for_shutdown().await;
+        println!("NOTIFICATIONS_STOPPING");
+    });
+    println!("NOTIFICATIONS_READY");
+    Box::pin(control_service::service_runtime::supervise(
+        "control-notifications-test",
+        async {
+            tokio::try_join!(
+                consumer.run(pool.clone(), vec![86400], email, shutdown),
+                async {
+                    if let Some(worker) = smtp {
+                        worker.run(pool, smtp_shutdown).await?;
+                    }
+                    Ok::<(), NotificationError>(())
+                }
+            )?;
+            Ok::<(), NotificationError>(())
+        },
+    ))
+    .await?;
+    Ok(())
+}
+
+fn spawn_notification_process(
+    database: &str,
+    nats: &str,
+    smtp: Option<&serde_json::Value>,
+) -> Result<tokio::process::Child> {
+    let mut process = tokio::process::Command::new(std::env::current_exe()?);
+    process
+        .args([
+            "--exact",
+            "notification_worker_process",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("LW_NOTIFICATION_TEST_DATABASE", database)
+        .env("LW_NOTIFICATION_TEST_NATS", nats)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true);
+    if let Some(config) = smtp {
+        process.env("LW_NOTIFICATION_TEST_SMTP", serde_json::to_string(config)?);
+    }
+    Ok(process.spawn()?)
+}
+
+async fn notification_process_marker(
+    output: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    marker: &str,
+) -> Result {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(line) = output.next_line().await? {
+            if line.contains(marker) {
+                return Ok::<(), std::io::Error>(());
+            }
+        }
+        Err(std::io::Error::other(format!(
+            "notification process ended before {marker}"
+        )))
+    })
+    .await
+    .map_err(|error| format!("notification worker did not emit {marker}: {error}"))?
+    .map_err(|error| format!("read notification worker marker {marker}: {error}"))?;
+    Ok(())
+}
+
+async fn notification_process_signal(process: &tokio::process::Child, signal: &str) -> Result {
+    assert!(
+        tokio::process::Command::new("kill")
+            .args([
+                signal,
+                &process
+                    .id()
+                    .ok_or("notification process exited early")?
+                    .to_string()
+            ])
+            .status()
+            .await?
+            .success()
+    );
+    Ok(())
+}
+
+async fn wait_notification_event(pool: &PgPool, id: EventId) -> Result {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let stored: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM control.notification_inbox WHERE event_id=$1)",
+            )
+            .bind(id.as_uuid())
+            .fetch_one(pool)
+            .await?;
+            if stored {
+                return Ok::<(), sqlx::Error>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|error| {
+        format!("notification event {id} was not projected after restart: {error}")
+    })??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn notification_process_sigterm_drains_owned_event_and_restart_takes_unprocessed_event()
+-> Result {
+    use tokio::io::AsyncBufReadExt as _;
+    let (postgres, pool) = database().await?;
+    support::apply_domain_migrations(&pool, Domain::Resource).await?;
+    let nats = NotificationNats::new().await?;
+    let database_url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        postgres.get_host_port_ipv4(5432).await?
+    );
+    let now = resource_service::store::PgResourceStore::new(pool.clone())
+        .current_time()
+        .await?;
+    let first = request(now)?;
+    let first_bytes = owner_notification_event(&pool, &first, "notification-process-first").await?;
+    let second = request(now)?;
+    let second_bytes =
+        owner_notification_event(&pool, &second, "notification-process-second").await?;
+    let mut process = spawn_notification_process(&database_url, &nats.endpoint, None)?;
+    let mut output =
+        tokio::io::BufReader::new(process.stdout.take().ok_or("worker stdout missing")?).lines();
+    notification_process_marker(&mut output, "NOTIFICATIONS_READY").await?;
+    let mut gate = pool.begin().await?;
+    sqlx::query("LOCK TABLE control.notifications IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *gate)
+        .await?;
+    let first_id = nats.publish(first_bytes.clone()).await?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE '%control.notifications%' AND pid<>pg_backend_pid())").fetch_one(&pool).await?;
+            if blocked { return Ok::<(), sqlx::Error>(()); }
+            tokio::task::yield_now().await;
+        }
+    }).await??;
+    notification_process_signal(&process, "-TERM").await?;
+    notification_process_marker(&mut output, "NOTIFICATIONS_STOPPING").await?;
+    let second_id = nats.publish(second_bytes).await?;
+    gate.rollback().await?;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(25), process.wait())
+            .await??
+            .success()
+    );
+    wait_notification_event(&pool, first_id).await?;
+    let second_stored: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM control.notification_inbox WHERE event_id=$1)",
+    )
+    .bind(second_id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        !second_stored,
+        "SIGTERM must stop notification acquisition after the owned event drains"
+    );
+    let mut restarted = spawn_notification_process(&database_url, &nats.endpoint, None)?;
+    wait_notification_event(&pool, second_id).await?;
+    nats.publish(first_bytes).await?;
+    let stream = nats
+        .operator
+        .get_stream("LABWEAVER_RESOURCE_EVENTS")
+        .await?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let mut consumer: async_nats::jetstream::consumer::PullConsumer = stream
+                .get_consumer("control-notifications-v1")
+                .await
+                .map_err(std::io::Error::other)?;
+            if consumer.info().await?.ack_floor.stream_sequence >= 3 {
+                return Ok::<(), Box<dyn Error>>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    notification_process_signal(&restarted, "-TERM").await?;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(25), restarted.wait())
+            .await??
+            .success()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM control.notifications")
+            .fetch_one(&pool)
+            .await?,
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource.outbox_events")
+            .fetch_one(&pool)
+            .await?,
+        2
+    );
+    Ok(())
+}
+
+struct SmtpBoundary {
+    config: serde_json::Value,
+    deliveries: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    held: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<()>>,
+    _tasks: tokio::task::JoinSet<std::io::Result<()>>,
+    _secrets: tempfile::TempDir,
+}
+
+impl SmtpBoundary {
+    async fn new() -> Result<Self> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+        let secrets = tempfile::tempdir()?;
+        let ca = secrets.path().join("smtp-ca.pem");
+        let password = secrets.path().join("password");
+        std::fs::write(&ca, cert.cert.pem())?;
+        std::fs::write(&password, "smtp-fixture-password")?;
+        let tls = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert.cert.der().clone()],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()),
+                ),
+            )?;
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let deliveries = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = deliveries.clone();
+        let (sender, held) = tokio::sync::mpsc::channel(2);
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(async move {
+            for _ in 0..2 {
+                let (socket, _) = listener.accept().await?;
+                let tls = acceptor.accept(socket).await?;
+                let mut io = BufReader::new(tls);
+                io.get_mut().write_all(b"220 fixture ESMTP\r\n").await?;
+                loop {
+                    let mut line = String::new();
+                    if io.read_line(&mut line).await? == 0 {
+                        break;
+                    }
+                    if line.starts_with("DATA") {
+                        io.get_mut().write_all(b"354 send data\r\n").await?;
+                        loop {
+                            let mut content = String::new();
+                            if io.read_line(&mut content).await? == 0 || content == ".\r\n" {
+                                break;
+                            }
+                        }
+                        observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let (release, wait) = tokio::sync::oneshot::channel();
+                        sender.send(release).await.map_err(std::io::Error::other)?;
+                        if wait.await.is_ok() {
+                            let _ = io.get_mut().write_all(b"250 queued\r\n").await;
+                        }
+                        break;
+                    }
+                    let response = if line.starts_with("EHLO") {
+                        "250-fixture\r\n250 AUTH PLAIN\r\n"
+                    } else if line.starts_with("AUTH") {
+                        "235 authenticated\r\n"
+                    } else if line.starts_with("MAIL") || line.starts_with("RCPT") {
+                        "250 accepted\r\n"
+                    } else {
+                        "221 bye\r\n"
+                    };
+                    io.get_mut().write_all(response.as_bytes()).await?;
+                }
+            }
+            Ok(())
+        });
+        let config = serde_json::json!({"host":"localhost","port":port,"tls":"tls","username":"fixture","passwordFile":password,"caFile":ca,"from":"notices@example.invalid","portalBaseUrl":"https://portal.example.invalid"});
+        Ok(Self {
+            config,
+            deliveries,
+            held,
+            _tasks: tasks,
+            _secrets: secrets,
+        })
+    }
+    async fn accepted(&mut self) -> Result<tokio::sync::oneshot::Sender<()>> {
+        Ok(
+            tokio::time::timeout(Duration::from_secs(10), self.held.recv())
+                .await
+                .map_err(|error| {
+                    format!("SMTP DATA was not accepted before fixture deadline: {error}")
+                })?
+                .ok_or("SMTP fixture ended before accepting DATA")?,
+        )
+    }
+}
+
+async fn wait_notification_email(pool: &PgPool, id: EventId, expected: &str) -> Result {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let state: String = sqlx::query_scalar(
+                "SELECT email_state FROM control.notifications WHERE notification_id=$1",
+            )
+            .bind(id.as_uuid())
+            .fetch_one(pool)
+            .await?;
+            if state == expected {
+                return Ok::<(), sqlx::Error>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|error| format!("notification {id} did not reach SMTP state {expected}: {error}"))??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn smtp_process_sigterm_drains_one_send_and_crashed_sending_becomes_unknown_without_resend()
+-> Result {
+    use tokio::io::AsyncBufReadExt as _;
+    let (postgres, pool) = database().await?;
+    support::apply_domain_migrations(&pool, Domain::Resource).await?;
+    let nats = NotificationNats::new().await?;
+    let mut smtp = SmtpBoundary::new().await?;
+    let database_url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        postgres.get_host_port_ipv4(5432).await?
+    );
+    let actor = auth::upsert_actor(
+        &pool,
+        "https://oidc.fixture.invalid",
+        "smtp-process-recipient",
+    )
+    .await?;
+    auth::update_notification_email(
+        &pool,
+        actor.actor_id,
+        &serde_json::json!({"email":"recipient@example.invalid","email_verified":true}),
+    )
+    .await?;
+    let store = resource_service::store::PgResourceStore::new(pool.clone());
+    let now = store.current_time().await?;
+    let mut first = request(now)?;
+    first.requester_id = actor.actor_id.to_string().parse()?;
+    let first_bytes = owner_notification_event(&pool, &first, "smtp-process-first").await?;
+    let mut second = request(now)?;
+    second.requester_id = first.requester_id;
+    let second_bytes = owner_notification_event(&pool, &second, "smtp-process-second").await?;
+    let mut process =
+        spawn_notification_process(&database_url, &nats.endpoint, Some(&smtp.config))?;
+    let mut output =
+        tokio::io::BufReader::new(process.stdout.take().ok_or("worker stdout missing")?).lines();
+    notification_process_marker(&mut output, "NOTIFICATIONS_READY").await?;
+    nats.publish(first_bytes).await?;
+    let first_ack = smtp.accepted().await?;
+    notification_process_signal(&process, "-TERM").await?;
+    notification_process_marker(&mut output, "NOTIFICATIONS_STOPPING").await?;
+    notifications::project(&pool, &second_bytes, &[86400], true).await?;
+    let second_notice = notifications::list(
+        &pool,
+        second.requester_id,
+        &NotificationListQuery::default(),
+    )
+    .await?
+    .items
+    .into_iter()
+    .find(|notice| notice.project_id == second.project_id)
+    .ok_or("second notification missing")?;
+    first_ack
+        .send(())
+        .map_err(|()| "SMTP DATA ACK gate closed")?;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(25), process.wait())
+            .await??
+            .success()
+    );
+    let first_notice =
+        notifications::list(&pool, first.requester_id, &NotificationListQuery::default())
+            .await?
+            .items
+            .into_iter()
+            .find(|notice| notice.project_id == first.project_id)
+            .ok_or("first notification missing")?;
+    assert_eq!(first_notice.email_state, NotificationEmailState::Sent);
+    assert_eq!(first_notice.email_attempts, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i16>(
+            "SELECT email_attempts FROM control.notifications WHERE notification_id=$1"
+        )
+        .bind(second_notice.id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        0,
+        "SIGTERM must not claim mail queued while an accepted send drains"
+    );
+    let mut crashing =
+        spawn_notification_process(&database_url, &nats.endpoint, Some(&smtp.config))?;
+    let lost_ack = smtp.accepted().await?;
+    wait_notification_email(&pool, second_notice.id, "sending").await?;
+    notification_process_signal(&crashing, "-KILL").await?;
+    assert!(
+        !tokio::time::timeout(Duration::from_secs(10), crashing.wait())
+            .await??
+            .success()
+    );
+    drop(lost_ack);
+    sqlx::query("UPDATE control.notifications SET email_next_at=clock_timestamp()-interval '1 millisecond' WHERE notification_id=$1 AND email_state='sending'").bind(second_notice.id.as_uuid()).execute(&pool).await?;
+    let mut restarted =
+        spawn_notification_process(&database_url, &nats.endpoint, Some(&smtp.config))?;
+    wait_notification_email(&pool, second_notice.id, "delivery_unknown").await?;
+    notification_process_signal(&restarted, "-TERM").await?;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(25), restarted.wait())
+            .await??
+            .success()
+    );
+    assert_eq!(
+        smtp.deliveries.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "uncertain SMTP acceptance must never be resent after lease expiry"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i16>(
+            "SELECT email_attempts FROM control.notifications WHERE notification_id=$1"
+        )
+        .bind(second_notice.id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        1
+    );
+    assert_eq!(store.load(first.id).await?.revision, first.revision);
+    assert_eq!(store.load(second.id).await?.revision, second.revision);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource.outbox_events")
+            .fetch_one(&pool)
+            .await?,
+        2
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn smtp_stops_before_new_claim_after_expiry_sweep_io() -> Result {
+    let (_postgres, pool) = database().await?;
+    support::apply_domain_migrations(&pool, Domain::Resource).await?;
+    let smtp = SmtpBoundary::new().await?;
+    let store = resource_service::store::PgResourceStore::new(pool.clone());
+    let request = request(store.current_time().await?)?;
+    let bytes = owner_notification_event(&pool, &request, "smtp-stop-claim-boundary").await?;
+    notifications::project(&pool, &bytes, &[86400], true).await?;
+    let mut gate = pool.begin().await?;
+    sqlx::query("LOCK TABLE control.notifications IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *gate)
+        .await?;
+    let worker = SmtpWorker::new(serde_json::from_value(smtp.config.clone())?)?;
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let mut workers = tokio::task::JoinSet::new();
+    workers.spawn(worker.run(pool.clone(), shutdown));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'UPDATE control.notifications SET email_state=%delivery_unknown%' AND pid<>pg_backend_pid())").fetch_one(&pool).await?;
+            if blocked { return Ok::<(), sqlx::Error>(()); }
+            tokio::task::yield_now().await;
+        }
+    }).await??;
+    stop.send_replace(true);
+    gate.rollback().await?;
+    tokio::time::timeout(Duration::from_secs(2), workers.join_next())
+        .await?
+        .ok_or("SMTP worker missing")???;
+    assert_eq!(
+        sqlx::query_scalar::<_, i16>("SELECT email_attempts FROM control.notifications")
+            .fetch_one(&pool)
+            .await?,
+        0,
+        "shutdown during expiry sweep must be checked before the following claim statement"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT email_state FROM control.notifications")
+            .fetch_one(&pool)
+            .await?,
+        "pending"
+    );
     Ok(())
 }

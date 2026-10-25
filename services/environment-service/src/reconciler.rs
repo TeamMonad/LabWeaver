@@ -183,10 +183,6 @@ impl ReconcileWorker {
     }
 
     /// Claims and processes at most one due operation.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "the lease, pending schedule and observation commit share one bounded reconcile decision"
-    )]
     pub async fn run_once(
         &self,
         worker_id: &str,
@@ -272,38 +268,58 @@ impl ReconcileWorker {
                     ),
                 })
             }
-            Err(error) => {
-                let diagnostic_code = error.diagnostic_code().to_owned();
-                if error.retryable()
-                    && lease.instance.operation.attempt < lease.instance.operation.max_attempts
-                {
-                    let retry_at = add_duration(now, self.retry_delay)?;
-                    if retry_at <= lease.instance.operation.deadline_at {
-                        let updated = apply_retry(
-                            &lease.instance,
-                            lease.instance.operation.id,
-                            &diagnostic_code,
-                            retry_at,
-                        )?;
-                        if !self.persist_reconciled(&lease, &updated).await? {
-                            return Ok(ReconcileWorkerOutcome::LeaseLost);
-                        }
-                        return Ok(ReconcileWorkerOutcome::RetryScheduled {
-                            attempt: updated.operation.attempt,
-                        });
-                    }
-                }
-                let updated = apply_provider_failure(
+            Err(error) => self.record_failure(&lease, error, now).await,
+        }
+    }
+
+    /// Applies the same durable failure decision for a returned provider error or an executor
+    /// boot's persisted unknown outcome. The lease fence still owns the state transition.
+    pub(crate) async fn record_failure(
+        &self,
+        lease: &crate::LeasedEnvironment,
+        error: ReconcileError,
+        now: UtcTimestamp,
+    ) -> Result<ReconcileWorkerOutcome, ReconcileWorkerError> {
+        let diagnostic_code = if lease.instance.operation.kind == EnvironmentOperationKind::Restart
+            && matches!(
+                &error,
+                ReconcileError::Provider(ProviderFailure {
+                    code: ProviderFailureCode::Unavailable,
+                    retryable: false
+                })
+            ) {
+            contracts::diagnostic::ENVIRONMENT_RESTART_OUTCOME_UNKNOWN.to_owned()
+        } else {
+            error.diagnostic_code().to_owned()
+        };
+        if error.retryable()
+            && lease.instance.operation.attempt < lease.instance.operation.max_attempts
+        {
+            let retry_at = add_duration(now, self.retry_delay)?;
+            if retry_at <= lease.instance.operation.deadline_at {
+                let updated = apply_retry(
                     &lease.instance,
                     lease.instance.operation.id,
                     &diagnostic_code,
+                    retry_at,
                 )?;
-                if !self.persist_reconciled(&lease, &updated).await? {
+                if !self.persist_reconciled(lease, &updated).await? {
                     return Ok(ReconcileWorkerOutcome::LeaseLost);
                 }
-                Ok(ReconcileWorkerOutcome::Failed { diagnostic_code })
+                return Ok(ReconcileWorkerOutcome::RetryScheduled {
+                    attempt: updated.operation.attempt,
+                });
             }
         }
+        let updated = apply_provider_failure(
+            &lease.instance,
+            lease.instance.operation.id,
+            &diagnostic_code,
+        )?;
+        if !self.persist_reconciled(lease, &updated).await? {
+            return Ok(ReconcileWorkerOutcome::LeaseLost);
+        }
+        Ok(ReconcileWorkerOutcome::Failed { diagnostic_code })
     }
 
     /// Persists only while this worker still owns the aggregate and operation lease.

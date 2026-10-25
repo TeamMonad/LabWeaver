@@ -1066,7 +1066,14 @@ impl<B: BuildExecutorBackend + 'static> NatsBuildExecutorServer<B> {
             .subscribe(self.subject)
             .await
             .map_err(|_| BuildExecutorFenceError::Transport)?;
-        while let Some(message) = subscriber.next().await {
+        let mut requests = tokio::task::JoinSet::new();
+        loop {
+            let message = tokio::select! {
+                biased;
+                () = crate::service_runtime::wait_for_shutdown() => break,
+                _ = requests.join_next(), if !requests.is_empty() => continue,
+                message = subscriber.next() => message.ok_or(BuildExecutorFenceError::Transport)?,
+            };
             let Some(reply) = message.reply.clone() else {
                 tracing::warn!(
                     event = "agent.build_executor.request_rejected",
@@ -1092,7 +1099,7 @@ impl<B: BuildExecutorBackend + 'static> NatsBuildExecutorServer<B> {
             };
             let client = self.client.clone();
             let executor = std::sync::Arc::clone(&self.executor);
-            tokio::spawn(async move {
+            requests.spawn(async move {
                 let context = envelope.context;
                 let response = match executor.execute(envelope).await {
                     Ok(response) => response,
@@ -1122,7 +1129,8 @@ impl<B: BuildExecutorBackend + 'static> NatsBuildExecutorServer<B> {
                 }
             });
         }
-        Err(BuildExecutorFenceError::Transport)
+        while requests.join_next().await.is_some() {}
+        Ok(())
     }
 }
 
@@ -1132,7 +1140,9 @@ async fn reconcile_build_observations<B: BuildExecutorBackend + 'static>(
     let mut interval = tokio::time::interval(Duration::from_secs(10));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        interval.tick().await;
+        if !crate::service_runtime::worker_tick(&mut interval).await {
+            return Ok(());
+        }
         let Some(client) = &executor.billing else {
             continue;
         };
@@ -1144,6 +1154,9 @@ async fn reconcile_build_observations<B: BuildExecutorBackend + 'static>(
             }
         };
         for grant in grants {
+            if crate::service_runtime::is_stopping() {
+                return Ok(());
+            }
             let request = BuildExecutorRequest::Build {
                 identity: BuildIdentity(Sha256Digest::of_bytes(
                     grant.command.request.id.as_uuid().as_bytes(),

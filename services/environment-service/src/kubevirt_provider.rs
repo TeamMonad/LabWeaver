@@ -846,6 +846,7 @@ pub struct PgKubeVirtExecutorFenceStore {
 struct UnfinishedKubeVirtExecution {
     instance: KubeVirtExecutionInstance,
     request_id: String,
+    non_idempotent: bool,
     generation: i64,
     operation_id: Uuid,
     provider_step: i32,
@@ -858,7 +859,7 @@ impl PgKubeVirtExecutorFenceStore {
         &self,
         instance: &KubeVirtExecutionInstance,
     ) -> Result<(), KubeVirtExecutorFenceError> {
-        let rows=sqlx::query("SELECT environment_id,execution_owner,last_request_id,highest_generation,operation_id,provider_step,attempt,deadline_at FROM environment.kubevirt_executor_fences WHERE last_response IS NULL AND execution_owner->>'podUid'=$1 AND execution_owner->>'containerName'=$2")
+        let rows=sqlx::query("SELECT environment_id,execution_owner,last_request_id,last_action,highest_generation,operation_id,provider_step,attempt,deadline_at FROM environment.kubevirt_executor_fences WHERE last_response IS NULL AND execution_owner->>'podUid'=$1 AND execution_owner->>'containerName'=$2")
             .bind(instance.pod_uid.to_string()).bind(&instance.container_name).fetch_all(&self.pool).await?;
         for row in rows {
             let owner: KubeVirtExecutionInstance =
@@ -873,6 +874,7 @@ impl PgKubeVirtExecutorFenceStore {
             let previous = UnfinishedKubeVirtExecution {
                 instance: owner,
                 request_id: row.try_get("last_request_id")?,
+                non_idempotent: row.try_get::<&str, _>("last_action")? == "restart",
                 generation: row.try_get("highest_generation")?,
                 operation_id: row.try_get("operation_id")?,
                 provider_step: row.try_get("provider_step")?,
@@ -896,17 +898,23 @@ impl PgKubeVirtExecutorFenceStore {
         let now: time::OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&self.pool)
             .await?;
-        let code = if now >= previous.deadline_at {
-            ProviderFailureCode::Timeout
-        } else {
-            ProviderFailureCode::Cancelled
-        };
-        let response = KubeVirtExecutorResponse::Failed {
-            failure: ProviderFailure {
-                code,
+        // Only the recorded action decides whether a new attempt is safe. Restart may have
+        // already reached the external subresource; losing this PID1 cannot make it idempotent.
+        // Apply/Start/Stop/Delete converge on their fenced resource identity instead.
+        let failure = if now >= previous.deadline_at {
+            ProviderFailure {
+                code: ProviderFailureCode::Timeout,
                 retryable: false,
-            },
+            }
+        } else if previous.non_idempotent {
+            ProviderFailure {
+                code: ProviderFailureCode::Unavailable,
+                retryable: false,
+            }
+        } else {
+            unavailable()
         };
+        let response = KubeVirtExecutorResponse::Failed { failure };
         let affected = sqlx::query(
             "UPDATE environment.kubevirt_executor_fences SET last_response=$8, \
              updated_at=clock_timestamp() WHERE environment_id=$1 AND highest_generation=$2 \
@@ -1167,7 +1175,6 @@ pub struct FencedKubeVirtExecutor<B> {
     runtime_admission: Option<crate::EnvironmentRuntimeAdmission>,
     instance: KubeVirtExecutionInstance,
     active: Mutex<std::collections::BTreeMap<Uuid, ActiveKubeVirtExecution>>,
-    shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
@@ -1183,7 +1190,6 @@ impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
             runtime_admission: None,
             instance,
             active: Mutex::new(std::collections::BTreeMap::new()),
-            shutdown: tokio::sync::watch::channel(false).0,
         }
     }
 
@@ -1196,10 +1202,6 @@ impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
     /// Called once before listening, after the production PID1/PodSpec startup check.
     pub async fn prepare_startup(&self) -> Result<(), KubeVirtExecutorFenceError> {
         self.store.recover_previous_boot(&self.instance).await
-    }
-
-    fn cancel_active(&self) {
-        self.shutdown.send_replace(true);
     }
 
     async fn finish_terminals(&self) -> Result<(), KubeVirtExecutorFenceError> {
@@ -1227,9 +1229,6 @@ impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
         envelope: KubeVirtExecutorRequestEnvelope,
     ) -> Result<KubeVirtExecutorResponseEnvelope, KubeVirtExecutorFenceError> {
         validate_kubevirt_executor_request(&envelope)?;
-        if *self.shutdown.borrow() {
-            return Err(KubeVirtExecutorFenceError::Cancelled);
-        }
         let fence = &envelope.fence;
         let previous = {
             let mut active = self
@@ -1400,10 +1399,6 @@ impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
         envelope: &KubeVirtExecutorRequestEnvelope,
         permit: &KubeVirtExecutionPermit,
     ) -> KubeVirtExecutorResponse {
-        let mut shutdown = self.shutdown.subscribe();
-        if *shutdown.borrow() {
-            return execution_terminal_failure(&KubeVirtExecutorFenceError::Cancelled);
-        }
         let remaining = match permit.check().await {
             Ok(remaining) => remaining,
             Err(error) => return execution_terminal_failure(&error),
@@ -1424,7 +1419,6 @@ impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
             };
             tokio::select! {
                 response = &mut work => response,
-                _ = shutdown.changed() => execution_terminal_failure(&KubeVirtExecutorFenceError::Cancelled),
                 error = watch_authority => execution_terminal_failure(&error),
                 () = tokio::time::sleep(remaining) => execution_terminal_failure(&KubeVirtExecutorFenceError::DeadlineExceeded),
             }
@@ -1564,7 +1558,8 @@ impl<B: KubeVirtExecutorBackend + 'static> NatsKubeVirtExecutorServer<B> {
         };
         // Dropping the subscription rejects new work; accepted tasks still retain their exact owner.
         drop(subscriber);
-        self.executor.cancel_active();
+        // Process shutdown is not user cancellation. The outer process supervisor bounds this
+        // drain; expiry drops the owned JoinSet without fabricating a terminal VM response.
         let mut task_failed = false;
         while let Some(task) = tasks.join_next().await {
             task_failed |= task.is_err();
@@ -3709,6 +3704,492 @@ mod tests {
                 "binding name {} differs from expected {expected}",
                 binding.data_source_name
             ));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the real VM process restart regression keeps admission, signal, persistence, and replay witnesses together"
+    )]
+    async fn process_shutdown_does_not_become_non_retryable_user_cancellation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use testcontainers::{
+            GenericImage,
+            core::{IntoContainerPort, WaitFor},
+            runners::AsyncRunner,
+        };
+        struct GatedBackend {
+            entered: Arc<tokio::sync::Notify>,
+            resume: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait]
+        impl KubeVirtExecutorBackend for GatedBackend {
+            async fn execute(
+                &self,
+                _: &KubeVirtBackendFence,
+                _: &KubeVirtExecutorRequest,
+                _: &KubeVirtExecutionPermit,
+            ) -> KubeVirtExecutorResponse {
+                self.entered.notify_one();
+                self.resume.notified().await;
+                KubeVirtExecutorResponse::Failed {
+                    failure: unavailable(),
+                }
+            }
+        }
+        if std::env::var_os("LW_VM_DRAIN_HELPER").is_none() {
+            let output = tokio::time::timeout(Duration::from_secs(90), tokio::process::Command::new(std::env::current_exe()?)
+                .args(["--exact", "kubevirt_provider::tests::process_shutdown_does_not_become_non_retryable_user_cancellation", "--nocapture"])
+                .env("LW_VM_DRAIN_HELPER", "1").kill_on_drop(true).output()).await
+                .map_err(|error| format!("VM shutdown subprocess did not finish: {error}"))?
+                .map_err(|error| format!("launch VM shutdown subprocess: {error}"))?;
+            assert!(
+                output.status.success(),
+                "VM process shutdown regression failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return Ok(());
+        }
+        let nats = GenericImage::new("nats", "2.11.8-alpine")
+            .with_exposed_port(4222.tcp())
+            .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+            .start()
+            .await
+            .map_err(|error| format!("start and await NATS fixture readiness: {error}"))?;
+        let client = async_nats::connect(format!(
+            "nats://127.0.0.1:{}",
+            nats.get_host_port_ipv4(4222)
+                .await
+                .map_err(|error| format!("resolve ready NATS fixture port: {error}"))?
+        ))
+        .await
+        .map_err(|error| format!("connect ready NATS fixture before business deadline: {error}"))?;
+        let authority = crate::test_support::requested_instance();
+        let mut fence = KubeVirtBackendFence::for_action(&authority, ReconcileAction::Stop)
+            .map_err(|error| format!("prepare VM stop fence: {error:?}"))?;
+        // Complete external NATS readiness before test_permit starts the five-second business
+        // budget. That helper writes the same deadline into the fence and stored authority.
+        client
+            .flush()
+            .await
+            .map_err(|error| format!("NATS readiness flush before business deadline: {error}"))?;
+        let (_postgres, permit) = crate::kubevirt_execution::test_permit(&mut fence)
+            .await
+            .map_err(|error| {
+                format!("prepare PostgreSQL admission and synchronized deadline: {error}")
+            })?;
+        sqlx::query("DELETE FROM environment.kubevirt_executor_fences WHERE environment_id=$1")
+            .bind(fence.environment_id.as_uuid())
+            .execute(&permit.pool)
+            .await
+            .map_err(|error| format!("clear setup admission before actual VM request: {error}"))?;
+        let request = KubeVirtExecutorRequest::Stop {
+            plan: KubeVirtCleanupPlan {
+                environment_id: authority.id,
+                project_id: authority.project_id,
+                namespace: format!("lw-env-{}", authority.id),
+                virtual_machine_name: "runtime".into(),
+                plan_sha256: Sha256Digest::of_bytes(b"shutdown-stop"),
+            },
+        };
+        let fence = bind_kubevirt_executor_request(fence, &request).map_err(|error| {
+            format!("bind stop request to synchronized business deadline: {error:?}")
+        })?;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let executor = FencedKubeVirtExecutor::new(
+            PgKubeVirtExecutorFenceStore::new(permit.pool.clone()),
+            GatedBackend {
+                entered: entered.clone(),
+                resume: resume.clone(),
+            },
+            permit.instance.clone(),
+        );
+        let server = NatsKubeVirtExecutorServer::new(
+            client.clone(),
+            "fixture.vm.shutdown".into(),
+            executor,
+        )?;
+        let mut server_tasks = tokio::task::JoinSet::new();
+        let server_task = server_tasks.spawn(crate::service_runtime::supervise(
+            "kubevirt-test",
+            server.serve(crate::service_runtime::subscribe_shutdown()),
+        ));
+        let envelope = KubeVirtExecutorRequestEnvelope {
+            fence: fence.clone(),
+            request,
+        };
+        let request_client = client.clone();
+        let mut request_tasks = tokio::task::JoinSet::new();
+        request_tasks.spawn(async move {
+            loop {
+                match request_client
+                    .request("fixture.vm.shutdown", serde_json::to_vec(&envelope)?.into())
+                    .await
+                {
+                    Ok(response) => {
+                        return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(response);
+                    }
+                    Err(error) if error.kind() == async_nats::RequestErrorKind::NoResponders => {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .map_err(|error| {
+                format!("VM backend did not enter after dependency-ready stop request: {error}")
+            })?;
+        assert!(
+            tokio::process::Command::new("kill")
+                .args(["-TERM", &std::process::id().to_string()])
+                .status()
+                .await?
+                .success()
+        );
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            crate::service_runtime::wait_for_shutdown(),
+        )
+        .await
+        .map_err(|error| format!("VM worker did not observe SIGTERM: {error}"))?;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), async {
+                while !server_task.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_err(),
+            "shutdown must drain the actual VM operation, not cancel it"
+        );
+        let terminal: Option<Value> = sqlx::query_scalar("SELECT last_response FROM environment.kubevirt_executor_fences WHERE environment_id=$1").bind(fence.environment_id.as_uuid()).fetch_one(&permit.pool).await?;
+        assert!(
+            terminal.is_none(),
+            "process shutdown must not persist Cancelled"
+        );
+        resume.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), server_tasks.join_next())
+            .await
+            .map_err(|error| {
+                format!("VM executor drain did not finish after backend release: {error}")
+            })?
+            .ok_or("VM executor task disappeared during drain")?
+            .map_err(|error| format!("VM executor task failed during drain: {error}"))?
+            .map_err(|error| {
+                format!("VM executor could not persist its terminal response: {error}")
+            })?;
+        let response = tokio::time::timeout(Duration::from_secs(5), request_tasks.join_next())
+            .await
+            .map_err(|error| {
+                format!("VM stop requester did not receive its drained response: {error}")
+            })?
+            .ok_or("VM stop requester task disappeared")?
+            .map_err(|error| format!("VM stop requester task failed: {error}"))?
+            .map_err(|error| format!("VM stop request failed: {error}"))?;
+        let response: KubeVirtExecutorResponseEnvelope = serde_json::from_slice(&response.payload)?;
+        assert!(matches!(
+            response.response,
+            KubeVirtExecutorResponse::Failed {
+                failure: ProviderFailure {
+                    code: ProviderFailureCode::Unavailable,
+                    retryable: true
+                }
+            }
+        ));
+        let mut next_boot = permit.instance;
+        next_boot.boot_token = Uuid::new_v4();
+        let restarted = FencedKubeVirtExecutor::new(
+            PgKubeVirtExecutorFenceStore::new(permit.pool.clone()),
+            UnstartedBackend(std::sync::atomic::AtomicUsize::new(0)),
+            next_boot,
+        );
+        restarted.prepare_startup().await?;
+        let replay = restarted
+            .execute(KubeVirtExecutorRequestEnvelope {
+                fence,
+                request: KubeVirtExecutorRequest::Stop {
+                    plan: KubeVirtCleanupPlan {
+                        environment_id: authority.id,
+                        project_id: authority.project_id,
+                        namespace: format!("lw-env-{}", authority.id),
+                        virtual_machine_name: "runtime".into(),
+                        plan_sha256: Sha256Digest::of_bytes(b"shutdown-stop"),
+                    },
+                },
+            })
+            .await?;
+        assert!(matches!(
+            replay.response,
+            KubeVirtExecutorResponse::Failed {
+                failure: ProviderFailure {
+                    code: ProviderFailureCode::Unavailable,
+                    retryable: true
+                }
+            }
+        ));
+        assert_eq!(
+            restarted
+                .backend
+                .0
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "restart replays the persisted response without repeating the backend effect"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unknown_restart_is_not_automatically_retryable_after_boot_loss()
+    -> Result<(), Box<dyn std::error::Error>> {
+        Box::pin(recovery_across_attempts(ReconcileAction::Restart)).await
+    }
+
+    #[tokio::test]
+    async fn unknown_apply_retries_with_new_request_id_and_fences_old_owner()
+    -> Result<(), Box<dyn std::error::Error>> {
+        Box::pin(recovery_across_attempts(ReconcileAction::Provision)).await
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the PG regression follows one accepted external effect through boot loss, the real reconcile failure transition, and a second attempt"
+    )]
+    async fn recovery_across_attempts(
+        action: ReconcileAction,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::{
+            PgEnvironmentStore, ProviderRegistry, ReconcileWorker, ReconcileWorkerOutcome,
+            Reconciler,
+        };
+        use contracts::environment::{EnvironmentOperationKind, ObservedEnvironmentState};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct AcceptedExternalEffect {
+            calls: Arc<AtomicUsize>,
+            objects: Arc<Mutex<std::collections::BTreeSet<EnvironmentId>>>,
+            entered: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait]
+        impl KubeVirtExecutorBackend for AcceptedExternalEffect {
+            async fn execute(
+                &self,
+                fence: &KubeVirtBackendFence,
+                _: &KubeVirtExecutorRequest,
+                _: &KubeVirtExecutionPermit,
+            ) -> KubeVirtExecutorResponse {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                // External Kubernetes Apply converges on the same named object; Restart does
+                // not have this property and every invocation counts as another side effect.
+                self.objects
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(fence.environment_id);
+                if call == 0 {
+                    self.entered.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                KubeVirtExecutorResponse::Failed {
+                    failure: unavailable(),
+                }
+            }
+        }
+        let initial = crate::test_support::requested_instance();
+        let mut fence = KubeVirtBackendFence::for_action(&initial, action)
+            .map_err(|error| format!("{error:?}"))?;
+        let (_postgres, mut permit) = crate::kubevirt_execution::test_permit(&mut fence).await?;
+        let store = PgEnvironmentStore::new(permit.pool.clone());
+        let now = store.current_time().await?;
+        let mut authority = store.load(fence.environment_id).await?;
+        authority.operation.kind = if action == ReconcileAction::Restart {
+            EnvironmentOperationKind::Restart
+        } else {
+            EnvironmentOperationKind::Create
+        };
+        authority.operation.preserve_mutable_disk = action == ReconcileAction::Restart;
+        authority.observed_state = ObservedEnvironmentState::Provisioning;
+        authority.operation.deadline_at =
+            UtcTimestamp::from_utc(now.get() + time::Duration::minutes(1))?;
+        authority.eligibility_expires_at = Some(authority.operation.deadline_at);
+        authority.operation.access_revocation_revision = Some(contracts::Revision::new(1)?);
+        authority.validate()?;
+        // Persist the fixture at the real interruption boundary: the operation was accepted
+        // and the native admission is durable, but the external effect has no terminal result.
+        sqlx::query("UPDATE environment.environment_instances SET observed_state='provisioning',contract=$2,eligibility_expires_at=$3 WHERE environment_id=$1")
+            .bind(authority.id.as_uuid()).bind(serde_json::to_value(&authority)?).bind(authority.eligibility_expires_at.map(UtcTimestamp::get)).execute(&permit.pool).await?;
+        sqlx::query("UPDATE environment.environment_operations SET operation_kind=$2,deadline_at=$3,contract=$4 WHERE operation_id=$1")
+            .bind(authority.operation.id.as_uuid()).bind(if action == ReconcileAction::Restart { "restart" } else { "create" }).bind(authority.operation.deadline_at.get()).bind(serde_json::to_value(&authority.operation)?).execute(&permit.pool).await?;
+        fence.deadline_at = authority.operation.deadline_at;
+        let plan = crate::test_support::kubevirt_executor_plan(authority.id);
+        let request = if action == ReconcileAction::Restart {
+            KubeVirtExecutorRequest::Restart { plan }
+        } else {
+            KubeVirtExecutorRequest::Apply { plan }
+        };
+        let fence = bind_kubevirt_executor_request(fence, &request)
+            .map_err(|error| format!("{error:?}"))?;
+        permit.fence = fence.clone();
+        sqlx::query("UPDATE environment.kubevirt_executor_fences SET last_action=$2,last_request_id=$3,deadline_at=$4 WHERE environment_id=$1")
+            .bind(authority.id.as_uuid()).bind(kubevirt_action_name(action)).bind(fence.request_id.to_string()).bind(fence.deadline_at.get()).execute(&permit.pool).await?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let objects = Arc::new(Mutex::new(std::collections::BTreeSet::new()));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let executor = Arc::new(FencedKubeVirtExecutor::new(
+            PgKubeVirtExecutorFenceStore::new(permit.pool.clone()),
+            AcceptedExternalEffect {
+                calls: calls.clone(),
+                objects: objects.clone(),
+                entered: entered.clone(),
+            },
+            permit.instance.clone(),
+        ));
+        let envelope = KubeVirtExecutorRequestEnvelope {
+            fence: fence.clone(),
+            request: request.clone(),
+        };
+        let mut active = tokio::task::JoinSet::new();
+        let old = executor.clone();
+        let old_permit = permit.clone();
+        let old_task =
+            active.spawn(async move { old.run_to_terminal(&envelope, &old_permit).await });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        old_task.abort();
+        assert!(
+            active
+                .join_next()
+                .await
+                .ok_or("old boot missing")?
+                .is_err_and(|error| error.is_cancelled())
+        );
+        let mut replacement = permit.instance.clone();
+        replacement.boot_token = Uuid::new_v4();
+        executor.store.recover_previous_boot(&replacement).await?;
+        let response: Value = sqlx::query_scalar("SELECT last_response FROM environment.kubevirt_executor_fences WHERE environment_id=$1").bind(authority.id.as_uuid()).fetch_one(&permit.pool).await?;
+        let KubeVirtExecutorResponse::Failed { failure } = serde_json::from_value(response)? else {
+            return Err("old boot did not retain an unknown outcome".into());
+        };
+        let lease = store
+            .claim_due("boot-recovery", Duration::from_secs(5))
+            .await?
+            .ok_or("reconcile operation not claimable")?;
+        let worker = ReconcileWorker::new(
+            store.clone(),
+            Reconciler::new(ProviderRegistry::default(), Duration::from_secs(1))?,
+            Duration::from_secs(5),
+            Duration::from_millis(1),
+        )?;
+        let retry_at = UtcTimestamp::from_utc(now.get() + time::Duration::milliseconds(1))?;
+        // This is the cross-attempt edge: apply_retry changes attempt and therefore request ID.
+        // A retryable unknown Restart would bypass a same-request replay check.
+        let possible_retry = crate::apply_retry(
+            &lease.instance,
+            lease.instance.operation.id,
+            "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
+            retry_at,
+        )?;
+        let next_fence = bind_kubevirt_executor_request(
+            KubeVirtBackendFence::for_action(&possible_retry, action)
+                .map_err(|error| format!("{error:?}"))?,
+            &request,
+        )
+        .map_err(|error| format!("{error:?}"))?;
+        assert_ne!(fence.request_id, next_fence.request_id);
+        let outcome = worker
+            .record_failure(&lease, crate::ReconcileError::Provider(failure), now)
+            .await?;
+        if matches!(outcome, ReconcileWorkerOutcome::RetryScheduled { .. }) {
+            let next = store.load(authority.id).await?;
+            let next_fence = bind_kubevirt_executor_request(
+                KubeVirtBackendFence::for_action(&next, action)
+                    .map_err(|error| format!("{error:?}"))?,
+                &request,
+            )
+            .map_err(|error| format!("{error:?}"))?;
+            assert_ne!(fence.request_id, next_fence.request_id);
+            let retry = KubeVirtExecutorRequestEnvelope {
+                fence: next_fence.clone(),
+                request,
+            };
+            assert!(matches!(
+                executor.store.admit(&retry, &replacement, Ok(())).await?,
+                KubeVirtExecutorAdmission::Execute
+            ));
+            let next_permit = executor
+                .store
+                .permit(next_fence.clone(), replacement.clone());
+            let response = executor.run_to_terminal(&retry, &next_permit).await;
+            executor
+                .store
+                .complete(next_fence, &response, &replacement)
+                .await?;
+            assert!(matches!(
+                executor
+                    .store
+                    .complete(fence.clone(), &response, &permit.instance)
+                    .await,
+                Err(KubeVirtExecutorFenceError::StaleGeneration)
+            ));
+        }
+        if action == ReconcileAction::Restart {
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "boot recovery must not cause a second external Restart across attempt/request IDs"
+            );
+            assert!(
+                matches!(outcome, ReconcileWorkerOutcome::Failed { ref diagnostic_code } if diagnostic_code == contracts::diagnostic::ENVIRONMENT_RESTART_OUTCOME_UNKNOWN)
+            );
+            assert!(matches!(
+                worker
+                    .run_once("next-poll", store.current_time().await?)
+                    .await?,
+                ReconcileWorkerOutcome::Idle
+            ));
+            let snapshot = store
+                .get_operation(authority.id, authority.owner_id, authority.operation.id)
+                .await?
+                .snapshot;
+            assert!(
+                snapshot.retry_eligible,
+                "the user must retain the explicit Recover entrypoint"
+            );
+            assert_eq!(
+                snapshot
+                    .diagnostic_code
+                    .as_ref()
+                    .map(contracts::DiagnosticCode::as_str),
+                Some(contracts::diagnostic::ENVIRONMENT_RESTART_OUTCOME_UNKNOWN)
+            );
+            let event_diagnostic: Option<String> = sqlx::query_scalar("SELECT payload->'data'->>'diagnosticCode' FROM environment.outbox_events WHERE aggregate_id=$1 ORDER BY aggregate_sequence DESC LIMIT 1")
+                .bind(authority.id.as_uuid()).fetch_one(&permit.pool).await?;
+            assert_eq!(
+                event_diagnostic.as_deref(),
+                Some(contracts::diagnostic::ENVIRONMENT_RESTART_OUTCOME_UNKNOWN),
+                "REST and event consumers must receive the same stable reason code"
+            );
+        } else {
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                2,
+                "an idempotent Apply must remain eligible for a fenced retry"
+            );
+            assert!(matches!(
+                outcome,
+                ReconcileWorkerOutcome::RetryScheduled { attempt: 2 }
+            ));
+            assert_eq!(
+                objects
+                    .lock()
+                    .map_err(|_| "external object fixture poisoned")?
+                    .len(),
+                1,
+                "Apply retry converges on the same external object rather than creating another"
+            );
         }
         Ok(())
     }

@@ -19,10 +19,30 @@ Project 为 Work 和资源费用的必选归属，Course 只表达教学关联�
 
 Resource 的 request/claim/lease 锁事务在返回正常拒绝、快照解码错误或数据库错误之前显式等待回滚，避免 `SKIP LOCKED` 扫描器在后台连接归还尚未完成时误判无可处理条目。成功与幂等重放等待提交；审批已到期这类需要先持久化状态再报告拒绝的路径仍先提交。回滚失败时保留原操作错误的诊断码和可重试语义，另行记录不含 SQL 参数或 Secret 的回滚失败告警，不声称清理已成功。回滚失败或调用被取消时仍由 SQLx 的 Drop/异步归还兜底；连接只在回滚刷新成功后重新入池，不把后台排空等同于方法已等待锁释放。
 
-Resource Outbox 用短数据库语句领取带 UUID 的发布租约，释放连接后再等待 JetStream 应答。租约期限为两段配置的网络超时加一秒；进程退出后，其他 worker 在数据库期限到达时接管。收到成功应答后，发布者按原 token 与事件身份条件标记完成。旧发布者不能清除新租约；其他发布者已完成同一事件时安全收敛。传输失败可提前释放自己的租约，数据库不可用或调用取消则等待租约到期。慢事件不占数据库连接或行锁，其他 worker 可以领取后续事件。
+Resource 与 Environment Outbox 用短数据库语句领取带 UUID 的持久发布租约，语句完成并归还连接后才等待真实 JetStream PubAck，不把应答等待放在事务或行锁内。Resource 租约期限为两段配置的网络超时加一秒；Environment 将整个发送及应答等待限制在一次配置超时内，租约期限为该超时加一秒。期限使用数据库时钟。进程退出后，其他 worker 在数据库期限到达时接管，也可绕过仍被领取的慢事件继续处理后续事件。
+
+发布者只有收到成功应答后，才按领取 token、event ID、subject、event type、完整 payload 及其 SHA-256 条件标记完成；单独匹配 ID 或 hash 不足以完成事件。迟到应答不能完成已被接管的未完成事件，旧 owner 的失败清理也不能清除新 claim。其他发布者已完成完全相同的事件时，迟到 owner 安全收敛。传输或标记失败会尝试有界释放自己的 claim；数据库不可用或 future 被取消时，保留持久租约等待到期。事务错误不留下一个等待网络的事务来延长锁生命周期。
 
 应答丢失、标记失败或过期接管可能重复发送原 event ID、内容、sequence 和 `Nats-Msg-Id`。JetStream 的有限去重窗口只是优化，消费者仍须在业务事务中按事件身份防重，并处理旧 sequence 与缺口；不能依赖精确一次投递。
 
-发布租约使用 Resource `0023` 迁移，按 catalog 在 `0001–0022` 后顺序应用。服务代码回滚可保留新增的可空列和索引以及 catalog/history 条目；已有未发布事件不删除，旧 dispatcher 忽略租约后可能重复发送。
+发布租约使用 Resource `0023` 与 Environment `0009` 迁移，分别按 catalog 在既有连续迁移后顺序应用。服务启动前先运行迁移；Environment 会检查 claim 列是否存在。应用代码回滚仍保留新增可空列、索引和 catalog/history 条目，不执行破坏性 down；旧 dispatcher 不识别租约，混跑可能重复发送并重新引入长事务，不把回退代码作为恢复步骤。
+
+## 进程停止与接管
+
+六服务及 Environment/Agent 的常驻 executor 角色复用同一进程壳。SIGINT/SIGTERM 首先置位不可逆的 shutdown 状态，HTTP 停止接收新连接，共享健康端点的就绪检查不再报告 ready，真实轮询 worker 在下一次领取前检查 shutdown。空闲消息订阅停止取下一条；已经取得的消息、任务或发布应答可以继续收尾。TLS、容器 executor 与构建 executor 将活动连接/请求归入所属任务集合，进程不再以退出一个 HTTP future 的方式遗留后台请求。
+
+进程最多给协作收尾 20 秒。超过期限会丢弃未完成 future 并取消其所属子任务，包括租约 heartbeat；不会把未确认任务写成成功，也不会主动清除仍需 fencing 的发布 claim。后继进程根据数据库 lease/claim 期限恢复同一持久任务或 event ID，沿用已有 attempt、UID 与幂等条件；停止进程不等于取消用户任务或释放资源/费用。配置部署的 termination grace 时，应留出至少 20 秒及进程退出余量。
+
+进程停止与用户取消分开处理。KubeVirt executor 在信号到达后只停止订阅，已接收的 VM 操作继续等待真实结果；不因进程停止写入不可重试的 `Cancelled`。期限到达时只放弃进程所持的 future。经启动检查确认同一隔离容器的新 PID1 后，只按原记录 `last_action` 分类：幂等 Apply/Observe/Start/Stop/DeleteNamespace 可以走 fenced 重试；非幂等 Restart 的结果未知时返回 `Unavailable/retryable=false`，领域层持久化 `LW_ENVIRONMENT_RESTART_OUTCOME_UNKNOWN`，不产生跨 attempt 的第二次 Restart，并保留原有显式 Recover 入口。已经达到业务期限的记录仍是超时；不同 Pod 不能仅因旧 Pod 不可见就声称其执行已结束。用户取消仍由权威操作状态和原有 permit 检查决定。
+
+停领检查覆盖每个新工作边界，而不只覆盖轮询入口。Resource 在 GPU 外部观察返回后、领取下一项容量或清理工作之前重新检查 shutdown；Agent sandbox cleanup 在下一次扫描和下一条批次条目开始前检查。已领取条目的正常收尾不会因此被当作用户取消。
+
+Environment 的 `run_backend` 及 Agent 模型网关的转发、读取和结算 continuation 归属具体 runtime 的 `JoinSet`，不归属最初的 HTTP handler。HTTP 已返回或客户端已断开，进程仍等待这些任务及其已接受的子任务；20 秒期限到达后由 runtime 所持 guard 终止任务集合，保留原有执行回执、未知用量和幂等记录供恢复。模型调用结果未知时不伪造零用量或重新发送上游请求。
+
+Control 的通知投影与可选 SMTP worker 消费同一个 `service_runtime` shutdown receiver，不另注册信号处理器，也不另起排空计时。已取得的通知事件完成原 PostgreSQL 事务和 JetStream ACK 后退出；未处理的事件由同一持久 consumer 重投，`notification_inbox` 仍按原 event ID 防重。SMTP 已领取的发送在共享 20 秒收尾窗口内完成，停领检查同时覆盖过期记录扫描结束后的下一条邮件领取。
+
+SMTP 不采用 Outbox 的可重复发送语义。进程丢失、断连或发送结果不确定时，过期 `sending` 归为 `delivery_unknown`，不恢复成可重发任务；只有既有规则允许的明确临时拒绝可以重试。重启不会再次发送结果未知的邮件，也不会由通知 worker 重复触发资源、租约或资金操作。
+
+恢复时先恢复 PostgreSQL 与 NATS 可达性，再启动替代 worker；不要删除待发布行或手工清空 claim。Outbox 传输故障由下一轮重试，数据库时钟上的到期租约允许接管；无法校验的事件身份/契约仍明确报错，不伪造发布成功。重复副作用的防护依赖领域条件更新和消费者业务事务内防重，而不是进程排空或消息代理的精确一次保证。
 
 空数据库通过显式迁移初始化。服务启动仅校验配置和所需结构，不隐式重建旧 Schema。本次无外部消费者允许全仓接口硬切，但不形成永久数据删除政策；远端数据切换不属于本轮实施。

@@ -5,6 +5,7 @@
 )]
 
 mod support;
+use support::kubevirt_executor_plan;
 #[path = "cases/template_upgrade.rs"]
 mod template_upgrade_cases;
 
@@ -2583,34 +2584,6 @@ fn executor_instance() -> KubeVirtExecutionInstance {
     }
 }
 
-fn kubevirt_executor_plan(environment_id: EnvironmentId) -> KubeVirtResourcePlan {
-    KubeVirtResourcePlan {
-        environment_id,
-        namespace: format!("lw-env-{environment_id}"),
-        virtual_machine_name: "runtime".to_owned(),
-        data_volume_name: "rootdisk".to_owned(),
-        base_disk: VirtualMachineBaseDisk {
-            binding: "ubuntu-24.04-v1".to_owned(),
-            source_registry_digest: concat!(
-                "docker://quay.io/containerdisks/ubuntu@",
-                "sha256:d28194a16351320fa9a093e18233033508a745566eb8ba3b309c32924bf155a5"
-            )
-            .to_owned(),
-            capacity_bytes: 10_737_418_240,
-        },
-        base_disk_format: VirtualMachineDiskFormat::Qcow2,
-        base_disk_identity: KubeVirtBaseDiskIdentity::ReviewedDiskSha256,
-        base_disk_data_source_namespace: "labweaver-system".to_owned(),
-        base_disk_data_source_name: "ubuntu-lab-base-v1".to_owned(),
-        base_disk_disk_sha256: "ffe6203da54deeb6db5d2a98a83f9ec8e55f149d3f7ba622e1abe5fa966ee3d6"
-            .to_owned(),
-        storage_class_name: "local-path".to_owned(),
-        vm_vgpu_licensing: None,
-        resources: Vec::new(),
-        plan_sha256: Sha256Digest::of_bytes(b"vm-plan"),
-    }
-}
-
 fn kubevirt_executor_envelope(
     plan: KubeVirtResourcePlan,
     operation_id: OperationId,
@@ -3521,8 +3494,8 @@ async fn kubevirt_incarnation_recovery_and_terminal_commit_retry_do_not_repeat_e
         replacement.execute(request).await?.response,
         KubeVirtExecutorResponse::Failed {
             failure: ProviderFailure {
-                code: ProviderFailureCode::Cancelled,
-                ..
+                code: ProviderFailureCode::Unavailable,
+                retryable: true,
             }
         }
     ));
@@ -3604,7 +3577,7 @@ async fn kubevirt_incarnation_recovery_and_terminal_commit_retry_do_not_repeat_e
 }
 
 #[tokio::test]
-async fn kubevirt_server_shutdown_drops_and_commits_accepted_backend_before_exit()
+async fn kubevirt_server_shutdown_preserves_accepted_backend_until_owner_abandonment()
 -> Result<(), Box<dyn std::error::Error>> {
     use testcontainers::{
         GenericImage,
@@ -3630,6 +3603,7 @@ async fn kubevirt_server_shutdown_drops_and_commits_accepted_backend_before_exit
     let entered = Arc::new(Notify::new());
     let dropped = Arc::new(AtomicBool::new(false));
     let calls = Arc::new(AtomicUsize::new(0));
+    let instance = executor_instance();
     let executor = FencedKubeVirtExecutor::new(
         PgKubeVirtExecutorFenceStore::new(pool.clone()),
         BlockingKubeVirtExecutor {
@@ -3638,7 +3612,7 @@ async fn kubevirt_server_shutdown_drops_and_commits_accepted_backend_before_exit
             dropped: Arc::clone(&dropped),
             observed_at: now,
         },
-        executor_instance(),
+        instance.clone(),
     );
     executor.prepare_startup().await?;
     let nats = GenericImage::new("nats", "2.11.8-alpine")
@@ -3657,7 +3631,8 @@ async fn kubevirt_server_shutdown_drops_and_commits_accepted_backend_before_exit
         executor,
     )?;
     let (shutdown, receiver) = tokio::sync::watch::channel(false);
-    let task = tokio::spawn(async move { server.serve(receiver).await });
+    let mut servers = tokio::task::JoinSet::new();
+    let task = servers.spawn(async move { server.serve(receiver).await });
     // Subscription readiness is observed through NATS, not an arbitrary sleep.
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -3694,27 +3669,76 @@ async fn kubevirt_server_shutdown_drops_and_commits_accepted_backend_before_exit
     });
     tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
     shutdown.send_replace(true);
-    let response = request_task.await??;
-    let response: environment_service::KubeVirtExecutorResponseEnvelope =
-        serde_json::from_slice(&response.payload)?;
-    assert!(matches!(
-        response.response,
-        KubeVirtExecutorResponse::Failed {
-            failure: ProviderFailure {
-                code: ProviderFailureCode::Cancelled,
-                ..
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while !task.is_finished() {
+                tokio::task::yield_now().await;
             }
-        }
-    ));
-    tokio::time::timeout(Duration::from_secs(2), task).await???;
-    assert!(dropped.load(Ordering::SeqCst));
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let terminal: serde_json::Value = sqlx::query_scalar(
+        })
+        .await
+        .is_err(),
+        "stop acquisition without cancelling an owned VM operation"
+    );
+    let pending: Option<serde_json::Value> = sqlx::query_scalar(
         "SELECT last_response FROM environment.kubevirt_executor_fences WHERE environment_id=$1",
     )
     .bind(authority.id.as_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(terminal["failure"]["code"], "cancelled");
+    assert!(pending.is_none());
+    // The process drain deadline abandons its JoinSet. It does not write user cancellation.
+    task.abort();
+    assert!(
+        servers
+            .join_next()
+            .await
+            .ok_or("server task missing")?
+            .is_err_and(|error| error.is_cancelled())
+    );
+    request_task.abort();
+    let _ = request_task.await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !dropped.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    let pending: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT last_response FROM environment.kubevirt_executor_fences WHERE environment_id=$1",
+    )
+    .bind(authority.id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        pending.is_none(),
+        "deadline abandonment must preserve the unfinished durable owner"
+    );
+    let mut replacement = instance;
+    replacement.boot_token = uuid::Uuid::new_v4();
+    let replacement = FencedKubeVirtExecutor::new(
+        PgKubeVirtExecutorFenceStore::new(pool.clone()),
+        BlockingKubeVirtExecutor {
+            calls: calls.clone(),
+            entered,
+            dropped,
+            observed_at: now,
+        },
+        replacement,
+    );
+    replacement.prepare_startup().await?;
+    assert!(matches!(
+        replacement.execute(request).await?.response,
+        KubeVirtExecutorResponse::Failed {
+            failure: ProviderFailure {
+                code: ProviderFailureCode::Unavailable,
+                retryable: true
+            }
+        }
+    ));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "recovery must not repeat an uncertain backend effect"
+    );
     Ok(())
 }

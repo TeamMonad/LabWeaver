@@ -167,7 +167,7 @@ async fn jetstream_command_outbox_and_provider_rpc_use_durable_identities()
     );
     let outbox = OutboxDispatcher::new(
         pool,
-        JetStreamEventPublisher::new(client.clone()),
+        JetStreamEventPublisher::new(client.clone(), Duration::from_secs(2)),
         Duration::from_secs(2),
     )?;
     assert!(matches!(

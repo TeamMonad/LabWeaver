@@ -54,8 +54,7 @@ use time::OffsetDateTime;
 
 #[path = "../../http_transport.rs"]
 mod http_transport;
-#[path = "../../service_runtime.rs"]
-mod service_runtime;
+use agent_service::service_runtime;
 
 /// The only static model setting passed into a worker. Endpoint and credential are issued per attempt by the gateway.
 const REQUIRED_WORKER_ENVIRONMENT: [&str; 1] = ["ANTHROPIC_MODEL"];
@@ -282,11 +281,14 @@ async fn main() -> Result<(), StartupError> {
     if arguments.next().as_deref() != Some("--mode") || arguments.size_hint().0 != 1 {
         return Err(StartupError::Configuration);
     }
-    match arguments.next().as_deref() {
-        Some("agent-service") => Box::pin(run_agent_service()).await,
-        Some("build-executor") => Box::pin(run_build_executor()).await,
-        _ => Err(StartupError::Configuration),
-    }
+    service_runtime::supervise("agent-service", async {
+        match arguments.next().as_deref() {
+            Some("agent-service") => Box::pin(run_agent_service()).await,
+            Some("build-executor") => Box::pin(run_build_executor()).await,
+            _ => Err(StartupError::Configuration),
+        }
+    })
+    .await
 }
 
 #[allow(
@@ -497,6 +499,7 @@ async fn run_agent_service() -> Result<(), StartupError> {
         ModelInputAuthorizationClient::from_env(Arc::clone(&service_token_client))
             .map_err(|_| StartupError::Configuration)?;
     let gateway_state = GatewayState {
+        background: service_runtime::BackgroundTasks::default(),
         upstream: gateway_upstream,
         upstream_key: gateway_key,
         pool: store.pool().clone(),
@@ -565,29 +568,58 @@ async fn run_agent_service() -> Result<(), StartupError> {
         lease_duration: Duration::from_secs(deployment.track_lease_seconds),
         poll_interval: Duration::from_millis(deployment.poll_interval_milliseconds),
     };
-    tokio::select! {
-        result = http_transport::serve_tls(
-            listener,
-            with_service_auth(router(state), service_verifier),
-            tls,
-        ) => result?,
-        result = agent_service::model_gateway::serve(gateway_state, gateway_listener) => result?,
-        result = worker.run() => result?,
-        result = review_worker.run() => result?,
-        result = work_execution_worker.run() => result?,
-        result = platform_image_import_worker.run() => result.map_err(StartupError::PlatformImageImport)?,
-        result = retention_store.run_model_retention() => result?,
-        result = &mut sandbox_cleanup_worker => {
-            result.map_err(|_| StartupError::SandboxCleanupWorker)?;
-            return Err(StartupError::SandboxCleanupWorker);
+    tokio::try_join!(
+        async {
+            http_transport::serve_tls(
+                listener,
+                with_service_auth(router(state), service_verifier),
+                tls,
+            )
+            .await
+            .map_err(StartupError::from)
         },
-        result = build_command_loop(build_consumer, build_store) => result?,
-        result = build_worker_loop(
+        async {
+            agent_service::model_gateway::serve(gateway_state, gateway_listener)
+                .await
+                .map_err(StartupError::from)
+        },
+        worker.run(),
+        async { review_worker.run().await.map_err(StartupError::from) },
+        async {
+            work_execution_worker
+                .run()
+                .await
+                .map_err(StartupError::from)
+        },
+        async {
+            platform_image_import_worker
+                .run()
+                .await
+                .map_err(StartupError::PlatformImageImport)
+        },
+        async {
+            retention_store
+                .run_model_retention()
+                .await
+                .map_err(StartupError::from)
+        },
+        async {
+            (&mut sandbox_cleanup_worker)
+                .await
+                .map_err(|_| StartupError::SandboxCleanupWorker)?;
+            if service_runtime::is_stopping() {
+                Ok(())
+            } else {
+                Err(StartupError::SandboxCleanupWorker)
+            }
+        },
+        build_command_loop(build_consumer, build_store),
+        build_worker_loop(
             build_worker,
             Duration::from_millis(deployment.poll_interval_milliseconds)
-        ) => result?,
-        result = outbox_loop(outbox, outbox_poll) => result?,
-    }
+        ),
+        outbox_loop(outbox, outbox_poll),
+    )?;
     Ok(())
 }
 
@@ -838,6 +870,9 @@ async fn build_command_loop(
     store: PgBuildStore,
 ) -> Result<(), StartupError> {
     loop {
+        if service_runtime::is_stopping() {
+            return Ok(());
+        }
         let outcome = consumer.process_next(&store).await?;
         match outcome {
             agent_service::messaging::BuildConsumeOutcome::Applied => {
@@ -874,7 +909,9 @@ async fn build_worker_loop(
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        ticker.tick().await;
+        if !service_runtime::worker_tick(&mut ticker).await {
+            return Ok(());
+        }
         let outcome = worker.run_once(timestamp()?).await?;
         match outcome {
             agent_service::build_store::BuildWorkerOutcome::Idle => {
@@ -909,7 +946,9 @@ async fn outbox_loop(
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        ticker.tick().await;
+        if !service_runtime::worker_tick(&mut ticker).await {
+            return Ok(());
+        }
         let published = outbox.dispatch_once().await?;
         if published {
             tracing::debug!(event = "agent.outbox.published");
@@ -945,7 +984,9 @@ impl Worker {
             poll_interval = ?self.poll_interval,
         );
         loop {
-            ticker.tick().await;
+            if !service_runtime::worker_tick(&mut ticker).await {
+                return Ok(());
+            }
             if let Err(error) = self.tick().await {
                 // One reserved dispatch that fails outside the per-track failure
                 // boundary would otherwise end the worker without naming a

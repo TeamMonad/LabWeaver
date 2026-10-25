@@ -121,10 +121,22 @@ impl SmtpWorker {
     }
     /// Attempts SMTP at most once when delivery is uncertain. Only an explicit temporary rejection
     /// may retry; expired in-flight claims remain visible as unknown and are never resent.
-    pub async fn deliver_one(&self, pool: &PgPool) -> Result<bool, NotificationError> {
-        let claim = Uuid::now_v7();
+    pub async fn deliver_one(
+        &self,
+        pool: &PgPool,
+        shutdown: &tokio::sync::watch::Receiver<bool>,
+    ) -> Result<bool, NotificationError> {
+        if *shutdown.borrow() {
+            return Ok(false);
+        }
         sqlx::query("UPDATE control.notifications SET email_state='delivery_unknown',email_diagnostic='LW_NOTIFICATION_SMTP_DELIVERY_UNKNOWN',email_claim_id=NULL,email_next_at=NULL WHERE email_state='sending' AND email_next_at<=clock_timestamp()")
             .execute(pool).await?;
+        // Expiry recovery can wait on PostgreSQL. A signal received during that wait must
+        // stop acquisition before the next, independent claim statement starts.
+        if *shutdown.borrow() {
+            return Ok(false);
+        }
+        let claim = Uuid::now_v7();
         let row = sqlx::query("UPDATE control.notifications n SET email_state='sending',email_claim_id=$1,email_attempts=email_attempts+1,email_next_at=clock_timestamp()+interval '60 seconds' WHERE notification_id=(SELECT q.notification_id FROM control.notifications q WHERE NOT q.cancelled AND q.due_at<=clock_timestamp() AND (q.reminder_seconds<=0 OR q.deadline_at>clock_timestamp()) AND q.email_state IN ('pending','failed') AND q.email_attempts<5 AND q.email_next_at<=clock_timestamp() AND EXISTS(SELECT 1 FROM control.project_memberships m WHERE m.project_id=q.project_id AND m.actor_id=q.recipient_id AND m.state='active' AND (m.expires_at IS NULL OR m.expires_at>clock_timestamp())) AND (q.course_id IS NULL OR EXISTS(SELECT 1 FROM control.course_memberships cm WHERE cm.course_id=q.course_id AND cm.actor_id=q.recipient_id AND cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>clock_timestamp()))) ORDER BY q.email_next_at,q.ordinal FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING n.*")
             .bind(claim).fetch_optional(pool).await?;
         let Some(row) = row else {
@@ -202,7 +214,7 @@ impl SmtpWorker {
                     if changed.is_err() || *shutdown.borrow() { return Ok(()); }
                 }
                 _ = interval.tick() => {
-                    if let Err(error) = self.deliver_one(&pool).await { tracing::error!(diagnostic=%error,"notification email persistence unavailable"); }
+                    if let Err(error) = self.deliver_one(&pool, &shutdown).await { tracing::error!(diagnostic=%error,"notification email persistence unavailable"); }
                 }
             }
         }

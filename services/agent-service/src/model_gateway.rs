@@ -173,6 +173,7 @@ pub struct GatewayState {
     pub resource: ResourceClient,
     pub http: reqwest::Client,
     pub authorization: crate::model_input_authorization::GatewayInputAuthorization,
+    pub background: crate::service_runtime::BackgroundTasks,
 }
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ZeroSettlementReconciliation {
@@ -425,20 +426,29 @@ impl GatewayState {
     }
 }
 pub async fn serve(state: GatewayState, listener: TcpListener) -> Result<(), std::io::Error> {
-    let server = async { axum::serve(listener, state.clone().router()).await };
+    let _background_guard = state.background.guard();
+    let server = async {
+        axum::serve(listener, state.clone().router())
+            .with_graceful_shutdown(crate::service_runtime::wait_for_shutdown())
+            .await
+    };
     let reconciliation = async {
         let mut interval = tokio::time::interval(Duration::from_secs(10));
         loop {
-            interval.tick().await;
+            if !crate::service_runtime::worker_tick(&mut interval).await {
+                return;
+            }
             if let Err(error) = state.reconcile_pending_zero_settlements().await {
                 tracing::warn!(event="agent.model.zero_settlement_pending",diagnostic_code=%error,"durable zero observation retained for reconciliation");
             }
         }
     };
-    tokio::select! {
-        result = server => result,
-        () = reconciliation => Err(std::io::Error::other("model settlement reconciliation ended")),
-    }
+    tokio::try_join!(server, async {
+        reconciliation.await;
+        Ok::<(), std::io::Error>(())
+    })?;
+    state.background.drain().await;
+    Ok(())
 }
 fn error_response(status: StatusCode, code: &'static str, message: &str) -> Response {
     (status,axum::Json(json!({"type":"error","error":{"type":"invalid_request_error","message":message},"lwCode":code}))).into_response()
@@ -615,7 +625,8 @@ async fn messages(
     }
     let (sender, receiver) = tokio::sync::oneshot::channel();
     // The task owns the irreversible request and settlement, independently of the HTTP handler.
-    tokio::spawn(async move {
+    let background = state.background.clone();
+    background.spawn(async move {
         let response = forward(
             state,
             headers,
@@ -688,7 +699,8 @@ async fn forward(
         .to_owned();
     let (sender, receiver) = mpsc::channel::<Result<Bytes, std::io::Error>>(8);
     let sse = content_type.contains("text/event-stream");
-    tokio::spawn(async move {
+    let background = state.background.clone();
+    background.spawn(async move {
         let mut stream = upstream.bytes_stream();
         let mut observation = UsageObservation::new(sse);
         loop {
@@ -913,8 +925,7 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     hash.finalize().into()
 }
 #[cfg(test)]
-#[path = "../tests/support/build_billing.rs"]
-mod build_billing;
+use crate::build_billing;
 #[cfg(test)]
 #[path = "../tests/support/model_authorization.rs"]
 mod model_authorization;
@@ -1089,6 +1100,7 @@ async fn exercise_zero_reconciliation_progress(
         .await;
     });
     let state = GatewayState {
+        background: crate::service_runtime::BackgroundTasks::default(),
         upstream,
         upstream_key: "provider-key".to_owned(),
         issuer: ScopedTokenIssuer::new(vec![9; 32], Duration::from_hours(24)).ok_or("signer")?,
@@ -1261,6 +1273,7 @@ async fn exercise_zero_settlement(fail_first: bool) -> Result<(), Box<dyn std::e
     );
     let claims = issuer.validate(&token).map_err(std::io::Error::other)?;
     let state = Arc::new(GatewayState {
+        background: crate::service_runtime::BackgroundTasks::default(),
         upstream,
         upstream_key: "provider-key".to_owned(),
         issuer,

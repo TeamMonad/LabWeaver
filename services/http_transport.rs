@@ -81,7 +81,7 @@ pub fn server_config(
     Ok(Arc::new(config))
 }
 
-/// Serves an Axum router over one-way TLS until the listener fails.
+/// Stops accepting on process shutdown and drains already accepted HTTP connections.
 ///
 /// # Errors
 ///
@@ -94,8 +94,15 @@ pub async fn serve_tls(
     config: Arc<ServerConfig>,
 ) -> Result<(), HttpTransportError> {
     let acceptor = TlsAcceptor::from(config);
+    let mut connections = tokio::task::JoinSet::new();
     loop {
-        let (stream, peer) = match listener.accept().await {
+        let accepted = tokio::select! {
+            biased;
+            () = crate::service_runtime::wait_for_shutdown() => break,
+            _ = connections.join_next(), if !connections.is_empty() => continue,
+            accepted = listener.accept() => accepted,
+        };
+        let (stream, peer) = match accepted {
             Ok(connection) => connection,
             Err(error) => {
                 tracing::error!(
@@ -113,7 +120,7 @@ pub async fn serve_tls(
         };
         let acceptor = acceptor.clone();
         let router = router.clone();
-        tokio::spawn(async move {
+        connections.spawn(async move {
             let stream =
                 match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
                     Ok(Ok(stream)) => stream,
@@ -147,7 +154,15 @@ pub async fn serve_tls(
             let connection = Builder::new(TokioExecutor::new())
                 .serve_connection_with_upgrades(io, service)
                 .into_owned();
-            if let Err(error) = connection.await {
+            tokio::pin!(connection);
+            let result = tokio::select! {
+                result = &mut connection => result,
+                () = crate::service_runtime::wait_for_shutdown() => {
+                    connection.as_mut().graceful_shutdown();
+                    connection.await
+                }
+            };
+            if let Err(error) = result {
                 tracing::warn!(
                     schema = telemetry::LOG_SCHEMA,
                     event = "http.tls.connection_failed",
@@ -160,6 +175,8 @@ pub async fn serve_tls(
             }
         });
     }
+    while connections.join_next().await.is_some() {}
+    Ok(())
 }
 
 #[cfg(test)]

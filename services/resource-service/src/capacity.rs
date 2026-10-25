@@ -1025,25 +1025,46 @@ pub struct CapacityReconcileWorker {
 impl CapacityReconcileWorker {
     /// Reconciles due capacity and cleanup work. A Task target is deliberately left to the
     /// Evaluation owner API after it has claimed the durable reservation.
-    pub async fn reconcile_once(&self) -> Result<bool, crate::store::ResourceStoreError> {
+    pub async fn reconcile_once(
+        &self,
+        shutdown: &watch::Receiver<bool>,
+    ) -> Result<bool, crate::store::ResourceStoreError> {
         let mut did_work = false;
-        if self.reconcile_gpu_observations().await? {
+        if *shutdown.borrow() {
+            return Ok(did_work);
+        }
+        if self.reconcile_gpu_observations(shutdown).await? {
             did_work = true;
+        }
+        if *shutdown.borrow() {
+            return Ok(did_work);
         }
         if let Some(item) = self.store.claim_next_capacity_shell().await? {
             did_work = true;
             self.reconcile_provisioning(item).await?;
         }
+        if *shutdown.borrow() {
+            return Ok(did_work);
+        }
         if self.reconcile_handoff().await? {
             did_work = true;
+        }
+        if *shutdown.borrow() {
+            return Ok(did_work);
         }
         if self.reconcile_lease_sync().await? {
             did_work = true;
         }
+        if *shutdown.borrow() {
+            return Ok(did_work);
+        }
         if self.reconcile_lease_cleanup().await? {
             did_work = true;
         }
-        if self.reconcile_active_environment_cleanup().await? {
+        if *shutdown.borrow() {
+            return Ok(did_work);
+        }
+        if self.reconcile_active_environment_cleanup(shutdown).await? {
             did_work = true;
         }
         Ok(did_work)
@@ -1051,10 +1072,14 @@ impl CapacityReconcileWorker {
 
     async fn reconcile_active_environment_cleanup(
         &self,
+        shutdown: &watch::Receiver<bool>,
     ) -> Result<bool, crate::store::ResourceStoreError> {
         let after = *self.active_cleanup_cursor.lock().await;
+        if *shutdown.borrow() {
+            return Ok(false);
+        }
         let mut item = self.store.next_active_environment_cleanup(after).await?;
-        if item.is_none() && after.is_some() {
+        if item.is_none() && after.is_some() && !*shutdown.borrow() {
             item = self.store.next_active_environment_cleanup(None).await?;
         }
         let Some(item) = item else {
@@ -1099,7 +1124,10 @@ impl CapacityReconcileWorker {
         Ok(true)
     }
 
-    async fn reconcile_gpu_observations(&self) -> Result<bool, crate::store::ResourceStoreError> {
+    async fn reconcile_gpu_observations(
+        &self,
+        shutdown: &watch::Receiver<bool>,
+    ) -> Result<bool, crate::store::ResourceStoreError> {
         let entries = self.store.list_gpu_catalog().await?;
         let mut by_provider = BTreeMap::<String, Vec<contracts::resource::GpuCatalogEntry>>::new();
         for entry in entries.into_iter().filter(|entry| entry.active) {
@@ -1114,6 +1142,9 @@ impl CapacityReconcileWorker {
         let active_reservations = self.store.list_active_gpu_reservations().await?;
         let mut did_work = false;
         for (provider_binding, entries) in by_provider {
+            if *shutdown.borrow() {
+                return Ok(did_work);
+            }
             let Some(observer) = self.gpu_observers.get(&provider_binding) else {
                 let error = CapacityProviderError::ObservationProviderMissing;
                 tracing::error!(
@@ -1512,12 +1543,16 @@ impl CapacityReconcileWorker {
     ) -> Result<(), crate::store::ResourceStoreError> {
         let mut interval = tokio::time::interval(self.poll_interval);
         loop {
+            if *shutdown.borrow() {
+                return Ok(());
+            }
             tokio::select! {
+                biased;
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() { return Ok(()); }
                 }
                 _ = interval.tick() => {
-                    match self.reconcile_once().await {
+                    match self.reconcile_once(&shutdown).await {
                         Ok(_) => {}
                         Err(error) if crate::store::is_retryable_database_error(&error) => {
                             let safe_detail = crate::store::resource_error_safe_detail(&error);
@@ -1815,6 +1850,150 @@ mod tests {
             current,
             contracts::Revision::new(2)?,
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one real process regression keeps the external observer gate and PostgreSQL acquisition witness together"
+    )]
+    async fn shutdown_during_gpu_observation_does_not_enter_capacity_claim_scan()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use persistence_sqlx::{Domain, MigrationCatalog};
+        use testcontainers::{ImageExt, runners::AsyncRunner};
+        use testcontainers_modules::postgres::Postgres;
+        if std::env::var_os("LW_CAPACITY_DRAIN_HELPER").is_none() {
+            let output = tokio::time::timeout(Duration::from_secs(90), tokio::process::Command::new(std::env::current_exe()?)
+                .args(["--exact", "capacity::tests::shutdown_during_gpu_observation_does_not_enter_capacity_claim_scan", "--nocapture"])
+                .env("LW_CAPACITY_DRAIN_HELPER", "1").kill_on_drop(true).output()).await??;
+            assert!(
+                output.status.success(),
+                "capacity process shutdown regression failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return Ok(());
+        }
+        let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+        let pool = sqlx::PgPool::connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            postgres.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+        let catalog = MigrationCatalog::load(&root.join("catalog.yaml"))?;
+        let mut connection = pool.acquire().await?;
+        sqlx::raw_sql("CREATE SCHEMA resource; SET search_path TO resource,pg_catalog")
+            .execute(&mut *connection)
+            .await?;
+        for migration in &catalog
+            .domains
+            .iter()
+            .find(|domain| domain.name == Domain::Resource)
+            .ok_or("resource catalog")?
+            .migrations
+        {
+            sqlx::raw_sql(sqlx::AssertSqlSafe(MigrationCatalog::read_verified_sql(
+                &root, migration,
+            )?))
+            .execute(&mut *connection)
+            .await?;
+        }
+        sqlx::query("RESET search_path")
+            .execute(&mut *connection)
+            .await?;
+        drop(connection);
+        let store = crate::store::PgResourceStore::new(pool.clone());
+        store
+            .seed_gpu_catalog(&[GpuCatalogSeed {
+                class: "test-gpu".into(),
+                mode: GpuAllocationMode::Exclusive,
+                provider_binding: "test-provider".into(),
+                capacity_units: 1,
+                allocation_binding: "nvidia.com/gpu".into(),
+            }])
+            .await?;
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let resume = std::sync::Arc::new(tokio::sync::Notify::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let base = format!("http://{}", listener.local_addr()?);
+        let issuer = base.clone();
+        let app = axum::Router::new()
+            .route("/.well-known/openid-configuration", axum::routing::get(move || { let issuer=issuer.clone(); async move { axum::Json(json!({"issuer":format!("{issuer}/"),"authorization_endpoint":format!("{issuer}/authorize"),"token_endpoint":format!("{issuer}/token"),"jwks_uri":format!("{issuer}/keys"),"response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]})) } }))
+            .route("/keys", axum::routing::get(|| async { axum::Json(json!({"keys":[]})) }))
+            .route("/api/v1/nodes", axum::routing::get({ let entered=entered.clone(); let resume=resume.clone(); move || { let entered=entered.clone(); let resume=resume.clone(); async move { entered.notify_one(); resume.notified().await; axum::Json(json!({"items":[]})) } } }))
+            .route("/api/v1/pods", axum::routing::get(|| async { axum::Json(json!({"items":[]})) }));
+        let mut server_tasks = tokio::task::JoinSet::new();
+        server_tasks.spawn(async move { axum::serve(listener, app).await });
+        let client = Client::builder().no_proxy().build()?;
+        let tokens = ServiceTokenClient::discover(
+            auth::ServiceTokenClientConfig::new(
+                &base,
+                "unused-observer-test".into(),
+                "unused".into(),
+                "environment".into(),
+                std::collections::BTreeSet::new(),
+                1,
+                auth::TransportSecurityMode::InsecureTestOnly,
+            )?,
+            client.clone(),
+        )
+        .await?;
+        let token_file = tempfile::NamedTempFile::new()?;
+        std::fs::write(token_file.path(), "external-kubernetes-fixture-token")?;
+        let observer = KubernetesGpuCapacityObserver {
+            provider_binding: "test-provider".into(),
+            api_server: format!("{base}/").parse()?,
+            client: client.clone(),
+            token_file: token_file.path().to_owned(),
+            observation_ttl: Duration::from_secs(10),
+            max_nodes: 10,
+            max_pods: 10,
+        };
+        let worker = CapacityReconcileWorker {
+            store,
+            environment_handoff: EnvironmentHandoffClient {
+                base_uri: format!("{base}/").parse()?,
+                client,
+                token_client: tokens,
+                system_actor_id: contracts::ActorId::new(),
+            },
+            gpu_observers: BTreeMap::from([("test-provider".into(), observer)]),
+            poll_interval: Duration::from_millis(100),
+            active_cleanup_cursor: tokio::sync::Mutex::new(None),
+        };
+        let shutdown = crate::service_runtime::subscribe_shutdown();
+        let mut workers = tokio::task::JoinSet::new();
+        workers.spawn(crate::service_runtime::supervise(
+            "capacity-test",
+            async move { worker.run(shutdown).await },
+        ));
+        tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
+        // The exclusive table lock is a deterministic witness: entering the real claim scan
+        // after the external observer returns would block, even with an empty task queue.
+        let mut barrier = pool.begin().await?;
+        sqlx::query("LOCK TABLE resource.capacity_claims IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *barrier)
+            .await?;
+        assert!(
+            tokio::process::Command::new("kill")
+                .args(["-TERM", &std::process::id().to_string()])
+                .status()
+                .await?
+                .success()
+        );
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            crate::service_runtime::wait_for_shutdown(),
+        )
+        .await?;
+        resume.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(1), workers.join_next()).await;
+        barrier.rollback().await?;
+        result
+            .map_err(|_| "shutdown allowed a new capacity claim after observer I/O")?
+            .ok_or("worker missing")???;
         Ok(())
     }
 }

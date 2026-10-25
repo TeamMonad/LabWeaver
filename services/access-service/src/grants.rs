@@ -1141,7 +1141,9 @@ pub async fn activation_loop(state: Arc<AppState>) -> Result<(), GrantRuntimeErr
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        ticker.tick().await;
+        if !crate::service_runtime::worker_tick(&mut ticker).await {
+            return Ok(());
+        }
         if let Err(error) = activate_one(&state).await {
             tracing::error!(
                 event = "access.grant.activation_failed",
@@ -1467,7 +1469,12 @@ pub async fn environment_revocation_loop(state: Arc<AppState>) -> Result<(), Gra
         .subscribe(ACCESS_REVOCATION_SUBJECT)
         .await
         .map_err(|_| GrantRuntimeError::NatsSubscribe)?;
-    while let Some(message) = subscriber.next().await {
+    loop {
+        let message = tokio::select! {
+            biased;
+            () = crate::service_runtime::wait_for_shutdown() => return Ok(()),
+            message = subscriber.next() => message.ok_or(GrantRuntimeError::NatsSubscribe)?,
+        };
         let Some(reply) = message.reply else {
             tracing::warn!(
                 event = "access.environment_revocation.request_rejected",
@@ -1511,7 +1518,6 @@ pub async fn environment_revocation_loop(state: Arc<AppState>) -> Result<(), Gra
             reason = request.reason.as_str()
         );
     }
-    Err(GrantRuntimeError::NatsSubscribe)
 }
 
 /// Consumes Environment state changes durably. A new authority revision makes
@@ -1530,7 +1536,12 @@ pub async fn environment_state_loop(state: Arc<AppState>) -> Result<(), GrantRun
         .messages()
         .await
         .map_err(|_| GrantRuntimeError::NatsSubscribe)?;
-    while let Some(message) = messages.next().await {
+    loop {
+        let message = tokio::select! {
+            biased;
+            () = crate::service_runtime::wait_for_shutdown() => return Ok(()),
+            message = messages.next() => message.ok_or(GrantRuntimeError::NatsSubscribe)?,
+        };
         let message = message.map_err(|_| GrantRuntimeError::NatsSubscribe)?;
         let event =
             contracts::parse_strict_json::<CloudEvent<contracts::events::EnvironmentEvent>>(
@@ -1557,7 +1568,6 @@ pub async fn environment_state_loop(state: Arc<AppState>) -> Result<(), GrantRun
             .await
             .map_err(|_| GrantRuntimeError::NatsSubscribe)?;
     }
-    Err(GrantRuntimeError::NatsSubscribe)
 }
 
 async fn apply_environment_state_event(
@@ -1700,7 +1710,9 @@ pub async fn maintenance_loop(state: Arc<AppState>) -> Result<(), GrantRuntimeEr
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        ticker.tick().await;
+        if !crate::service_runtime::worker_tick(&mut ticker).await {
+            return Ok(());
+        }
         expire_grants(&state).await?;
         console::reconcile_ineligible_bff_sessions(&state)
             .await
@@ -1729,10 +1741,15 @@ pub async fn outbox_loop(state: Arc<AppState>) -> Result<(), GrantRuntimeError> 
     let mut ticker = tokio::time::interval(Duration::from_millis(250));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        ticker.tick().await;
+        if !crate::service_runtime::worker_tick(&mut ticker).await {
+            return Ok(());
+        }
         let rows = sqlx::query("SELECT event_id,subject,payload FROM access.outbox_events WHERE published_at IS NULL ORDER BY created_at,event_id LIMIT 32")
             .fetch_all(&state.pool).await?;
         for row in rows {
+            if crate::service_runtime::is_stopping() {
+                return Ok(());
+            }
             let event_id: Uuid = row.get("event_id");
             let subject: String = row.get("subject");
             let payload: Value = row.get("payload");

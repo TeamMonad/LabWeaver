@@ -228,41 +228,47 @@ pub async fn run_evaluation_service() -> Result<(), EvaluationProcessError> {
         Duration::from_millis(configuration.execution.scheduler_poll_interval_milliseconds),
     )?;
     tracing::info!(event = "evaluation.service.started", %address);
-    tokio::select! {
-        result = crate::http_transport::serve_tls(listener, api, tls) => {
-            result.map_err(EvaluationProcessError::HttpTransport)?;
-        }
-        result = outbox_loop(dispatcher, poll_interval) => {
-            result?;
-        }
-        result = coordinator_loop(coordinator, coordinator_poll_interval) => {
-            result?;
-        }
-        result = evaluation_worker.run() => {
-            result.map_err(EvaluationProcessError::Execution)?;
-        }
-        () = orphan_reconciler.run(CancellationToken::new()) => {
-            tracing::info!(event = "evaluation.orphan.stopped");
-        }
-        result = resource_meter_loop(meter_control, meter_resource, meter_poll_interval) => {
-            result?;
-        }
-        result = submission_consumer_loop(
-            &mut submission_consumer,
-            submission_freeze_store,
-            submission_control_store,
-            submission_authoring_admission,
-        ) => {
-            result?;
-        }
-        result = shutdown_signal() => {
-            result?;
-        }
-    }
-    nats.drain()
-        .await
-        .map_err(|_| EvaluationProcessError::NatsDrain)?;
-    pool.close().await;
+    Box::pin(crate::service_runtime::supervise(
+        "evaluation-service",
+        async {
+            let orphan_shutdown = CancellationToken::new();
+            tokio::try_join!(
+                async {
+                    crate::http_transport::serve_tls(listener, api, tls)
+                        .await
+                        .map_err(EvaluationProcessError::HttpTransport)
+                },
+                outbox_loop(dispatcher, poll_interval),
+                coordinator_loop(coordinator, coordinator_poll_interval),
+                async {
+                    evaluation_worker
+                        .run()
+                        .await
+                        .map_err(EvaluationProcessError::Execution)
+                },
+                async {
+                    tokio::join!(orphan_reconciler.run(orphan_shutdown.clone()), async {
+                        crate::service_runtime::wait_for_shutdown().await;
+                        orphan_shutdown.cancel();
+                    },);
+                    Ok::<(), EvaluationProcessError>(())
+                },
+                resource_meter_loop(meter_control, meter_resource, meter_poll_interval),
+                submission_consumer_loop(
+                    &mut submission_consumer,
+                    submission_freeze_store,
+                    submission_control_store,
+                    submission_authoring_admission
+                ),
+            )?;
+            nats.drain()
+                .await
+                .map_err(|_| EvaluationProcessError::NatsDrain)?;
+            pool.close().await;
+            Ok::<(), EvaluationProcessError>(())
+        },
+    ))
+    .await?;
     tracing::info!(event = "evaluation.service.stopped");
     Ok(())
 }
@@ -274,7 +280,9 @@ async fn coordinator_loop(
     let mut interval = tokio::time::interval(poll_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        interval.tick().await;
+        if !crate::service_runtime::worker_tick(&mut interval).await {
+            return Ok(());
+        }
         coordinator.reconcile_once().await?;
     }
 }
@@ -284,6 +292,9 @@ async fn outbox_loop(
     poll_interval: Duration,
 ) -> Result<(), EvaluationProcessError> {
     loop {
+        if crate::service_runtime::is_stopping() {
+            return Ok(());
+        }
         if !dispatcher.dispatch_once().await? {
             tokio::time::sleep(poll_interval).await;
         }
@@ -296,6 +307,9 @@ async fn resource_meter_loop(
     poll_interval: Duration,
 ) -> Result<(), EvaluationProcessError> {
     loop {
+        if crate::service_runtime::is_stopping() {
+            return Ok(());
+        }
         let Some(delivery) = control.claim_resource_meter_delivery().await? else {
             tokio::time::sleep(poll_interval).await;
             continue;
@@ -337,6 +351,9 @@ async fn submission_consumer_loop(
     authoring: AuthoringAdmissionClient,
 ) -> Result<(), EvaluationProcessError> {
     loop {
+        if crate::service_runtime::is_stopping() {
+            return Ok(());
+        }
         consumer
             .process_next(&freeze_store, &evaluation, &authoring)
             .await
@@ -656,24 +673,6 @@ async fn require_schema(pool: &sqlx::PgPool) -> Result<(), EvaluationProcessErro
     if !ready {
         return Err(EvaluationProcessError::SchemaUnavailable);
     }
-    Ok(())
-}
-
-async fn shutdown_signal() -> Result<(), EvaluationProcessError> {
-    #[cfg(unix)]
-    {
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .map_err(EvaluationProcessError::Signal)?;
-        tokio::select! {
-            result = tokio::signal::ctrl_c() => result.map_err(EvaluationProcessError::Signal)?,
-            _ = terminate.recv() => {}
-        }
-    }
-    #[cfg(not(unix))]
-    tokio::signal::ctrl_c()
-        .await
-        .map_err(EvaluationProcessError::Signal)?;
     Ok(())
 }
 

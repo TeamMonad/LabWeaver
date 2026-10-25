@@ -128,6 +128,9 @@ domains:
       - id: 8
         file: environment/0008_guest_connection_readiness.sql
         sha256: 9ed85f2219c44d7a017821021e5b7736aba3f2b2a9eb930b203a52e444d6a0b7
+      - id: 9
+        file: environment/0009_outbox_publication_claims.sql
+        sha256: 572a02c172d6b4602fb8e5307bbe07ce06074db731f8c8addee938abc206e989
   - name: agent
     migrations:
       - id: 1

@@ -291,7 +291,7 @@ impl EnvironmentProcessRuntime {
         )?;
         let outbox = OutboxDispatcher::new(
             pool,
-            JetStreamEventPublisher::new(nats.clone()),
+            JetStreamEventPublisher::new(nats.clone(), OUTBOX_TIMEOUT),
             OUTBOX_TIMEOUT,
         )?;
         let access_revoker = NatsAccessRevoker::new(
@@ -333,6 +333,12 @@ impl EnvironmentProcessRuntime {
         Arc::clone(&self.readiness)
     }
 
+    /// Returns the concrete background task owner retained by the process entrypoint.
+    #[must_use]
+    pub fn work_execution_tasks(&self) -> crate::service_runtime::BackgroundTasks {
+        self.work_executions.background_tasks()
+    }
+
     /// Clones only the owner dependencies required by the authenticated public API.
     #[must_use]
     pub fn api_state(&self) -> crate::EnvironmentApiState {
@@ -370,9 +376,8 @@ impl EnvironmentProcessRuntime {
             resource_usage_client,
             work_executions,
         } = self;
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let shutdown_rx = crate::service_runtime::subscribe_shutdown();
         tokio::try_join!(
-            shutdown_task(shutdown_tx),
             command_loop(
                 store.clone(),
                 &mut command_consumer,
@@ -419,7 +424,11 @@ async fn work_execution_recovery_loop(
     let mut interval = tokio::time::interval(Duration::from_secs(2));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        if *shutdown.borrow() {
+            return Ok(());
+        }
         tokio::select! {
+            biased;
             changed = shutdown.changed() => {
                 changed.map_err(|_| EnvironmentProcessRuntimeError::ShutdownChannel)?;
                 return Ok(());
@@ -448,40 +457,26 @@ async fn resource_usage_loop(
 async fn release_loop(
     store: PgReleaseProjectionStore,
     consumer: &mut JetStreamReleaseConsumer,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) -> Result<(), EnvironmentProcessRuntimeError> {
-    loop {
-        tokio::select! {
-            changed = shutdown.changed() => {
-                changed.map_err(|_| EnvironmentProcessRuntimeError::ShutdownChannel)?;
-                return Ok(());
-            }
-            result = consumer.process_next(&store) => {
-                let outcome = result?;
-                log_consume_outcome("environment.release", outcome);
-            }
-        }
+    while !*shutdown.borrow() {
+        let outcome = consumer.process_next(&store).await?;
+        log_consume_outcome("environment.release", outcome);
     }
+    Ok(())
 }
 
 async fn command_loop(
     store: PgEnvironmentStore,
     consumer: &mut JetStreamCommandConsumer,
     lease_verifier: NatsResourceLeaseVerifier,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) -> Result<(), EnvironmentProcessRuntimeError> {
-    loop {
-        tokio::select! {
-            changed = shutdown.changed() => {
-                changed.map_err(|_| EnvironmentProcessRuntimeError::ShutdownChannel)?;
-                return Ok(());
-            }
-            result = consumer.process_next(&store, &lease_verifier) => {
-                let outcome = result?;
-                log_consume_outcome("environment.command", outcome);
-            }
-        }
+    while !*shutdown.borrow() {
+        let outcome = consumer.process_next(&store, &lease_verifier).await?;
+        log_consume_outcome("environment.command", outcome);
     }
+    Ok(())
 }
 
 async fn reconcile_loop(
@@ -494,7 +489,11 @@ async fn reconcile_loop(
     let mut interval = tokio::time::interval(WORKER_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        if *shutdown.borrow() {
+            return Ok(());
+        }
         tokio::select! {
+            biased;
             changed = shutdown.changed() => {
                 changed.map_err(|_| EnvironmentProcessRuntimeError::ShutdownChannel)?;
                 return Ok(());
@@ -558,25 +557,12 @@ async fn release_deleted_resource_environments(
 
 async fn outbox_loop(
     outbox: OutboxDispatcher<JetStreamEventPublisher>,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) -> Result<(), EnvironmentProcessRuntimeError> {
-    let mut interval = tokio::time::interval(WORKER_INTERVAL);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tokio::select! {
-            changed = shutdown.changed() => {
-                changed.map_err(|_| EnvironmentProcessRuntimeError::ShutdownChannel)?;
-                return Ok(());
-            }
-            _ = interval.tick() => {
-                let outcome = outbox.dispatch_once().await?;
-                match outcome {
-                    crate::outbox::OutboxDispatchOutcome::Idle => { tracing::debug!(event = "environment.outbox.idle", outcome = "idle"); }
-                    crate::outbox::OutboxDispatchOutcome::Published { event_id } => { tracing::info!(event = "environment.outbox.published", outcome = "succeeded", event_id = %event_id, message_id = %event_id); }
-                }
-            }
-        }
-    }
+    outbox
+        .run(WORKER_INTERVAL, shutdown)
+        .await
+        .map_err(EnvironmentProcessRuntimeError::from)
 }
 
 fn log_consume_outcome(prefix: &str, outcome: crate::messaging::CommandConsumeOutcome) {
@@ -628,7 +614,11 @@ async fn expiry_loop(
     let mut interval = tokio::time::interval(EXPIRY_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        if *shutdown.borrow() {
+            return Ok(());
+        }
         tokio::select! {
+            biased;
             changed = shutdown.changed() => {
                 changed.map_err(|_| EnvironmentProcessRuntimeError::ShutdownChannel)?;
                 return Ok(());
@@ -697,7 +687,12 @@ async fn readiness_loop(
     let mut interval = tokio::time::interval(READINESS_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        if *shutdown.borrow() {
+            readiness.store(false, Ordering::Release);
+            return Ok(());
+        }
         tokio::select! {
+            biased;
             changed = shutdown.changed() => {
                 changed.map_err(|_| EnvironmentProcessRuntimeError::ShutdownChannel)?;
                 readiness.store(false, Ordering::Release);
@@ -715,34 +710,6 @@ async fn readiness_loop(
     }
 }
 
-async fn shutdown_task(
-    shutdown: watch::Sender<bool>,
-) -> Result<(), EnvironmentProcessRuntimeError> {
-    shutdown_signal().await?;
-    shutdown
-        .send(true)
-        .map_err(|_| EnvironmentProcessRuntimeError::ShutdownChannel)
-}
-
-async fn shutdown_signal() -> Result<(), EnvironmentProcessRuntimeError> {
-    #[cfg(unix)]
-    {
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .map_err(EnvironmentProcessRuntimeError::Signal)?;
-        tokio::select! {
-            result = tokio::signal::ctrl_c() => result.map_err(EnvironmentProcessRuntimeError::Signal),
-            _ = terminate.recv() => Ok(()),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c()
-            .await
-            .map_err(EnvironmentProcessRuntimeError::Signal)
-    }
-}
-
 async fn require_schema(pool: &sqlx::PgPool) -> Result<(), EnvironmentProcessRuntimeError> {
     let ready: bool = sqlx::query_scalar(
         "SELECT to_regclass('environment.environment_instances') IS NOT NULL \
@@ -753,7 +720,9 @@ async fn require_schema(pool: &sqlx::PgPool) -> Result<(), EnvironmentProcessRun
          AND to_regclass('environment.kubevirt_runtime_observations') IS NOT NULL \
          AND to_regclass('environment.resource_metering_state') IS NOT NULL \
          AND to_regclass('environment.resource_meter_deliveries') IS NOT NULL \
-         AND to_regclass('environment.work_configuration_executions') IS NOT NULL",
+         AND to_regclass('environment.work_configuration_executions') IS NOT NULL \
+         AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='environment' \
+             AND table_name='outbox_events' AND column_name='publish_claim_token')",
     )
     .fetch_one(pool)
     .await?;

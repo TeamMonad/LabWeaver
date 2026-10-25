@@ -1,5 +1,12 @@
 //! Shared process lifecycle for the six independently deployable service shells.
 
+#![allow(
+    missing_docs,
+    clippy::missing_errors_doc,
+    dead_code,
+    reason = "the shared shell is compiled into each service with its own entry points"
+)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{net::SocketAddr, str::FromStr};
@@ -11,6 +18,147 @@ use axum::{
     routing::get,
 };
 use thiserror::Error;
+
+const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+static SHUTDOWN: std::sync::LazyLock<tokio::sync::watch::Sender<bool>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::channel(false).0);
+
+/// Background continuations belonging to one concrete runtime, not to an HTTP connection.
+/// Gateway settlement and Environment backend execution share this same `JoinSet` ownership.
+#[derive(Clone, Default)]
+pub struct BackgroundTasks {
+    inner: Arc<std::sync::Mutex<BackgroundTaskState>>,
+}
+
+#[derive(Default)]
+struct BackgroundTaskState {
+    closed: bool,
+    tasks: tokio::task::JoinSet<()>,
+}
+
+impl BackgroundTasks {
+    fn lock(&self) -> std::sync::MutexGuard<'_, BackgroundTaskState> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Retains the continuation after its initiating HTTP handler returns or disconnects.
+    pub fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
+        let mut owner = self.lock();
+        if owner.closed {
+            return;
+        }
+        while let Some(result) = owner.tasks.try_join_next() {
+            if let Err(error) = result {
+                tracing::error!(event = "service.background_task_failed", error = %error);
+            }
+        }
+        owner.tasks.spawn(task);
+    }
+
+    /// Keeps abort ownership in the supervising runtime, including when its future is dropped.
+    #[must_use]
+    pub fn guard(&self) -> BackgroundTaskGuard<'_> {
+        BackgroundTaskGuard(self)
+    }
+
+    /// Called after HTTP acquisition and worker loops end. Descendant continuations may still
+    /// enqueue work while their parents drain, so never hold the mutex across a join.
+    pub async fn drain(&self) {
+        loop {
+            let mut batch = std::mem::take(&mut self.lock().tasks);
+            if batch.is_empty() {
+                return;
+            }
+            while let Some(result) = batch.join_next().await {
+                if let Err(error) = result {
+                    tracing::error!(event = "service.background_task_failed", error = %error);
+                }
+            }
+        }
+    }
+}
+
+/// The owner is held by the runtime future, never by its background children.
+pub struct BackgroundTaskGuard<'a>(&'a BackgroundTasks);
+
+impl Drop for BackgroundTaskGuard<'_> {
+    fn drop(&mut self) {
+        let mut owner = self.0.lock();
+        owner.closed = true;
+        owner.tasks.abort_all();
+    }
+}
+
+fn shutdown_sender() -> &'static tokio::sync::watch::Sender<bool> {
+    &SHUTDOWN
+}
+
+/// Subscribes a real worker to the process-wide stop request.
+#[must_use]
+pub fn subscribe_shutdown() -> tokio::sync::watch::Receiver<bool> {
+    shutdown_sender().subscribe()
+}
+
+/// Returns true once the process must stop claiming work. This transition is irreversible.
+#[must_use]
+pub fn is_stopping() -> bool {
+    *shutdown_sender().borrow()
+}
+
+/// Stops acquisition before draining already-owned work.
+pub fn request_shutdown() {
+    shutdown_sender().send_replace(true);
+}
+
+/// Waits for the shared stop request, including one sent before subscription.
+pub async fn wait_for_shutdown() {
+    let mut receiver = subscribe_shutdown();
+    if !*receiver.borrow_and_update() {
+        let _ = receiver.changed().await;
+    }
+}
+
+/// Waits for a polling tick unless shutdown wins. Call before acquiring another task.
+pub async fn worker_tick(interval: &mut tokio::time::Interval) -> bool {
+    tokio::select! {
+        biased;
+        () = wait_for_shutdown() => false,
+        _ = interval.tick() => !is_stopping(),
+    }
+}
+
+/// Owns the single process signal handler and bounds cooperative worker/HTTP drain.
+/// Expiry drops unfinished futures without marking them complete or releasing their leases.
+pub async fn supervise<E>(
+    service: &'static str,
+    work: impl Future<Output = Result<(), E>>,
+) -> Result<(), E> {
+    tokio::pin!(work);
+    tokio::select! {
+        result = &mut work => {
+            request_shutdown();
+            return result;
+        }
+        () = shutdown_signal(service) => request_shutdown(),
+    }
+    tracing::info!(
+        event = "service.draining",
+        service,
+        drain_seconds = DRAIN_TIMEOUT.as_secs()
+    );
+    if let Ok(result) = tokio::time::timeout(DRAIN_TIMEOUT, &mut work).await {
+        result
+    } else {
+        tracing::warn!(
+            event = "service.drain_expired",
+            service,
+            recovery = "lease_takeover"
+        );
+        Ok(())
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum StartupError {
@@ -68,7 +216,7 @@ pub async fn run_with_router(
         listener,
         health_router(service, readiness).merge(application),
     )
-    .with_graceful_shutdown(shutdown_signal(service))
+    .with_graceful_shutdown(wait_for_shutdown())
     .await?;
     tracing::info!(
         schema = telemetry::LOG_SCHEMA,
@@ -103,7 +251,7 @@ fn ready(
     service: &'static str,
     readiness: &AtomicBool,
 ) -> (StatusCode, Json<contracts::HealthResponse>) {
-    if readiness.load(Ordering::Acquire) {
+    if !is_stopping() && readiness.load(Ordering::Acquire) {
         (StatusCode::OK, health(service, "ready"))
     } else {
         (
@@ -225,5 +373,72 @@ mod tests {
                 .to_string()
                 .starts_with("LW_CONFIG_BIND_ADDR_MISSING")
         );
+    }
+
+    #[tokio::test]
+    async fn background_drain_waits_for_descendant_continuations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tasks = super::BackgroundTasks::default();
+        let _owner = tasks.guard();
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let started = entered.clone();
+        let (resume, wait) = tokio::sync::oneshot::channel();
+        let descendants = tasks.clone();
+        tasks.spawn(async move {
+            descendants.spawn(async move {
+                started.notify_one();
+                let _ = wait.await;
+            });
+        });
+        entered.notified().await;
+        let draining = tasks.drain();
+        tokio::pin!(draining);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut draining)
+                .await
+                .is_err()
+        );
+        resume
+            .send(())
+            .map_err(|()| "descendant was abandoned before drain deadline")?;
+        tokio::time::timeout(std::time::Duration::from_secs(1), draining).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn abandoning_runtime_cancels_background_tasks_without_completing_them()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct Dropped(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let tasks = super::BackgroundTasks::default();
+        let owner = tasks.guard();
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let marker = Dropped(dropped.clone());
+        let (started, entered) = tokio::sync::oneshot::channel();
+        tasks.spawn(async move {
+            let _marker = marker;
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        });
+        entered.await?;
+        let mut draining = Box::pin(tasks.drain());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut draining)
+                .await
+                .is_err()
+        );
+        drop(draining);
+        drop(owner);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !dropped.load(std::sync::atomic::Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        Ok(())
     }
 }

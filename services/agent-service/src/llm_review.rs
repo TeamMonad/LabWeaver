@@ -729,7 +729,9 @@ impl LlmReviewWorker {
         let mut ticker = interval(self.poll_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            ticker.tick().await;
+            if !crate::service_runtime::worker_tick(&mut ticker).await {
+                return Ok(());
+            }
             let now = timestamp()?;
             let Some(lease) = self
                 .store
@@ -749,7 +751,7 @@ impl LlmReviewWorker {
         let heartbeat_lease = lease.clone();
         let heartbeat_interval = (self.lease_duration / 3).max(Duration::from_millis(100));
         let heartbeat_duration = self.lease_duration;
-        let heartbeat = tokio::spawn(async move {
+        let heartbeat = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
             let mut ticker = interval(heartbeat_interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
@@ -763,7 +765,7 @@ impl LlmReviewWorker {
                     }
                 }
             }
-        });
+        }));
         let result = self.execute(&lease, cancellation.clone()).await;
         heartbeat.abort();
         let now = timestamp()?;

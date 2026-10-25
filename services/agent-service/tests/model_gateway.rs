@@ -185,6 +185,7 @@ impl Fixture {
                 .ok_or("signer")?,
         };
         let state = GatewayState {
+            background: agent_service::service_runtime::BackgroundTasks::default(),
             upstream: upstream_url.parse()?,
             upstream_key: "upstream-private-key".into(),
             issuer: runtime.issuer.clone(),
@@ -196,7 +197,11 @@ impl Fixture {
             authorization: authority.authorization.clone(),
         };
         let gateway = tokio::spawn(async move {
-            let _ = agent_service::model_gateway::serve(state, listener).await;
+            let _ = agent_service::service_runtime::supervise(
+                "agent-gateway-test",
+                agent_service::model_gateway::serve(state, listener),
+            )
+            .await;
         });
         let capability = runtime.issuer.issue_for(
             project,
@@ -576,6 +581,7 @@ async fn sdk_retry_after_gateway_restart_retains_original_persisted_call_fence()
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     fixture.runtime.base_url = format!("http://{}/", listener.local_addr()?).parse()?;
     let state = GatewayState {
+        background: agent_service::service_runtime::BackgroundTasks::default(),
         upstream: fixture.upstream_url.clone(),
         upstream_key: "upstream-private-key".into(),
         issuer: fixture.runtime.issuer.clone(),
@@ -594,4 +600,84 @@ async fn sdk_retry_after_gateway_restart_retains_original_persisted_call_fence()
     assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.holds().await?.len(), 1);
     fixture.assert_charged().await
+}
+
+#[tokio::test]
+#[ignore = "subprocess entrypoint executed by gateway_process_waits_for_disconnected_http_settlement"]
+async fn gateway_process_drain_helper() -> Result<(), Box<dyn std::error::Error>> {
+    std::env::var("LW_GATEWAY_DRAIN_HELPER")?;
+    let mut fixture = Fixture::new(Mode::Disconnect, true).await?;
+    let mut response = fixture.request("drain-disconnected-http").send().await?;
+    let mut bytes = Vec::new();
+    while !String::from_utf8_lossy(&bytes).contains("message_delta") {
+        bytes.extend_from_slice(&response.chunk().await?.ok_or("missing SSE delta")?);
+    }
+    let hold = fixture
+        .holds()
+        .await?
+        .pop()
+        .ok_or("real Resource hold missing")?;
+    let mut barrier = fixture.pool.begin().await?;
+    sqlx::query("SELECT hold_id FROM resource.credit_holds WHERE hold_id=$1 FOR UPDATE")
+        .bind(hold.id)
+        .fetch_one(&mut *barrier)
+        .await?;
+    drop(response);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE '%credit_holds%' AND pid<>pg_backend_pid())").fetch_one(&fixture.pool).await?;
+            if blocked { return Ok::<(), sqlx::Error>(()); }
+            tokio::task::yield_now().await;
+        }
+    }).await??;
+    assert!(
+        tokio::process::Command::new("kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status()
+            .await?
+            .success()
+    );
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        agent_service::service_runtime::wait_for_shutdown(),
+    )
+    .await?;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut fixture.gateway)
+            .await
+            .is_err(),
+        "HTTP completion must not detach an unsettled real Resource request from process drain"
+    );
+    barrier.rollback().await?;
+    tokio::time::timeout(Duration::from_secs(10), &mut fixture.gateway).await??;
+    fixture.wait_hold(CreditHoldState::Unknown).await?;
+    assert_eq!(fixture.holds().await?.len(), 1);
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_process_waits_for_disconnected_http_settlement()
+-> Result<(), Box<dyn std::error::Error>> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(90),
+        tokio::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "gateway_process_drain_helper",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("LW_GATEWAY_DRAIN_HELPER", "1")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await??;
+    assert!(
+        output.status.success(),
+        "gateway process regression failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
 }

@@ -14,8 +14,7 @@ use environment_service::{
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 
-#[path = "../../service_runtime.rs"]
-mod service_runtime;
+use environment_service::service_runtime;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -78,13 +77,20 @@ async fn main() -> Result<(), MainError> {
     if option.as_deref() != Some("--mode") {
         return Err(MainError::Configuration);
     }
-    match value.as_deref() {
-        Some("environment-service") => run_environment_service().await,
-        Some("container-executor") => Box::pin(run_runtime_executor(RuntimeKind::Container)).await,
-        Some("kubevirt-executor") => Box::pin(run_runtime_executor(RuntimeKind::KubeVirt)).await,
-        Some("kubevirt-console-executor") => run_kubevirt_console_executor().await,
-        _ => Err(MainError::Configuration),
-    }
+    Box::pin(service_runtime::supervise("environment-service", async {
+        match value.as_deref() {
+            Some("environment-service") => run_environment_service().await,
+            Some("container-executor") => {
+                Box::pin(run_runtime_executor(RuntimeKind::Container)).await
+            }
+            Some("kubevirt-executor") => {
+                Box::pin(run_runtime_executor(RuntimeKind::KubeVirt)).await
+            }
+            Some("kubevirt-console-executor") => run_kubevirt_console_executor().await,
+            _ => Err(MainError::Configuration),
+        }
+    }))
+    .await
 }
 
 async fn run_kubevirt_console_executor() -> Result<(), MainError> {
@@ -142,6 +148,8 @@ enum RuntimeKind {
 async fn run_environment_service() -> Result<(), MainError> {
     let process = environment_service::EnvironmentProcessRuntime::from_env().await?;
     let readiness = process.readiness();
+    let background = process.work_execution_tasks();
+    let _background_guard = background.guard();
     let owner_resolver =
         environment_service::OwnerResolverRuntime::from_env(process.api_state()).await?;
     tokio::try_join!(
@@ -153,6 +161,7 @@ async fn run_environment_service() -> Result<(), MainError> {
         async { owner_resolver.serve().await.map_err(MainError::Resolver) },
         async { Box::pin(process.serve()).await.map_err(MainError::Process) },
     )?;
+    background.drain().await;
     Ok(())
 }
 
@@ -295,20 +304,19 @@ async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
                 deployment.nats.kubevirt_request_subject,
                 executor,
             )?;
-            let (shutdown, receiver) = tokio::sync::watch::channel(false);
-            let serving = server.serve(receiver);
-            tokio::pin!(serving);
-            let health = service_runtime::run("kubevirt-executor");
-            tokio::pin!(health);
-            tokio::select! {
-                result=&mut health => {
-                    shutdown.send_replace(true);
-                    let drained=serving.await;
-                    result.map_err(MainError::Service)?;
-                    drained?;
-                }
-                result=&mut serving => {result?;}
-            }
+            tokio::try_join!(
+                async {
+                    server
+                        .serve(service_runtime::subscribe_shutdown())
+                        .await
+                        .map_err(MainError::from)
+                },
+                async {
+                    service_runtime::run("kubevirt-executor")
+                        .await
+                        .map_err(MainError::Service)
+                },
+            )?;
         }
     }
     Ok(())

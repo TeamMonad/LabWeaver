@@ -295,11 +295,15 @@ impl<R: EvaluationAttemptRunner> EvaluationWorker<R> {
 
     /// Runs until shutdown or a durable control-plane failure.
     pub async fn run(self) -> Result<(), ExecutionError> {
-        loop {
+        while !crate::service_runtime::is_stopping() {
             if !self.run_once().await? {
-                tokio::time::sleep(self.poll_interval).await;
+                tokio::select! {
+                    () = crate::service_runtime::wait_for_shutdown() => return Ok(()),
+                    () = tokio::time::sleep(self.poll_interval) => {}
+                }
             }
         }
+        Ok(())
     }
 
     /// Processes at most one leased step and returns whether work was claimed.
@@ -355,7 +359,7 @@ impl<R: EvaluationAttemptRunner> EvaluationWorker<R> {
             .checked_div(3)
             .ok_or(ExecutionError::WorkerConfigurationInvalid)?
             .max(Duration::from_secs(1));
-        let heartbeat = tokio::spawn(async move {
+        let heartbeat = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
             loop {
                 tokio::time::sleep(heartbeat_interval).await;
                 match heartbeat_control
@@ -381,7 +385,7 @@ impl<R: EvaluationAttemptRunner> EvaluationWorker<R> {
                     }
                 }
             }
-        });
+        }));
         let context = EvaluationAttemptContext {
             lease: lease.clone(),
             run,

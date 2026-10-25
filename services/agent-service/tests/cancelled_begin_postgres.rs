@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeSet, error::Error, sync::Arc, time::Duration};
 
+use agent_service::service_runtime;
 use agent_service::{
     api::{AgentApiState, CONTROL_PERMISSION, router},
     build_store::PgBuildStore,

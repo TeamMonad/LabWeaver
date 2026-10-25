@@ -8,6 +8,13 @@
 #[cfg(test)]
 extern crate self as agent_service;
 
+#[cfg(test)]
+#[path = "../tests/support/build_billing.rs"]
+pub(crate) mod build_billing;
+
+#[path = "../../service_runtime.rs"]
+pub mod service_runtime;
+
 pub mod api;
 pub mod build_executor;
 pub mod build_pipeline;

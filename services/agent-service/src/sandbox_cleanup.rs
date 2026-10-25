@@ -156,7 +156,9 @@ impl Worker {
         let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            interval.tick().await;
+            if !crate::service_runtime::worker_tick(&mut interval).await {
+                return;
+            }
             let attempts = match self.next_pending_batch().await {
                 Ok(attempts) => attempts,
                 Err(error) => {
@@ -169,6 +171,9 @@ impl Worker {
                 }
             };
             for attempt in attempts {
+                if crate::service_runtime::is_stopping() {
+                    return;
+                }
                 let outcome = match self.reconcile(&attempt).await {
                     Ok(true) => continue,
                     Ok(false) => None,
@@ -2248,5 +2253,118 @@ mod tests {
             format!("https://localhost:{}/", address.port()),
             TestServer { task },
         ))
+    }
+
+    #[tokio::test]
+    #[ignore = "subprocess entrypoint executed by cleanup_process_stops_scanning_after_sigterm"]
+    async fn cleanup_shutdown_process() -> Result<(), Box<dyn Error>> {
+        std::env::var("LW_CLEANUP_DRAIN_HELPER")?;
+        let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+        let url = format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            postgres.get_host_port_ipv4(5432).await?
+        );
+        let bootstrap = sqlx::PgPool::connect(&url).await?;
+        apply_agent_migrations(&bootstrap).await?;
+        let billing = crate::build_billing::BuildBillingFixture::start(bootstrap.clone()).await?;
+        let scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let scanned = Arc::new(tokio::sync::Notify::new());
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .after_release({
+                let scans = scans.clone();
+                let scanned = scanned.clone();
+                move |_, _| {
+                    let scans = scans.clone();
+                    let scanned = scanned.clone();
+                    Box::pin(async move {
+                        scans.fetch_add(1, Ordering::SeqCst);
+                        scanned.notify_one();
+                        Ok(true)
+                    })
+                }
+            })
+            .connect_lazy_with((*bootstrap.connect_options()).clone());
+        let token = tempfile::NamedTempFile::new()?;
+        std::fs::write(token.path(), b"unused-kubernetes-fixture-token")?;
+        let api = KubernetesApiClient::for_test(
+            KubernetesApiConfiguration {
+                kubernetes_api_server: "http://127.0.0.1:1/".parse()?,
+                kubernetes_bearer_token_file: token.path().to_owned(),
+                kubernetes_ca_file: PathBuf::from("unused-test-ca"),
+                runner_namespace: "runner".into(),
+                request_timeout_milliseconds: 5000,
+            },
+            reqwest::Client::new(),
+            "labweaver-agent-test",
+            "agent-test",
+            "LW_AGENT_",
+            SANDBOX_MANAGED_BY,
+            SANDBOX_EVENT_SCOPE,
+        );
+        let worker = Worker {
+            api,
+            resources: billing.client.clone(),
+            store: PostgresAgentRunStore::new(pool),
+            objects: test_objects().await?,
+            configuration: test_configuration(),
+        };
+        let mut workers = tokio::task::JoinSet::new();
+        workers.spawn(crate::service_runtime::supervise(
+            "sandbox-cleanup-test",
+            async move {
+                worker.run().await;
+                Ok::<(), std::convert::Infallible>(())
+            },
+        ));
+        tokio::time::timeout(Duration::from_secs(5), scanned.notified()).await?;
+        let before = scans.load(Ordering::SeqCst);
+        assert!(
+            tokio::process::Command::new("kill")
+                .args(["-TERM", &std::process::id().to_string()])
+                .status()
+                .await?
+                .success()
+        );
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            crate::service_runtime::wait_for_shutdown(),
+        )
+        .await?;
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        assert_eq!(
+            scans.load(Ordering::SeqCst),
+            before,
+            "SIGTERM must stop the real cleanup worker from scanning its next batch during drain"
+        );
+        tokio::time::timeout(Duration::from_secs(1), workers.join_next())
+            .await?
+            .ok_or("cleanup worker missing")???;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cleanup_process_stops_scanning_after_sigterm() -> Result<(), Box<dyn Error>> {
+        let output = tokio::time::timeout(
+            Duration::from_secs(90),
+            tokio::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "sandbox_process::sandbox_cleanup::tests::cleanup_shutdown_process",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("LW_CLEANUP_DRAIN_HELPER", "1")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await??;
+        assert!(
+            output.status.success(),
+            "cleanup process regression failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
     }
 }
