@@ -756,6 +756,25 @@ fn projection_configuration(
     )?)
 }
 
+// The fixture deployment profile does not change when a Work selects a compatible release.
+// Resolve it from the original approved publication, not the newly selected manual template.
+async fn original_projection_configuration(
+    pool: &PgPool,
+    instance: &contracts::environment::EnvironmentInstance,
+) -> Result<environment_service::ContainerProviderConfiguration> {
+    use environment_service::ContainerReleaseResolver as _;
+    let identity = &instance
+        .runtime_authorization
+        .as_ref()
+        .ok_or("runtime receipt")?
+        .authorization
+        .configuration;
+    let source = PgReleaseProjectionStore::new(pool.clone())
+        .resolve(identity.release_id, identity.release_version)
+        .await?;
+    projection_configuration(&source.projection)
+}
+
 async fn trusted_container_plan(
     pool: &PgPool,
     instance: &contracts::environment::EnvironmentInstance,
@@ -767,7 +786,7 @@ async fn trusted_container_plan(
     let resolved = PgReleaseProjectionStore::new(pool.clone())
         .resolve(current.release_id, current.release_version)
         .await?;
-    let configuration = projection_configuration(&resolved.projection)?;
+    let configuration = original_projection_configuration(pool, &current).await?;
     Ok(configuration.project_plan(
         &current.provider_binding,
         &environment_service::ContainerNamespaceProfile::Dedicated {},
@@ -781,16 +800,13 @@ async fn container_fence_store(
     pool: PgPool,
     instance: &contracts::environment::EnvironmentInstance,
 ) -> Result<environment_service::PgContainerExecutorFenceStore> {
-    use environment_service::ContainerReleaseResolver as _;
     let store = environment_service::PgContainerExecutorFenceStore::new(pool.clone());
     if instance.runtime_kind == contracts::authoring::RuntimeKind::Container {
-        let resolved = PgReleaseProjectionStore::new(pool)
-            .resolve(instance.release_id, instance.release_version)
-            .await?;
-        Ok(store.with_projection_configuration(
-            instance.provider_binding.clone(),
-            projection_configuration(&resolved.projection)?,
-        )?)
+        let configuration = original_projection_configuration(&pool, instance).await?;
+        Ok(
+            store
+                .with_projection_configuration(instance.provider_binding.clone(), configuration)?,
+        )
     } else {
         Ok(store)
     }
