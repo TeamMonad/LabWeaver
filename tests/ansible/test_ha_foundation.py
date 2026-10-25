@@ -188,6 +188,11 @@ class HAFoundationTests(unittest.TestCase):
             for provider in providers:
                 if provider["providerKind"] == "container":
                     provider.update(workspaceStorageClassName="ceph-rbd", workspaceAccessMode="ReadWriteOnce")
+                elif provider["providerKind"] == "kubevirt":
+                    for disk in provider.get("baseDisks", []):
+                        disk["storageClassName"] = "ceph-rbd"
+                    if provider.get("runtimeVmBase") is not None:
+                        provider["runtimeVmBase"]["storageClassName"] = "ceph-rbd"
             provider_path.write_text(json.dumps(providers))
             source.seal()
             with bundle.opened_bundle(source.archive, source.identity, source.runtime) as (_, derived, _):
