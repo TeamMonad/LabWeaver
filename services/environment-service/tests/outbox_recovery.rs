@@ -193,7 +193,7 @@ impl Fixture {
     }
 }
 
-/// Holds exactly one genuine broker PubAck without changing its bytes.
+/// Holds exactly one genuine broker `PubAck` without changing its bytes.
 struct AckRelay {
     address: std::net::SocketAddr,
     held: mpsc::Receiver<oneshot::Sender<()>>,
@@ -441,8 +441,8 @@ async fn outbox_worker_process() -> TestResult {
     let client = async_nats::connect(std::env::var("LW_TEST_OUTBOX_NATS")?).await?;
     let dispatcher = OutboxDispatcher::new(
         pool,
-        JetStreamEventPublisher::new(client, Duration::from_secs(60)),
-        Duration::from_secs(60),
+        JetStreamEventPublisher::new(client, Duration::from_mins(1)),
+        Duration::from_mins(1),
     )?;
     let observer = tokio::spawn(async {
         environment_service::service_runtime::wait_for_shutdown().await;
@@ -460,7 +460,7 @@ async fn outbox_worker_process() -> TestResult {
     Ok(())
 }
 
-async fn spawn_worker(fixture: &Fixture, nats_url: &str) -> TestResult<tokio::process::Child> {
+fn spawn_worker(fixture: &Fixture, nats_url: &str) -> TestResult<tokio::process::Child> {
     Ok(tokio::process::Command::new(std::env::current_exe()?)
         .args([
             "--exact",
@@ -493,7 +493,7 @@ async fn real_worker_sigterm_stops_claiming_then_restart_recovers_crashed_lease(
     let mut fixture = Fixture::new(false).await?;
     let first_id = fixture.enqueue().await?;
     let mut relay = AckRelay::new(&fixture.nats_url).await?;
-    let mut child = spawn_worker(&fixture, &format!("nats://{}", relay.address)).await?;
+    let mut child = spawn_worker(&fixture, &format!("nats://{}", relay.address))?;
     let ack = relay.held_ack().await?;
     fixture.received(first_id).await?;
     signal(&child, "-TERM").await?;
@@ -523,7 +523,7 @@ async fn real_worker_sigterm_stops_claiming_then_restart_recovers_crashed_lease(
 
     // A hard process loss, unlike completed drain, leaves a durable claim for lease takeover.
     let mut crash_relay = AckRelay::new(&fixture.nats_url).await?;
-    let mut crashed = spawn_worker(&fixture, &format!("nats://{}", crash_relay.address)).await?;
+    let mut crashed = spawn_worker(&fixture, &format!("nats://{}", crash_relay.address))?;
     let held_ack = crash_relay.held_ack().await?;
     fixture.received(second_id).await?;
     let abandoned_token = fixture
@@ -539,7 +539,7 @@ async fn real_worker_sigterm_stops_claiming_then_restart_recovers_crashed_lease(
         OutboxDispatchOutcome::Idle
     );
     fixture.expire(second_id).await?;
-    let mut restarted = spawn_worker(&fixture, &fixture.nats_url).await?;
+    let mut restarted = spawn_worker(&fixture, &fixture.nats_url)?;
     fixture.received(second_id).await?;
     timeout(DEADLINE, async {
         while !fixture.published(second_id).await? {
@@ -562,7 +562,7 @@ async fn real_worker_sigterm_stops_claiming_then_restart_recovers_crashed_lease(
 async fn real_worker_drain_deadline_abandons_unacknowledged_claim_for_takeover() -> TestResult {
     let mut fixture = Fixture::new(true).await?;
     let first_id = fixture.enqueue().await?;
-    let mut child = spawn_worker(&fixture, &fixture.nats_url).await?;
+    let mut child = spawn_worker(&fixture, &fixture.nats_url)?;
     fixture.received(first_id).await?;
     let token = fixture
         .token(first_id)
@@ -599,7 +599,7 @@ async fn real_worker_drain_deadline_abandons_unacknowledged_claim_for_takeover()
     transaction.commit().await?;
     fixture.enable_ack().await?;
     fixture.expire(first_id).await?;
-    let mut restarted = spawn_worker(&fixture, &fixture.nats_url).await?;
+    let mut restarted = spawn_worker(&fixture, &fixture.nats_url)?;
     fixture.received(first_id).await?;
     fixture.received(second_id).await?;
     timeout(DEADLINE, async {
@@ -617,5 +617,59 @@ async fn real_worker_drain_deadline_abandons_unacknowledged_claim_for_takeover()
     );
     assert!(fixture.published(first_id).await?);
     assert!(fixture.token(first_id).await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn another_worker_bypasses_claimed_event_without_borrowing_an_extra_connection() -> TestResult
+{
+    let mut fixture = Fixture::new(false).await?;
+    let first_id = fixture.enqueue().await?;
+    let mut relay = AckRelay::new(&fixture.nats_url).await?;
+    let first = relay.dispatcher(&fixture).await?;
+    let mut tasks = JoinSet::new();
+    tasks.spawn(async move { first.dispatch_once().await });
+    let ack = relay.held_ack().await?;
+    fixture.received(first_id).await?;
+    let second_id = fixture.enqueue().await?;
+    assert_eq!(
+        timeout(DEADLINE, fixture.dispatcher(DEADLINE)?.dispatch_once()).await??,
+        OutboxDispatchOutcome::Published {
+            event_id: second_id
+        }
+    );
+    fixture.received(second_id).await?;
+    assert!(!fixture.published(first_id).await?);
+    ack.send(()).map_err(|()| "ACK gate closed")?;
+    assert_eq!(
+        tasks.join_next().await.ok_or("publisher missing")???,
+        OutboxDispatchOutcome::Published { event_id: first_id }
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn late_ack_converges_only_after_replacement_publishes_identical_snapshot() -> TestResult {
+    let mut fixture = Fixture::new(false).await?;
+    let id = fixture.enqueue().await?;
+    let mut relay = AckRelay::new(&fixture.nats_url).await?;
+    let old = relay.dispatcher(&fixture).await?;
+    let mut tasks = JoinSet::new();
+    tasks.spawn(async move { old.dispatch_once().await });
+    let ack = relay.held_ack().await?;
+    fixture.received(id).await?;
+    fixture.expire(id).await?;
+    assert_eq!(
+        fixture.dispatcher(DEADLINE)?.dispatch_once().await?,
+        OutboxDispatchOutcome::Published { event_id: id }
+    );
+    fixture.received(id).await?;
+    ack.send(()).map_err(|()| "ACK gate closed")?;
+    assert_eq!(
+        tasks.join_next().await.ok_or("publisher missing")???,
+        OutboxDispatchOutcome::Published { event_id: id }
+    );
+    assert!(fixture.published(id).await?);
+    assert!(fixture.token(id).await?.is_none());
     Ok(())
 }

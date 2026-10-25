@@ -235,7 +235,7 @@ async fn main() -> Result<(), StartupError> {
     let outbox_interval = Duration::from_millis(deployment.nats.outbox_poll_milliseconds);
     let notification_shutdown = service_runtime::subscribe_shutdown();
     let email_shutdown = notification_shutdown.clone();
-    service_runtime::supervise(env!("CARGO_PKG_NAME"), async {
+    Box::pin(service_runtime::supervise(env!("CARGO_PKG_NAME"), async {
         tokio::try_join!(
             async {
                 http_transport::serve_tls(
@@ -281,7 +281,7 @@ async fn main() -> Result<(), StartupError> {
             },
         )?;
         Ok::<(), StartupError>(())
-    })
+    }))
     .await?;
     Ok(())
 }

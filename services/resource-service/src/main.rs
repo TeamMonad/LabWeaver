@@ -27,9 +27,9 @@ async fn main() -> Result<(), MainError> {
     let api = resource_service::api::resource_api_router(runtime.api_state());
     let http = load_http_config().await?;
     let api = resource_service::api::with_delegation(api, http.delegation_key);
-    service_runtime::supervise(env!("CARGO_PKG_NAME"), async {
+    Box::pin(service_runtime::supervise(env!("CARGO_PKG_NAME"), async {
         tokio::try_join!(
-            async { runtime.run().await.map_err(MainError::from) },
+            async { Box::pin(runtime.run()).await.map_err(MainError::from) },
             async {
                 service_runtime::run_with_router(
                     env!("CARGO_PKG_NAME"),
@@ -46,7 +46,7 @@ async fn main() -> Result<(), MainError> {
             },
         )?;
         Ok(())
-    })
+    }))
     .await
 }
 

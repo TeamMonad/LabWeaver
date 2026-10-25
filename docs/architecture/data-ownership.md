@@ -29,11 +29,10 @@ Resource 与 Environment Outbox 用短数据库语句领取带 UUID 的持久发
 
 ## 进程停止与接管
 
-六服务及 Environment/Agent 的常驻 executor 角色复用同一进程壳。SIGINT/SIGTERM 首先置位不可逆的 shutdown 状态，HTTP 停止接收新连接，健康就绪检查不再报告 ready，真实轮询 worker 在下一次领取前检查 shutdown。空闲消息订阅停止取下一条；已经取得的消息、任务或发布应答可以继续收尾。TLS、容器 executor 与构建 executor 将活动连接/请求归入所属任务集合，进程不再以退出一个 HTTP future 的方式遗留后台请求。
+六服务及 Environment/Agent 的常驻 executor 角色复用同一进程壳。SIGINT/SIGTERM 首先置位不可逆的 shutdown 状态，HTTP 停止接收新连接，共享健康端点的就绪检查不再报告 ready，真实轮询 worker 在下一次领取前检查 shutdown。空闲消息订阅停止取下一条；已经取得的消息、任务或发布应答可以继续收尾。TLS、容器 executor 与构建 executor 将活动连接/请求归入所属任务集合，进程不再以退出一个 HTTP future 的方式遗留后台请求。
 
 进程最多给协作收尾 20 秒。超过期限会丢弃未完成 future 并取消其所属子任务，包括租约 heartbeat；不会把未确认任务写成成功，也不会主动清除仍需 fencing 的发布 claim。后继进程根据数据库 lease/claim 期限恢复同一持久任务或 event ID，沿用已有 attempt、UID 与幂等条件；停止进程不等于取消用户任务或释放资源/费用。配置部署的 termination grace 时，应留出至少 20 秒及进程退出余量。
 
 恢复时先恢复 PostgreSQL 与 NATS 可达性，再启动替代 worker；不要删除待发布行或手工清空 claim。Outbox 传输故障由下一轮重试，数据库时钟上的到期租约允许接管；无法校验的事件身份/契约仍明确报错，不伪造发布成功。重复副作用的防护依赖领域条件更新和消费者业务事务内防重，而不是进程排空或消息代理的精确一次保证。
-
 
 空数据库通过显式迁移初始化。服务启动仅校验配置和所需结构，不隐式重建旧 Schema。本次无外部消费者允许全仓接口硬切，但不形成永久数据删除政策；远端数据切换不属于本轮实施。

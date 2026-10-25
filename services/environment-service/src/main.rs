@@ -77,7 +77,7 @@ async fn main() -> Result<(), MainError> {
     if option.as_deref() != Some("--mode") {
         return Err(MainError::Configuration);
     }
-    service_runtime::supervise("environment-service", async {
+    Box::pin(service_runtime::supervise("environment-service", async {
         match value.as_deref() {
             Some("environment-service") => run_environment_service().await,
             Some("container-executor") => {
@@ -89,7 +89,7 @@ async fn main() -> Result<(), MainError> {
             Some("kubevirt-console-executor") => run_kubevirt_console_executor().await,
             _ => Err(MainError::Configuration),
         }
-    })
+    }))
     .await
 }
 
