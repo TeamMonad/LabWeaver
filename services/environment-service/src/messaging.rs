@@ -79,10 +79,10 @@ pub struct JetStreamEventPublisher {
 
 impl JetStreamEventPublisher {
     #[must_use]
-    pub fn new(client: async_nats::Client) -> Self {
-        Self {
-            context: async_nats::jetstream::new(client),
-        }
+    pub fn new(client: async_nats::Client, timeout: Duration) -> Self {
+        let mut context = async_nats::jetstream::new(client);
+        context.set_timeout(timeout);
+        Self { context }
     }
 }
 
@@ -422,12 +422,11 @@ impl JetStreamCommandConsumer {
         store: &PgEnvironmentStore,
         lease_verifier: &NatsResourceLeaseVerifier,
     ) -> Result<CommandConsumeOutcome, NatsMessagingError> {
-        let message = self
-            .messages
-            .next()
-            .await
-            .ok_or(NatsMessagingError::ConsumerClosed)?
-            .map_err(|_| NatsMessagingError::Receive)?;
+        let message = tokio::select! {
+            biased;
+            () = crate::service_runtime::wait_for_shutdown() => return Ok(CommandConsumeOutcome::Deferred),
+            message = self.messages.next() => message.ok_or(NatsMessagingError::ConsumerClosed)?.map_err(|_| NatsMessagingError::Receive)?,
+        };
         if message.payload.len() > MAX_COMMAND_BYTES {
             self.quarantine(&message, None, "LW_ENVIRONMENT_COMMAND_PAYLOAD_TOO_LARGE")
                 .await?;
@@ -648,12 +647,11 @@ impl JetStreamReleaseConsumer {
         &mut self,
         store: &PgReleaseProjectionStore,
     ) -> Result<CommandConsumeOutcome, NatsMessagingError> {
-        let message = self
-            .messages
-            .next()
-            .await
-            .ok_or(NatsMessagingError::ConsumerClosed)?
-            .map_err(|_| NatsMessagingError::Receive)?;
+        let message = tokio::select! {
+            biased;
+            () = crate::service_runtime::wait_for_shutdown() => return Ok(CommandConsumeOutcome::Deferred),
+            message = self.messages.next() => message.ok_or(NatsMessagingError::ConsumerClosed)?.map_err(|_| NatsMessagingError::Receive)?,
+        };
         if message.payload.len() > MAX_COMMAND_BYTES {
             self.quarantine(&message, None, "LW_ENVIRONMENT_RELEASE_PAYLOAD_TOO_LARGE")
                 .await?;

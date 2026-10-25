@@ -441,12 +441,11 @@ impl AgentRunConsumer {
         control: &ControlService,
         agent: &A,
     ) -> Result<(), MessagingError> {
-        let message = self
-            .messages
-            .next()
-            .await
-            .ok_or(MessagingError::Closed)?
-            .map_err(|_| MessagingError::Receive)?;
+        let message = tokio::select! {
+            biased;
+            () = crate::service_runtime::wait_for_shutdown() => return Ok(()),
+            message = self.messages.next() => message.ok_or(MessagingError::Closed)?.map_err(|_| MessagingError::Receive)?,
+        };
         if message.payload.len() > MAX_EVENT_BYTES {
             self.quarantine(&message, None, "LW_EVENT_PAYLOAD_TOO_LARGE")
                 .await?;
@@ -805,12 +804,11 @@ impl AuthoringPublicationConsumer {
         evaluation: &E,
         images: &A,
     ) -> Result<(), MessagingError> {
-        let message = self
-            .messages
-            .next()
-            .await
-            .ok_or(MessagingError::Closed)?
-            .map_err(|_| MessagingError::Receive)?;
+        let message = tokio::select! {
+            biased;
+            () = crate::service_runtime::wait_for_shutdown() => return Ok(()),
+            message = self.messages.next() => message.ok_or(MessagingError::Closed)?.map_err(|_| MessagingError::Receive)?,
+        };
         if message.payload.len() > MAX_EVENT_BYTES {
             self.quarantine(&message, None, "LW_EVENT_PAYLOAD_TOO_LARGE")
                 .await?;
@@ -1370,12 +1368,11 @@ impl AgentBuildConsumer {
         control: &ControlService,
         agent: &A,
     ) -> Result<(), MessagingError> {
-        let message = self
-            .messages
-            .next()
-            .await
-            .ok_or(MessagingError::Closed)?
-            .map_err(|_| MessagingError::Receive)?;
+        let message = tokio::select! {
+            biased;
+            () = crate::service_runtime::wait_for_shutdown() => return Ok(()),
+            message = self.messages.next() => message.ok_or(MessagingError::Closed)?.map_err(|_| MessagingError::Receive)?,
+        };
         if message.payload.len() > MAX_EVENT_BYTES {
             self.quarantine(&message, None, "LW_EVENT_PAYLOAD_TOO_LARGE")
                 .await?;

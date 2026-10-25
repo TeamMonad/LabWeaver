@@ -12,6 +12,8 @@ mod object_authorization;
 mod oidc_login;
 mod proxy;
 mod runtime;
+#[path = "../../service_runtime.rs"]
+mod service_runtime;
 
 use std::{collections::BTreeSet, net::SocketAddr, str::FromStr, sync::Arc};
 
@@ -97,16 +99,45 @@ async fn main() -> Result<(), StartupError> {
     let internal_router = internal_router(Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let internal_listener = tokio::net::TcpListener::bind(internal_bind).await?;
-    let result = tokio::select! {
-        result = axum::serve(listener, router) => result.map_err(StartupError::from),
-        result = serve_internal(internal_listener, internal_router, internal_tls) => result,
-        result = auth_cleanup_loop(Arc::clone(&state)) => result,
-        result = grants::activation_loop(Arc::clone(&state)) => result.map_err(StartupError::from),
-        result = grants::maintenance_loop(Arc::clone(&state)) => result.map_err(StartupError::from),
-        result = grants::outbox_loop(Arc::clone(&state)) => result.map_err(StartupError::from),
-        result = grants::environment_revocation_loop(Arc::clone(&state)) => result.map_err(StartupError::from),
-        result = grants::environment_state_loop(Arc::clone(&state)) => result.map_err(StartupError::from),
-    };
+    let result = Box::pin(service_runtime::supervise(env!("CARGO_PKG_NAME"), async {
+        tokio::try_join!(
+            async {
+                axum::serve(listener, router)
+                    .with_graceful_shutdown(service_runtime::wait_for_shutdown())
+                    .await
+                    .map_err(StartupError::from)
+            },
+            serve_internal(internal_listener, internal_router, internal_tls),
+            auth_cleanup_loop(Arc::clone(&state)),
+            async {
+                grants::activation_loop(Arc::clone(&state))
+                    .await
+                    .map_err(StartupError::from)
+            },
+            async {
+                grants::maintenance_loop(Arc::clone(&state))
+                    .await
+                    .map_err(StartupError::from)
+            },
+            async {
+                grants::outbox_loop(Arc::clone(&state))
+                    .await
+                    .map_err(StartupError::from)
+            },
+            async {
+                grants::environment_revocation_loop(Arc::clone(&state))
+                    .await
+                    .map_err(StartupError::from)
+            },
+            async {
+                grants::environment_state_loop(Arc::clone(&state))
+                    .await
+                    .map_err(StartupError::from)
+            },
+        )?;
+        Ok::<(), StartupError>(())
+    }))
+    .await;
     state.console_registry.cancel_all().await;
     result?;
     Ok(())
@@ -955,7 +986,9 @@ async fn auth_cleanup_loop(state: Arc<AppState>) -> Result<(), StartupError> {
     let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        ticker.tick().await;
+        if !service_runtime::worker_tick(&mut ticker).await {
+            return Ok(());
+        }
         if sqlx::query("DELETE FROM access.runtime_capabilities WHERE expires_at<=now() OR (consumed_at IS NULL AND handoff_expires_at<=now())")
             .execute(&state.pool).await.is_err()
         {

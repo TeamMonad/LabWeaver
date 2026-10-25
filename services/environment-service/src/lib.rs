@@ -8,6 +8,9 @@
 #[cfg(test)]
 extern crate self as environment_service;
 
+#[path = "../../service_runtime.rs"]
+pub mod service_runtime;
+
 mod api;
 mod cdi_import;
 mod container_placement;

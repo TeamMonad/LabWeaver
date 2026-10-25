@@ -400,7 +400,9 @@ impl PlatformImageImportWorker {
         let mut ticker = tokio::time::interval(self.poll_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            ticker.tick().await;
+            if !crate::service_runtime::worker_tick(&mut ticker).await {
+                return Ok(());
+            }
             if let Err(error) = self.tick().await {
                 tracing::error!(
                     event = "agent.platform_image_import.worker_error",

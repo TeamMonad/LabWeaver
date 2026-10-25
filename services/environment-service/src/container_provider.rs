@@ -847,7 +847,14 @@ impl<B: ContainerExecutorBackend + 'static> NatsContainerExecutorServer<B> {
             .subscribe(self.subject)
             .await
             .map_err(|_| ContainerExecutorFenceError::Transport)?;
-        while let Some(message) = subscriber.next().await {
+        let mut requests = tokio::task::JoinSet::new();
+        loop {
+            let message = tokio::select! {
+                biased;
+                () = crate::service_runtime::wait_for_shutdown() => break,
+                _ = requests.join_next(), if !requests.is_empty() => continue,
+                message = subscriber.next() => message.ok_or(ContainerExecutorFenceError::Transport)?,
+            };
             let Some(reply) = message.reply.clone() else {
                 tracing::warn!(
                     event = "environment.container_executor.request_rejected",
@@ -873,7 +880,7 @@ impl<B: ContainerExecutorBackend + 'static> NatsContainerExecutorServer<B> {
             };
             let client = self.client.clone();
             let executor = Arc::clone(&self.executor);
-            tokio::spawn(async move {
+            requests.spawn(async move {
                 let fence = envelope.fence.clone();
                 let response = match executor.execute(envelope).await {
                     Ok(response) => response,
@@ -919,7 +926,8 @@ impl<B: ContainerExecutorBackend + 'static> NatsContainerExecutorServer<B> {
                 }
             });
         }
-        Err(ContainerExecutorFenceError::Transport)
+        while requests.join_next().await.is_some() {}
+        Ok(())
     }
 }
 

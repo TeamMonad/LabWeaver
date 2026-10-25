@@ -22,6 +22,7 @@ use control_service::messaging::{
 use control_service::platform_image_jobs::{
     PlatformImageImportWorker, PlatformImageImportWorkerError,
 };
+use control_service::service_runtime;
 use control_service::{ControlConfig, ControlService};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
@@ -232,58 +233,57 @@ async fn main() -> Result<(), StartupError> {
     let authoring_consumer_evaluation = evaluation;
     let interval = std::time::Duration::from_secs(deployment.cleanup_interval_seconds);
     let outbox_interval = Duration::from_millis(deployment.nats.outbox_poll_milliseconds);
-    let (notification_stop, stop_receiver) = tokio::sync::watch::channel(false);
-    let mut notifications = Box::pin(notification_consumer.run(
-        notification_pool,
-        reminder_windows,
-        email_enabled,
-        stop_receiver.clone(),
-    ));
-    let mut emails = Box::pin(async {
-        if let Some(worker) = smtp {
-            worker.run(email_pool, stop_receiver).await
-        } else {
-            std::future::pending().await
-        }
-    });
-    tokio::select! {
-        result = http_transport::serve_tls(
-            listener,
-            authenticated_router(&state, &service_token_verifier),
-            tls,
-        ) => result?,
-        result = cleanup_loop(service, interval) => result?,
-        result = platform_image_import_worker.run() => result.map_err(StartupError::PlatformImageImport)?,
-        result = consumer_loop(consumer, consumer_control, agent) => result?,
-        result = build_consumer_loop(build_consumer, build_consumer_control, build_consumer_agent) => result?,
-        result = authoring_consumer_loop(authoring_consumer, authoring_consumer_control, authoring_consumer_evaluation, authoring_consumer_agent) => result?,
-        result = outbox_loop(outbox, outbox_interval) => result?,
-        result = &mut notifications => result?,
-        result = &mut emails => result?,
-        result = notification_shutdown_signal() => {
-            result?;
-            notification_stop.send_replace(true);
-            tokio::time::timeout(Duration::from_secs(20),async {
-                notifications.await?;
-                if email_enabled { emails.await?; }
-                Ok::<(),control_service::notifications::NotificationError>(())
-            }).await.map_err(|_|StartupError::Configuration)??;
-        },
-    }
+    let notification_shutdown = service_runtime::subscribe_shutdown();
+    let email_shutdown = notification_shutdown.clone();
+    service_runtime::supervise(env!("CARGO_PKG_NAME"), async {
+        tokio::try_join!(
+            async {
+                http_transport::serve_tls(
+                    listener,
+                    authenticated_router(&state, &service_token_verifier),
+                    tls,
+                )
+                .await
+                .map_err(StartupError::from)
+            },
+            cleanup_loop(service, interval),
+            async {
+                platform_image_import_worker
+                    .run()
+                    .await
+                    .map_err(StartupError::PlatformImageImport)
+            },
+            consumer_loop(consumer, consumer_control, agent),
+            build_consumer_loop(build_consumer, build_consumer_control, build_consumer_agent),
+            authoring_consumer_loop(
+                authoring_consumer,
+                authoring_consumer_control,
+                authoring_consumer_evaluation,
+                authoring_consumer_agent
+            ),
+            outbox_loop(outbox, outbox_interval),
+            async {
+                notification_consumer
+                    .run(
+                        notification_pool,
+                        reminder_windows,
+                        email_enabled,
+                        notification_shutdown,
+                    )
+                    .await
+                    .map_err(StartupError::from)
+            },
+            async {
+                if let Some(worker) = smtp {
+                    worker.run(email_pool, email_shutdown).await?;
+                }
+                Ok::<(), StartupError>(())
+            },
+        )?;
+        Ok::<(), StartupError>(())
+    })
+    .await?;
     Ok(())
-}
-
-async fn notification_shutdown_signal() -> Result<(), std::io::Error> {
-    #[cfg(unix)]
-    {
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        tokio::select! { result=tokio::signal::ctrl_c()=>result, _=terminate.recv()=>Ok(()) }
-    }
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c().await
-    }
 }
 
 async fn discover_service_auth()
@@ -342,6 +342,9 @@ async fn build_consumer_loop(
     agent: AgentClient,
 ) -> Result<(), StartupError> {
     loop {
+        if service_runtime::is_stopping() {
+            return Ok(());
+        }
         consumer.process_next(&control, &agent).await?;
     }
 }
@@ -352,6 +355,9 @@ async fn consumer_loop(
     agent: AgentClient,
 ) -> Result<(), StartupError> {
     loop {
+        if service_runtime::is_stopping() {
+            return Ok(());
+        }
         consumer.process_next(&control, &agent).await?;
     }
 }
@@ -363,6 +369,9 @@ async fn authoring_consumer_loop(
     agent: AgentClient,
 ) -> Result<(), StartupError> {
     loop {
+        if service_runtime::is_stopping() {
+            return Ok(());
+        }
         consumer.process_next(&control, &evaluation, &agent).await?;
     }
 }
@@ -377,8 +386,13 @@ async fn outbox_loop(
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        ticker.tick().await;
+        if !service_runtime::worker_tick(&mut ticker).await {
+            return Ok(());
+        }
         loop {
+            if service_runtime::is_stopping() {
+                return Ok(());
+            }
             match outbox.dispatch_once().await {
                 Ok(true) => tracing::debug!(event = "control.outbox.published"),
                 Ok(false) => break,
@@ -521,7 +535,9 @@ async fn cleanup_loop(
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        ticker.tick().await;
+        if !service_runtime::worker_tick(&mut ticker).await {
+            return Ok(());
+        }
         let value = OffsetDateTime::now_utc();
         let value = value
             .replace_nanosecond((value.nanosecond() / 1_000_000) * 1_000_000)

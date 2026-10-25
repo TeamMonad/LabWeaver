@@ -425,20 +425,27 @@ impl GatewayState {
     }
 }
 pub async fn serve(state: GatewayState, listener: TcpListener) -> Result<(), std::io::Error> {
-    let server = async { axum::serve(listener, state.clone().router()).await };
+    let server = async {
+        axum::serve(listener, state.clone().router())
+            .with_graceful_shutdown(crate::service_runtime::wait_for_shutdown())
+            .await
+    };
     let reconciliation = async {
         let mut interval = tokio::time::interval(Duration::from_secs(10));
         loop {
-            interval.tick().await;
+            if !crate::service_runtime::worker_tick(&mut interval).await {
+                return;
+            }
             if let Err(error) = state.reconcile_pending_zero_settlements().await {
                 tracing::warn!(event="agent.model.zero_settlement_pending",diagnostic_code=%error,"durable zero observation retained for reconciliation");
             }
         }
     };
-    tokio::select! {
-        result = server => result,
-        () = reconciliation => Err(std::io::Error::other("model settlement reconciliation ended")),
-    }
+    tokio::try_join!(server, async {
+        reconciliation.await;
+        Ok::<(), std::io::Error>(())
+    })
+    .map(|_| ())
 }
 fn error_response(status: StatusCode, code: &'static str, message: &str) -> Response {
     (status,axum::Json(json!({"type":"error","error":{"type":"invalid_request_error","message":message},"lwCode":code}))).into_response()

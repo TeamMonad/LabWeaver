@@ -8,6 +8,9 @@
 #[cfg(test)]
 extern crate self as agent_service;
 
+#[path = "../../service_runtime.rs"]
+pub mod service_runtime;
+
 pub mod api;
 pub mod build_executor;
 pub mod build_pipeline;

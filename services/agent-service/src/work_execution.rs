@@ -1395,7 +1395,9 @@ where
     let mut ticker = tokio::time::interval(poll_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        ticker.tick().await;
+        if !crate::service_runtime::worker_tick(&mut ticker).await {
+            return Ok(());
+        }
         let processed = poll().await?;
         if processed == 0 {
             tracing::debug!(event = "agent.work_execution.worker_idle", outcome = "idle",);

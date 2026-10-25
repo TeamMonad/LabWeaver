@@ -5,6 +5,9 @@
     reason = "transactional use cases keep their complete consistency boundary visible"
 )]
 
+#[path = "../../service_runtime.rs"]
+pub mod service_runtime;
+
 pub mod api;
 mod candidate_builds;
 pub mod clients;

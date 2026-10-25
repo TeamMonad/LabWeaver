@@ -61,7 +61,6 @@ pub struct ResourceProcessRuntime {
     capacity_worker: CapacityReconcileWorker,
     outbox: ResourceOutboxDispatcher,
     readiness: Arc<AtomicBool>,
-    _shutdown_sender: watch::Sender<bool>,
     shutdown: watch::Receiver<bool>,
 }
 
@@ -136,7 +135,7 @@ impl ResourceProcessRuntime {
         let capacity_worker = capacity_configuration
             .build_worker(store.clone(), environment_token_client)
             .map_err(ResourceProcessRuntimeError::CapacityProvider)?;
-        let (shutdown_sender, shutdown) = watch::channel(false);
+        let shutdown = crate::service_runtime::subscribe_shutdown();
         Ok(Self {
             responder,
             store,
@@ -150,7 +149,6 @@ impl ResourceProcessRuntime {
             capacity_worker,
             outbox,
             readiness: Arc::new(AtomicBool::new(true)),
-            _shutdown_sender: shutdown_sender,
             shutdown,
         })
     }
@@ -189,7 +187,6 @@ impl ResourceProcessRuntime {
             cursor_signing_key_previous: _cursor_signing_key_previous,
             task_service_client_ids: _task_service_client_ids,
             build_service_client_id: _build_service_client_id,
-            _shutdown_sender,
             shutdown,
         } = self;
         let responder_shutdown = shutdown.clone();
@@ -276,6 +273,9 @@ async fn run_outbox(
 ) -> Result<(), ResourceOutboxError> {
     let mut interval = tokio::time::interval(OUTBOX_INTERVAL);
     loop {
+        if *shutdown.borrow() {
+            return Ok(());
+        }
         tokio::select! {
             biased;
             changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { return Ok(()); } }
@@ -307,6 +307,9 @@ async fn run_accounting(
     let mut interval = tokio::time::interval(OUTBOX_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
+        if *shutdown.borrow() {
+            return Ok(());
+        }
         tokio::select! {
             biased;
             changed=shutdown.changed()=>{if changed.is_err() || *shutdown.borrow(){return Ok(());}}

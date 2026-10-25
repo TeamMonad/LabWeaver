@@ -12,6 +12,9 @@
     reason = "Resource transitions and persistence errors are documented by typed diagnostics and contracts"
 )]
 
+#[path = "../../service_runtime.rs"]
+pub mod service_runtime;
+
 use contracts::resource::{
     ResourceApproval, ResourceError, ResourceLease, ResourceLeaseState, ResourceRequest,
     ResourceRequestState,

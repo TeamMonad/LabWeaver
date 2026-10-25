@@ -183,7 +183,9 @@ impl PostgresAgentRunStore {
     pub async fn run_model_retention(&self) -> Result<(), AgentRunStoreError> {
         let mut interval = tokio::time::interval(Duration::from_mins(1));
         loop {
-            interval.tick().await;
+            if !crate::service_runtime::worker_tick(&mut interval).await {
+                return Ok(());
+            }
             self.purge_expired_model_diagnostics().await?;
             tokio::task::spawn_blocking(|| {
                 purge_abandoned_contexts(&std::env::temp_dir(), std::time::SystemTime::now())

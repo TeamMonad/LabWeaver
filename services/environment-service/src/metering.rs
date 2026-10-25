@@ -1317,7 +1317,11 @@ pub(crate) async fn delivery_loop(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), EnvironmentStoreError> {
     loop {
+        if *shutdown.borrow() {
+            return Ok(());
+        }
         tokio::select! {
+            biased;
             changed = shutdown.changed() => {
                 changed.map_err(|_| EnvironmentStoreError::MeteringInvalid)?;
                 return Ok(());

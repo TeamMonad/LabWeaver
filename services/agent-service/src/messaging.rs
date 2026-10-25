@@ -227,12 +227,11 @@ impl AgentBuildCommandConsumer {
         &mut self,
         store: &PgBuildStore,
     ) -> Result<BuildConsumeOutcome, AgentMessagingError> {
-        let message = self
-            .messages
-            .next()
-            .await
-            .ok_or(AgentMessagingError::ConsumerClosed)?
-            .map_err(|_| AgentMessagingError::Receive)?;
+        let message = tokio::select! {
+            biased;
+            () = crate::service_runtime::wait_for_shutdown() => return Ok(BuildConsumeOutcome::Deferred),
+            message = self.messages.next() => message.ok_or(AgentMessagingError::ConsumerClosed)?.map_err(|_| AgentMessagingError::Receive)?,
+        };
         let info = message.info().map_err(|_| AgentMessagingError::Receive)?;
         let delivery_attempt =
             u64::try_from(info.delivered).map_err(|_| AgentMessagingError::Receive)?;

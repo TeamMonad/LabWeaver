@@ -1,5 +1,12 @@
 //! Shared process lifecycle for the six independently deployable service shells.
 
+#![allow(
+    missing_docs,
+    clippy::missing_errors_doc,
+    dead_code,
+    reason = "the shared shell is compiled into each service with its own entry points"
+)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{net::SocketAddr, str::FromStr};
@@ -11,6 +18,79 @@ use axum::{
     routing::get,
 };
 use thiserror::Error;
+
+const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+static SHUTDOWN: std::sync::LazyLock<tokio::sync::watch::Sender<bool>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::channel(false).0);
+
+fn shutdown_sender() -> &'static tokio::sync::watch::Sender<bool> {
+    &SHUTDOWN
+}
+
+/// Subscribes a real worker to the process-wide stop request.
+#[must_use]
+pub fn subscribe_shutdown() -> tokio::sync::watch::Receiver<bool> {
+    shutdown_sender().subscribe()
+}
+
+/// Returns true once the process must stop claiming work. This transition is irreversible.
+#[must_use]
+pub fn is_stopping() -> bool {
+    *shutdown_sender().borrow()
+}
+
+/// Stops acquisition before draining already-owned work.
+pub fn request_shutdown() {
+    shutdown_sender().send_replace(true);
+}
+
+/// Waits for the shared stop request, including one sent before subscription.
+pub async fn wait_for_shutdown() {
+    let mut receiver = subscribe_shutdown();
+    if !*receiver.borrow_and_update() {
+        let _ = receiver.changed().await;
+    }
+}
+
+/// Waits for a polling tick unless shutdown wins. Call before acquiring another task.
+pub async fn worker_tick(interval: &mut tokio::time::Interval) -> bool {
+    tokio::select! {
+        biased;
+        () = wait_for_shutdown() => false,
+        _ = interval.tick() => !is_stopping(),
+    }
+}
+
+/// Owns the single process signal handler and bounds cooperative worker/HTTP drain.
+/// Expiry drops unfinished futures without marking them complete or releasing their leases.
+pub async fn supervise<E>(
+    service: &'static str,
+    work: impl Future<Output = Result<(), E>>,
+) -> Result<(), E> {
+    tokio::pin!(work);
+    tokio::select! {
+        result = &mut work => {
+            request_shutdown();
+            return result;
+        }
+        () = shutdown_signal(service) => request_shutdown(),
+    }
+    tracing::info!(
+        event = "service.draining",
+        service,
+        drain_seconds = DRAIN_TIMEOUT.as_secs()
+    );
+    if let Ok(result) = tokio::time::timeout(DRAIN_TIMEOUT, &mut work).await {
+        result
+    } else {
+        tracing::warn!(
+            event = "service.drain_expired",
+            service,
+            recovery = "lease_takeover"
+        );
+        Ok(())
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum StartupError {
@@ -68,7 +148,7 @@ pub async fn run_with_router(
         listener,
         health_router(service, readiness).merge(application),
     )
-    .with_graceful_shutdown(shutdown_signal(service))
+    .with_graceful_shutdown(wait_for_shutdown())
     .await?;
     tracing::info!(
         schema = telemetry::LOG_SCHEMA,
@@ -103,7 +183,7 @@ fn ready(
     service: &'static str,
     readiness: &AtomicBool,
 ) -> (StatusCode, Json<contracts::HealthResponse>) {
-    if readiness.load(Ordering::Acquire) {
+    if !is_stopping() && readiness.load(Ordering::Acquire) {
         (StatusCode::OK, health(service, "ready"))
     } else {
         (

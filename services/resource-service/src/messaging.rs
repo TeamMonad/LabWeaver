@@ -41,7 +41,11 @@ impl NatsLeaseVerificationResponder {
             .await
             .map_err(|_| NatsLeaseResponderError::Subscribe)?;
         loop {
+            if *shutdown.borrow() {
+                return Ok(());
+            }
             tokio::select! {
+                biased;
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() { return Ok(()); }
                 }

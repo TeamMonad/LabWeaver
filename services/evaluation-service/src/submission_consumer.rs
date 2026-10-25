@@ -85,12 +85,11 @@ impl SubmissionFrozenConsumer {
         evaluation: &PgEvaluationControlStore,
         authoring: &AuthoringAdmissionClient,
     ) -> Result<(), SubmissionConsumerError> {
-        let message = self
-            .messages
-            .next()
-            .await
-            .ok_or(SubmissionConsumerError::Closed)?
-            .map_err(|_| SubmissionConsumerError::Receive)?;
+        let message = tokio::select! {
+            biased;
+            () = crate::service_runtime::wait_for_shutdown() => return Ok(()),
+            message = self.messages.next() => message.ok_or(SubmissionConsumerError::Closed)?.map_err(|_| SubmissionConsumerError::Receive)?,
+        };
         if message.payload.len() > MAX_EVENT_BYTES {
             self.quarantine(&message, None, "LW_EVENT_PAYLOAD_TOO_LARGE")
                 .await?;

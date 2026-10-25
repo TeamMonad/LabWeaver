@@ -1512,7 +1512,11 @@ impl CapacityReconcileWorker {
     ) -> Result<(), crate::store::ResourceStoreError> {
         let mut interval = tokio::time::interval(self.poll_interval);
         loop {
+            if *shutdown.borrow() {
+                return Ok(());
+            }
             tokio::select! {
+                biased;
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() { return Ok(()); }
                 }

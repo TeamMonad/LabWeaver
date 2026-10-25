@@ -2,8 +2,7 @@
 
 #[path = "../../http_transport.rs"]
 mod http_transport;
-#[path = "../../service_runtime.rs"]
-mod service_runtime;
+use resource_service::service_runtime;
 
 use serde::Deserialize;
 
@@ -13,8 +12,6 @@ enum MainError {
     Runtime(#[from] resource_service::ResourceProcessRuntimeError),
     #[error(transparent)]
     Startup(#[from] service_runtime::StartupError),
-    #[error("LW_RESOURCE_RUNTIME_TASK_FAILED: {0}")]
-    RuntimeTask(#[from] tokio::task::JoinError),
     #[error("LW_RESOURCE_HTTP_CONFIGURATION_INVALID")]
     Configuration,
     #[error("LW_RESOURCE_HTTP_LISTENER_FAILED")]
@@ -30,21 +27,27 @@ async fn main() -> Result<(), MainError> {
     let api = resource_service::api::resource_api_router(runtime.api_state());
     let http = load_http_config().await?;
     let api = resource_service::api::with_delegation(api, http.delegation_key);
-    let runtime_task = tokio::spawn(runtime.run());
-    tokio::select! {
-        result = runtime_task => {
-            result??;
-            Ok(())
-        }
-        result = service_runtime::run_with_router(env!("CARGO_PKG_NAME"), readiness, axum::Router::new()) => {
-            result?;
-            Ok(())
-        }
-        result = http_transport::serve_tls(http.listener, api, http.tls) => {
-            result?;
-            Ok(())
-        }
-    }
+    service_runtime::supervise(env!("CARGO_PKG_NAME"), async {
+        tokio::try_join!(
+            async { runtime.run().await.map_err(MainError::from) },
+            async {
+                service_runtime::run_with_router(
+                    env!("CARGO_PKG_NAME"),
+                    readiness,
+                    axum::Router::new(),
+                )
+                .await
+                .map_err(MainError::from)
+            },
+            async {
+                http_transport::serve_tls(http.listener, api, http.tls)
+                    .await
+                    .map_err(MainError::from)
+            },
+        )?;
+        Ok(())
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
