@@ -988,6 +988,12 @@ async fn validate_container_execution_plan(
             envelope.fence.action,
         )
         .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+    let received_sha256 = container_plan_sha256(
+        plan.environment_id, &resolved.projection.release, &plan.image, &plan.resources, plan.namespace_uid,
+    ).map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+    if received_sha256 != plan.plan_sha256 || received_sha256 != expected.plan_sha256 {
+        return Err(ContainerExecutorFenceError::IdentityMismatch);
+    }
     crate::runtime_admission::validate_container_runtime_plan(
         &instance,
         &expected,
@@ -1585,14 +1591,7 @@ impl ContainerProviderConfiguration {
                 }
             }
         }
-        let plan_sha256 = canonical_hash(&json!({
-            "environmentId": instance.id,
-            "releaseId": projection.release.id,
-            "releaseVersion": projection.release.version,
-            "image": image,
-            "resources": documents,
-            "namespaceUid": placement.namespace_uid,
-        }))?;
+        let plan_sha256 = container_plan_sha256(instance.id, &projection.release, &image, &documents, placement.namespace_uid)?;
         Ok(ContainerResourcePlan {
             environment_id: instance.id,
             project_id: instance.project_id,
@@ -2258,6 +2257,23 @@ fn log_projection_failure(
         phase,
         diagnostic_code = %error,
     );
+}
+
+fn container_plan_sha256(
+    environment_id: EnvironmentId,
+    release: &contracts::supply_chain::EnvironmentTemplateRelease,
+    image: &str,
+    resources: &[ContainerResource],
+    namespace_uid: Option<uuid::Uuid>,
+) -> Result<Sha256Digest, ReleaseProjectionError> {
+    canonical_hash(&json!({
+        "environmentId": environment_id,
+        "releaseId": release.id,
+        "releaseVersion": release.version,
+        "image": image,
+        "resources": resources,
+        "namespaceUid": namespace_uid,
+    }))
 }
 
 fn canonical_hash<T: Serialize>(value: &T) -> Result<Sha256Digest, ReleaseProjectionError> {

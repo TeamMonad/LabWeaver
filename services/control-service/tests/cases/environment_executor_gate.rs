@@ -54,7 +54,7 @@ pub(super) async fn exercise(
             .bind(serde_json::to_value(&denied)?)
             .execute(pool).await?;
         for &action in actions(instance.runtime_kind) {
-            let result = execute(pool, admission, instance, action, deadline, calls.clone()).await;
+            let result = execute(pool, admission, instance, action, deadline, calls.clone(), true).await;
             if !matches!(&result, Err(error) if error.to_string().contains("LW_RUNTIME_LEASE_NOT_ACTIVE"))
             {
                 unexpected.push(format!(
@@ -77,7 +77,7 @@ pub(super) async fn exercise(
         "denied leases must cause zero Kubernetes effects"
     );
     for (index, &action) in actions(instance.runtime_kind).iter().enumerate() {
-        execute(pool, admission, instance, action, deadline, calls.clone()).await?;
+        execute(pool, admission, instance, action, deadline, calls.clone(), false).await?;
         assert_eq!(
             calls.load(Ordering::SeqCst),
             index + 1,
@@ -106,6 +106,7 @@ async fn execute(
     action: ReconcileAction,
     deadline: UtcTimestamp,
     calls: Arc<AtomicUsize>,
+    sparse_attack: bool,
 ) -> Result {
     let backend = Cluster(
         calls,
@@ -116,11 +117,11 @@ async fn execute(
         let ContainerExecutorRequest::Apply { mut plan } = envelope.request else {
             return Err("apply fixture".into());
         };
-        // Sparse writes retain the trusted projector's exact Service document and metadata.
-        plan.resources.retain(|resource| {
-            matches!(action, ReconcileAction::Provision | ReconcileAction::Reset)
-                && resource.kind == "Service"
-        });
+        if sparse_attack {
+            // Malformed sparse requests must not bypass the fresh grant gate. Legitimate writes
+            // below always carry the complete trusted plan; there is no sparse-write exception.
+            plan.resources.retain(|resource| matches!(action, ReconcileAction::Provision | ReconcileAction::Reset) && resource.kind == "Service");
+        }
         envelope.request = match action {
             ReconcileAction::Provision | ReconcileAction::Reset => {
                 ContainerExecutorRequest::Apply { plan }

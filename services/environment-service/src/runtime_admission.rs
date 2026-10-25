@@ -452,19 +452,10 @@ pub(crate) fn validate_container_runtime_plan(
     {
         return Err(crate::ReleaseProjectionError::IdentityMismatch);
     }
-    // Requests may contain an ordered subset for a non-Pod write. Every supplied object must
-    // exactly match the one trusted projector produced; duplicates, extra objects and any
-    // added Pod/Deployment/Namespace fields are rejected without a field blacklist.
-    let mut resources = expected.resources.iter();
-    for received in &plan.resources {
-        let expected = resources.find(|candidate| {
-            candidate.kind == received.kind
-                && candidate.name == received.name
-                && candidate.namespace == received.namespace
-        });
-        if expected != Some(received) {
-            return Err(crate::ReleaseProjectionError::SecurityPostureInvalid);
-        }
+    // The security objects are part of the approved computation, not optional dependencies.
+    // Vec equality covers count, order and the complete contents of every resource.
+    if plan.resources != expected.resources {
+        return Err(crate::ReleaseProjectionError::SecurityPostureInvalid);
     }
     Ok(())
 }

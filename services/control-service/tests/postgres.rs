@@ -445,6 +445,12 @@ async fn recomputed_container_messages_cannot_expand_the_approved_security_plane
         Tamper::ServiceAccountToken,
         Tamper::PrivilegeEscalation,
         Tamper::NamespacePsa,
+        Tamper::MissingNetworkPolicy,
+        Tamper::RehashedMissingNetworkPolicy,
+        Tamper::MissingResourceQuota,
+        Tamper::MissingLimitRange,
+        Tamper::EphemeralContainers,
+        Tamper::InitPrivilegeEscalation,
     ] {
         let capability = (tamper != Tamper::NamespacePsa)
             .then_some(contracts::platform_configuration::LinuxCapability::NetAdmin);

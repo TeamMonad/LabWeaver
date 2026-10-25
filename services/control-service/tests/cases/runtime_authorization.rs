@@ -54,6 +54,12 @@ pub(super) enum ContainerSecurityTampering {
     ServiceAccountToken,
     PrivilegeEscalation,
     NamespacePsa,
+    MissingNetworkPolicy,
+    RehashedMissingNetworkPolicy,
+    MissingResourceQuota,
+    MissingLimitRange,
+    EphemeralContainers,
+    InitPrivilegeEscalation,
 }
 
 async fn progress(
