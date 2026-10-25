@@ -1,13 +1,18 @@
 import { ref, computed, watch } from 'vue'
 import { UserManager, type User, WebStorageStateStore } from 'oidc-client-ts'
-import type { AuthSession, LogoutBrowserSessionResponse } from '@/generated/contracts'
+import type { AuthSession, CsrfTokenResponseSchema, LogoutBrowserSessionResponse } from '@/generated/contracts'
 import { API_AUTH_MODE, DIRECT_OIDC_ENABLED, OIDC_CONFIG } from '@/config'
 import {
+  identityReadsSettled,
+  markSessionActorUnknown,
   recordSessionActor,
   registerSessionConfirmation,
+  reportSessionRejected,
   resolveSessionActorDoubt,
+  sessionActor,
   sessionActorConfirming,
   sessionActorInDoubt,
+  sessionEpoch,
   trackIdentityRead,
 } from '@/api/session'
 import { actorIdFromProfile, navigateTopLevel } from '@/utils/navigation'
@@ -75,6 +80,13 @@ function sessionExpiredError(diagnostic: string): Error {
   return error
 }
 
+// A refused logout sends nothing to the BFF; the message is shown as is.
+const LOGOUT_ACTOR_CHANGED = '登录账号已在其他页面变化，本次退出没有执行，以免退出另一个账号。请核对页面上的账号后再操作。'
+const LOGOUT_ACTOR_UNKNOWN = '暂时无法确认当前登录账号，本次退出没有执行。请稍后重试或刷新页面。'
+
+/** A session read that does not answer in time leaves the identity unknown instead of holding writes. */
+export const SESSION_READ_TIMEOUT_MS = 15_000
+
 function bffUser(session: AuthSession): BffUser {
   const expiresAt = Date.parse(session.expiresAt)
   if (!Number.isFinite(expiresAt)) throw new Error('BFF session returned an invalid expiry')
@@ -91,13 +103,20 @@ function bffUser(session: AuthSession): BffUser {
 
 /** The current BFF actor, or null when the server says the session has ended. */
 async function readBffSession(): Promise<BffUser | null> {
-  const response = await fetch('/api/v1/auth/session', {
-    credentials: 'include',
-    headers: { Accept: 'application/json, application/problem+json' },
-  })
-  if (response.status === 401) return null
-  if (!response.ok) throw new Error(`BFF session lookup failed with HTTP ${response.status}`)
-  return bffUser(await response.json() as AuthSession)
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), SESSION_READ_TIMEOUT_MS)
+  try {
+    const response = await fetch('/api/v1/auth/session', {
+      credentials: 'include',
+      headers: { Accept: 'application/json, application/problem+json' },
+      signal: controller.signal,
+    })
+    if (response.status === 401) return null
+    if (!response.ok) throw new Error(`BFF session lookup failed with HTTP ${response.status}`)
+    return bffUser(await response.json() as AuthSession)
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 let latestSessionLoad: Promise<void> | undefined
@@ -118,6 +137,8 @@ function loadBffSession(): Promise<void> {
     },
     (error: unknown) => {
       if (latestSessionLoad !== load) return latestSessionLoad
+      // The read failed or timed out: who holds the session is unknown now.
+      markSessionActorUnknown()
       throw error
     },
   )
@@ -183,6 +204,17 @@ export function useAuth(navigate: TopLevelNavigate = navigateTopLevel) {
     error.value = null
     try {
       if (API_AUTH_MODE === 'bff') {
+        // Sign out only the actor this page belongs to: wait (bounded) for an
+        // identity read in flight, then require the same actor and epoch.
+        const initiatingActor = sessionActor()
+        const initiatingEpoch = sessionEpoch.value
+        try {
+          await identityReadsSettled({ timeoutMs: SESSION_READ_TIMEOUT_MS })
+        } catch {
+          throw new Error(LOGOUT_ACTOR_UNKNOWN)
+        }
+        if (sessionEpoch.value !== initiatingEpoch || sessionActor() !== initiatingActor) throw new Error(LOGOUT_ACTOR_CHANGED)
+        if (!initiatingActor || sessionActorInDoubt.value) throw new Error(LOGOUT_ACTOR_UNKNOWN)
         const csrfResponse = await fetch('/api/v1/auth/csrf', {
           credentials: 'include',
           headers: { Accept: 'application/json, application/problem+json' },
@@ -192,8 +224,14 @@ export function useAuth(navigate: TopLevelNavigate = navigateTopLevel) {
           throw sessionExpiredError(`BFF CSRF lookup failed with HTTP ${csrfResponse.status}`)
         }
         if (!csrfResponse.ok) throw new Error(`BFF CSRF lookup failed with HTTP ${csrfResponse.status}`)
-        const csrf = await csrfResponse.json() as { csrfToken?: unknown }
+        const csrf = await csrfResponse.json() as Partial<Record<keyof CsrfTokenResponseSchema, unknown>>
         if (typeof csrf.csrfToken !== 'string' || !csrf.csrfToken) throw new Error('BFF returned an invalid CSRF token')
+        // The token must be issued to the actor that started the logout; any
+        // other actor means the cookie changed hands: read the actor again.
+        if (csrf.actorId !== initiatingActor) {
+          reportSessionRejected()
+          throw new Error(LOGOUT_ACTOR_CHANGED)
+        }
         const response = await fetch('/auth/logout', {
           method: 'POST',
           credentials: 'include',

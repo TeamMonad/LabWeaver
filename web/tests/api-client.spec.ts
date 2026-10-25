@@ -172,7 +172,8 @@ describe('browser session changes (#198)', () => {
     const csrfGet = vi.spyOn(transportAxios, 'get')
       .mockResolvedValueOnce(csrfFor('actor-a', 'token-old-session'))
       .mockResolvedValueOnce(csrfFor('actor-a', 'token-current-session'))
-    const confirm = vi.fn(async () => undefined)
+    // The re-read answers that the same actor still holds the session.
+    const confirm = vi.fn(async () => { session.resolveSessionActorDoubt() })
     session.registerSessionConfirmation(confirm)
     const api = client.createLabWeaverApiClient({ baseUrl: '/', authentication: { mode: 'bff' } })
     const sent: { token: unknown; body: unknown }[] = []
@@ -295,6 +296,130 @@ describe('browser session changes (#198)', () => {
     expect((await write).error).toBeUndefined()
     expect(adapter).toHaveBeenCalledOnce()
     expect(adapter.mock.calls[0][0].headers['X-CSRF-Token']).toBe('token-of-a')
+  })
+
+  it('rejects a held write unsent when its own timeout passes before the identity read answers', async () => {
+    const { session, client, axios: transportAxios } = await freshTransport()
+    session.recordSessionActor('actor-a')
+    vi.spyOn(transportAxios, 'get').mockResolvedValue(csrfFor('actor-a', 'token-of-a'))
+    const api = client.createLabWeaverApiClient({ baseUrl: '/', authentication: { mode: 'bff' }, timeoutMilliseconds: 20 })
+    const adapter = installSuccessfulAdapter(api)
+    // An identity read that never answers.
+    session.trackIdentityRead(new Promise(() => undefined))
+
+    const result = await api.post({ url: '/api/v1/projects', body: { name: '项目' } })
+
+    expect(result).toMatchObject({ diagnosticCode: 'LW_SDK_REQUEST_TIMEOUT' })
+    expect(adapter).not.toHaveBeenCalled()
+  })
+
+  it('rejects a held write unsent when its caller cancels it', async () => {
+    const { session, client, axios: transportAxios } = await freshTransport()
+    session.recordSessionActor('actor-a')
+    vi.spyOn(transportAxios, 'get').mockResolvedValue(csrfFor('actor-a', 'token-of-a'))
+    const api = client.createLabWeaverApiClient({ baseUrl: '/', authentication: { mode: 'bff' } })
+    const adapter = installSuccessfulAdapter(api)
+    session.trackIdentityRead(new Promise(() => undefined))
+    const caller = new AbortController()
+
+    const write = api.post({ url: '/api/v1/projects', body: { name: '项目' }, signal: caller.signal })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    caller.abort()
+
+    expect(await write).toMatchObject({ diagnosticCode: 'LW_SDK_REQUEST_CANCELLED' })
+    expect(adapter).not.toHaveBeenCalled()
+  })
+
+  it('releases a write waiting on a superseded identity read once the newer read answers, and sends it exactly once', async () => {
+    const { session, client, axios: transportAxios } = await freshTransport()
+    session.recordSessionActor('actor-a')
+    vi.spyOn(transportAxios, 'get').mockResolvedValue(csrfFor('actor-a', 'token-of-a'))
+    const api = client.createLabWeaverApiClient({ baseUrl: '/', authentication: { mode: 'bff' } })
+    const adapter = installSuccessfulAdapter(api)
+    const older = deferred()
+    session.trackIdentityRead(older.promise)
+
+    const write = api.post({ url: '/api/v1/projects', body: { name: '项目' } })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const newer = deferred()
+    session.trackIdentityRead(newer.promise)
+    newer.resolve()
+
+    expect((await write).error).toBeUndefined()
+    // The superseded read answering later sends nothing again.
+    older.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(adapter).toHaveBeenCalledOnce()
+  })
+
+  it('refuses queued and new writes unsent while the actor stays unknown, and keeps reading', async () => {
+    const { session, client, axios: transportAxios } = await freshTransport()
+    session.recordSessionActor('actor-a')
+    vi.spyOn(transportAxios, 'get').mockResolvedValue(csrfFor('actor-a', 'token-of-a'))
+    const api = client.createLabWeaverApiClient({ baseUrl: '/', authentication: { mode: 'bff' } })
+    const adapter = installSuccessfulAdapter(api)
+    const read = deferred()
+    session.trackIdentityRead(read.promise)
+
+    const queued = api.post({ url: '/api/v1/projects', body: { name: '排队的提交' } })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // The identity read fails in transit: who holds the session is unknown.
+    session.markSessionActorUnknown()
+    read.resolve()
+
+    const queuedResult = await queued
+    const newResult = await api.post({ url: '/api/v1/projects', body: { name: '新的提交' } })
+    for (const result of [queuedResult, newResult]) {
+      expect(result).toMatchObject({ diagnosticCode: 'LW_SDK_IDENTITY_UNCONFIRMED' })
+      // Callers read `result.error`, like a server problem, and show its reason first.
+      const diagnostic = diagnosticFromError(result.error, 'PROJECT_CREATE_FAILED', '创建项目失败')
+      expect(diagnostic.message).toBe('暂时无法确认当前登录账号，这次操作没有执行。')
+      expect(diagnostic.nextStep).toContain('手动重新提交')
+      expect(diagnostic.retryable).toBe(false)
+    }
+    expect(adapter).not.toHaveBeenCalled()
+
+    // Reads still go out.
+    expect((await api.get({ url: '/api/v1/projects' })).error).toBeUndefined()
+    expect(adapter).toHaveBeenCalledOnce()
+  })
+
+  it('reads the identity again for a rejection that arrives after the confirmation read answered', async () => {
+    const { session } = await freshTransport()
+    let reads = 0
+    session.registerSessionConfirmation(async () => {
+      reads += 1
+      await Promise.resolve()
+      session.resolveSessionActorDoubt()
+      // Another request is rejected between this answer and the end of the confirmation.
+      if (reads === 1) session.reportSessionRejected()
+    })
+
+    session.reportSessionRejected()
+    await vi.waitFor(() => expect(session.sessionActorConfirming.value).toBe(false))
+
+    // Not stranded as `actorInDoubt=true, confirming=false`: a second read answered the late rejection.
+    expect(reads).toBe(2)
+    expect(session.sessionActorInDoubt.value).toBe(false)
+  })
+
+  it('still deduplicates rejections that arrive while one confirmation read is in flight', async () => {
+    const { session } = await freshTransport()
+    const reread = deferred()
+    const confirm = vi.fn(async () => {
+      await reread.promise
+      session.resolveSessionActorDoubt()
+    })
+    session.registerSessionConfirmation(confirm)
+
+    session.reportSessionRejected()
+    session.reportSessionRejected()
+    session.reportSessionRejected()
+    reread.resolve()
+    await vi.waitFor(() => expect(session.sessionActorConfirming.value).toBe(false))
+
+    expect(confirm).toHaveBeenCalledOnce()
+    expect(session.sessionActorInDoubt.value).toBe(false)
   })
 
   it('discards a response the previous actor requested once the session epoch advances', async () => {

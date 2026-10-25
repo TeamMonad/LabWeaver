@@ -81,7 +81,7 @@ describe('pending commands across identity changes (real loadUser)', () => {
   it('drops every pending command on an explicit sign-out', async () => {
     const auth = await authWith(
       session(ACTOR_A),
-      new Response(JSON.stringify({ csrfToken: 'csrf' }), { status: 200 }),
+      new Response(JSON.stringify({ csrfToken: 'csrf', actorId: ACTOR_A }), { status: 200 }),
       new Response(JSON.stringify({ logoutUrl: 'https://identity.example.test/logout' }), { status: 200 }),
     )
     await auth.loadUser()
@@ -145,7 +145,7 @@ describe('pending commands held in page memory across identity changes (real loa
   it('drops a memory-only command on an explicit sign-out and does not restore it for the same actor later', async () => {
     const auth = await authWith(
       session(ACTOR_A),
-      new Response(JSON.stringify({ csrfToken: 'csrf' }), { status: 200 }),
+      new Response(JSON.stringify({ csrfToken: 'csrf', actorId: ACTOR_A }), { status: 200 }),
       new Response(JSON.stringify({ logoutUrl: 'https://identity.example.test/logout' }), { status: 200 }),
       session(ACTOR_A),
     )

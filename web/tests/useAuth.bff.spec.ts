@@ -66,6 +66,7 @@ describe('BFF browser session', () => {
       }), { status: 200, headers: { 'content-type': 'application/json' } }),
       new Response(JSON.stringify({
         csrfToken: 'csrf-token',
+        actorId: '01900000-0000-7000-8000-000000000001',
         expiresAt: '2099-01-01T00:00:00.000Z',
       }), { status: 200, headers: { 'content-type': 'application/json' } }),
       new Response(JSON.stringify({ logoutUrl }), {
@@ -138,24 +139,46 @@ describe('BFF browser session', () => {
     let resolveLogout!: (response: Response) => void
     const logoutResponse = new Promise<Response>((resolve) => { resolveLogout = resolve })
     const fetch = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ csrfToken: 'csrf-token' }), { status: 200 }))
+      .mockResolvedValueOnce(sessionOf(actorA))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ csrfToken: 'csrf-token', actorId: actorA }), { status: 200 }))
       .mockReturnValueOnce(logoutResponse)
     const navigate = vi.fn()
     vi.stubGlobal('fetch', fetch)
 
     const { useAuth } = await import('@/composables/useAuth')
     const auth = useAuth(navigate)
+    await auth.loadUser()
     const first = auth.logout()
     const second = auth.logout()
-    await Promise.resolve()
-    expect(fetch).toHaveBeenCalledTimes(1)
+    await vi.waitFor(() => expect(fetch.mock.calls.map(([url]) => url)).toEqual(['/api/v1/auth/session', '/api/v1/auth/csrf', '/auth/logout']))
 
     resolveLogout(new Response(JSON.stringify({ diagnosticCode: 'LW_AUTH_SESSION_REJECTED' }), { status: 401 }))
     await first
     await second
 
+    // The second call sent nothing of its own.
+    expect(fetch).toHaveBeenCalledTimes(3)
     expect(navigate).not.toHaveBeenCalled()
     expect(auth.error.value?.message).toBe('登录已失效，请重新登录')
+  })
+
+  it('refuses a logout whose CSRF token was issued to another actor without sending it', async () => {
+    vi.stubEnv('VITE_API_AUTH_MODE', 'bff')
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(sessionOf(actorA))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ csrfToken: 'token-of-b', actorId: actorB }), { status: 200 }))
+      .mockResolvedValue(sessionOf(actorB))
+    const navigate = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+
+    const { useAuth } = await import('@/composables/useAuth')
+    const auth = useAuth(navigate)
+    await auth.loadUser()
+    await auth.logout()
+
+    expect(fetch.mock.calls.map(([url]) => url)).not.toContain('/auth/logout')
+    expect(navigate).not.toHaveBeenCalled()
+    expect(auth.error.value?.message).toBe('登录账号已在其他页面变化，本次退出没有执行，以免退出另一个账号。请核对页面上的账号后再操作。')
   })
 })
 
@@ -265,5 +288,75 @@ describe('BFF session epoch (#198)', () => {
     expect(fetch).toHaveBeenLastCalledWith('/api/v1/auth/session', expect.objectContaining({ credentials: 'include' }))
     expect(session.sessionActor()).toBe(actorB)
     expect(session.sessionEpoch.value).toBe(1)
+  })
+
+  it('sends no logout for actor A while the rejection read is held, and refuses it once actor B is confirmed', async () => {
+    let answerRead!: (response: Response) => void
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(sessionOf(actorA))
+      .mockReturnValueOnce(new Promise<Response>((resolve) => { answerRead = resolve }))
+    vi.stubGlobal('fetch', fetch)
+    const navigate = vi.fn()
+    const { useAuth } = await import('@/composables/useAuth')
+    const session = await import('@/api/session')
+    const auth = useAuth(navigate)
+    await auth.loadUser()
+
+    // The cookie now belongs to actor B; the rejection read has not answered yet.
+    session.reportSessionRejected()
+    const logout = auth.logout()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual(['/api/v1/auth/session', '/api/v1/auth/session'])
+
+    answerRead(sessionOf(actorB))
+    await logout
+
+    const urls = fetch.mock.calls.map(([url]) => url)
+    expect(urls).not.toContain('/api/v1/auth/csrf')
+    expect(urls).not.toContain('/auth/logout')
+    expect(session.sessionActor()).toBe(actorB)
+    expect(navigate).not.toHaveBeenCalled()
+    expect(auth.error.value?.message).toBe('登录账号已在其他页面变化，本次退出没有执行，以免退出另一个账号。请核对页面上的账号后再操作。')
+  })
+
+  it('ends a hung session read after its timeout and refuses the waiting write unsent, keeping the actor\'s commands', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const fetch = vi.fn()
+        .mockResolvedValueOnce(sessionOf(actorA))
+        // The re-read never answers; only its abort ends it.
+        .mockImplementationOnce((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')))
+        }))
+      vi.stubGlobal('fetch', fetch)
+      const { useAuth, SESSION_READ_TIMEOUT_MS } = await import('@/composables/useAuth')
+      const session = await import('@/api/session')
+      const client = await import('@/api/client')
+      const commands = await import('@/utils/pendingCommands')
+      const auth = useAuth()
+      await auth.loadUser()
+      const draft = { fingerprint: 'draft', idempotencyKey: 'draft-key', data: null }
+      commands.writePendingCommand(actorA, 'spec:draft', draft)
+      const api = client.createLabWeaverApiClient({
+        baseUrl: '/',
+        authentication: { mode: 'bff', csrfToken: async () => ({ token: 'token-of-a', actorId: actorA }) },
+      })
+      const adapter = vi.fn(async (config) => ({ data: {}, status: 200, statusText: 'OK', headers: {}, config }))
+      api.instance.defaults.adapter = adapter
+
+      session.reportSessionRejected()
+      const write = api.post({ url: '/api/v1/projects', body: { name: '项目' } })
+      await vi.advanceTimersByTimeAsync(SESSION_READ_TIMEOUT_MS)
+      const result = await write
+
+      expect(result).toMatchObject({ diagnosticCode: 'LW_SDK_IDENTITY_UNCONFIRMED' })
+      expect(adapter).not.toHaveBeenCalled()
+      expect(session.sessionActorInDoubt.value).toBe(true)
+      expect(auth.isAuthenticated.value).toBe(false)
+      // The unconfirmed command stays for a manual resubmission.
+      expect(commands.readPendingCommand(actorA, 'spec:draft')).toEqual(draft)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

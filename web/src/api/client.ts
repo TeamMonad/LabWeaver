@@ -6,7 +6,16 @@ import { createClient, type Client } from '@/generated/contracts/client'
 import { client as defaultSdkClient } from '@/generated/contracts/client.gen'
 import type { ServerSentEventsOptions, ServerSentEventsResult } from '@/generated/contracts/core/serverSentEvents.gen'
 import { REQUEST_ID_HEADER, rememberHeaderRequestId } from './requestId'
-import { identityReadsSettled, reportSessionRejected, sessionActor, sessionCredentialVersion, sessionEpoch, sessionEpochSignal } from './session'
+import {
+  IdentityWaitInterrupted,
+  identityReadsSettled,
+  reportSessionRejected,
+  sessionActor,
+  sessionActorInDoubt,
+  sessionCredentialVersion,
+  sessionEpoch,
+  sessionEpochSignal,
+} from './session'
 
 export type AccessTokenProvider = () => Promise<string | undefined>
 /** A CSRF token and the actor of the BFF session that issued it. */
@@ -34,6 +43,7 @@ export type LabWeaverClientDiagnostic =
   | 'LW_SDK_REQUEST_TIMEOUT'
   | 'LW_SDK_TRANSPORT_FAILED'
   | 'LW_SDK_SESSION_CHANGED'
+  | 'LW_SDK_IDENTITY_UNCONFIRMED'
 
 export class LabWeaverApiError extends Error {
   readonly diagnosticCode: LabWeaverClientDiagnostic | string
@@ -155,6 +165,30 @@ export function decodeProblemDetails(error: unknown): ProblemDetails | undefined
   return isProblemDetails(error.response?.data) ? error.response.data : undefined
 }
 
+/**
+ * Hold a write until no identity read is in flight, within the write's own
+ * timeout and cancellation, then refuse it while the actor is unknown. If the
+ * read found another actor, the epoch has moved and the caller refuses the
+ * write as the previous actor's. Nothing is sent in any refusal.
+ */
+async function confirmIdentityBeforeWrite(config: { timeout?: number; signal?: unknown }): Promise<void> {
+  try {
+    await identityReadsSettled({ signal: config.signal as AbortSignal | undefined, timeoutMs: config.timeout })
+  } catch (error) {
+    if (!(error instanceof IdentityWaitInterrupted)) throw error
+    throw error.reason === 'timeout'
+      ? new LabWeaverApiError('LW_SDK_REQUEST_TIMEOUT', 'The API request timed out while the signed-in actor was being confirmed.')
+      : new LabWeaverApiError('LW_SDK_REQUEST_CANCELLED', 'The API request was cancelled while the signed-in actor was being confirmed.')
+  }
+  if (sessionActorInDoubt.value) {
+    const refused = new LabWeaverApiError('LW_SDK_IDENTITY_UNCONFIRMED', 'The signed-in actor could not be confirmed; the write was not sent.')
+    // The generated SDK hands `response.data` back as `result.error`: give
+    // callers the code (and its Chinese reason) instead of an empty object.
+    Object.assign(refused, { response: { data: { diagnosticCode: refused.diagnosticCode, detail: refused.message, retryable: false } } })
+    throw refused
+  }
+}
+
 function attachAuthInterceptor(instance: AxiosInstance, authentication: LabWeaverApiAuthentication): void {
   const csrfToken =
     authentication.mode === 'bff'
@@ -172,10 +206,9 @@ function attachAuthInterceptor(instance: AxiosInstance, authentication: LabWeave
         config.headers.Authorization = `Bearer ${token}`
       }
     } else if (isUnsafeMethod(config.method)) {
-      // A write waits until no identity read is in flight. If that read finds
-      // another actor, the epoch has moved and the write is refused below
-      // without being sent: it belonged to the previous actor.
-      await identityReadsSettled()
+      // If the identity read found another actor, the epoch has moved and the
+      // write is refused below without being sent: it belonged to the previous actor.
+      await confirmIdentityBeforeWrite(config)
       const csrf = await csrfToken?.()
       if (!csrf) {
         throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current BFF CSRF token is required.')
