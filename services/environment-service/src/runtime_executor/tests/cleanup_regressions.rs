@@ -70,6 +70,13 @@ impl Context {
     }
 
     async fn start_runtime(runtime: contracts::authoring::RuntimeKind) -> TestResult<Self> {
+        Self::start_runtime_with_attempts(runtime, 1).await
+    }
+
+    async fn start_runtime_with_attempts(
+        runtime: contracts::authoring::RuntimeKind,
+        max_attempts: u32,
+    ) -> TestResult<Self> {
         let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(4)
@@ -81,12 +88,14 @@ impl Context {
         crate::test_support::apply_environment_migrations(&pool).await?;
         let store = crate::PgEnvironmentStore::new(pool.clone());
         let mut initial = crate::test_support::requested_instance();
+        let now = timestamp().map_err(|error| format!("{error:?}"))?;
+        initial.eligibility_expires_at =
+            Some(UtcTimestamp::from_utc(now.get() + time::Duration::days(1))?);
         initial.runtime_kind = runtime;
         if runtime == contracts::authoring::RuntimeKind::VirtualMachine {
             initial.provider_binding = "kubevirt-primary-v1".to_owned();
         }
         store.create("cleanup-checkpoint-create", &initial).await?;
-        let now = timestamp().map_err(|error| format!("{error:?}"))?;
         store
             .accept_command(
                 "cleanup-checkpoint-delete",
@@ -101,7 +110,7 @@ impl Context {
                     // This consumer fixture starts with a persisted upstream Access revocation receipt.
                     access_revocation_revision: Some(initial.revision),
                     preserve_mutable_disk: false,
-                    max_attempts: 1,
+                    max_attempts,
                     reset_target: None,
                 },
             )
@@ -459,32 +468,46 @@ async fn failed_legacy_cleanup_without_original_uid_is_diagnostic_only() -> Test
     assert_eq!(report.recovering, 0);
     assert_eq!(report.unverified, 1);
     let current = context.store.load(context.initial.id).await?;
-    let now = context.store.current_time().await?;
-    let recovery = context
+    let snapshot = context
         .store
-        .accept_command(
-            "legacy-cleanup-retry",
-            &crate::LifecycleCommand {
-                environment_id: current.id,
-                kind: EnvironmentOperationKind::Cleanup,
-                expected_revision: current.revision,
-                actor_id: current.owner_id,
-                trace_id: "legacy-cleanup".to_owned(),
-                accepted_at: now,
-                deadline_at: UtcTimestamp::from_utc(now.get() + time::Duration::minutes(10))?,
-                access_revocation_revision: current.operation.access_revocation_revision,
-                preserve_mutable_disk: false,
-                max_attempts: 1,
-                reset_target: None,
-            },
-        )
-        .await;
-    assert!(matches!(
-        recovery,
-        Err(crate::EnvironmentStoreError::Lifecycle(
-            crate::LifecycleError::ProviderObservationInvalid
-        ))
-    ));
+        .get_operation(current.id, current.owner_id, current.operation.id)
+        .await?
+        .snapshot;
+    assert_eq!(snapshot.state, OperationState::Failed);
+    assert!(snapshot.attempt < snapshot.max_attempts);
+    assert!(!snapshot.retry_eligible);
+    let now = context.store.current_time().await?;
+    for kind in [
+        EnvironmentOperationKind::Retry,
+        EnvironmentOperationKind::Recover,
+        EnvironmentOperationKind::Cleanup,
+    ] {
+        let recovery = context
+            .store
+            .accept_command(
+                &format!("legacy-cleanup-{kind:?}"),
+                &crate::LifecycleCommand {
+                    environment_id: current.id,
+                    kind,
+                    expected_revision: current.revision,
+                    actor_id: current.owner_id,
+                    trace_id: "legacy-cleanup".to_owned(),
+                    accepted_at: now,
+                    deadline_at: UtcTimestamp::from_utc(now.get() + time::Duration::minutes(10))?,
+                    access_revocation_revision: current.operation.access_revocation_revision,
+                    preserve_mutable_disk: false,
+                    max_attempts: 1,
+                    reset_target: None,
+                },
+            )
+            .await;
+        assert!(matches!(
+            recovery,
+            Err(crate::EnvironmentStoreError::Lifecycle(
+                crate::LifecycleError::ProviderObservationInvalid
+            ))
+        ));
+    }
     assert_eq!(
         context
             .store
@@ -505,6 +528,52 @@ async fn failed_legacy_cleanup_without_original_uid_is_diagnostic_only() -> Test
             .delete_uids
             .is_empty()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_bound_cleanup_snapshot_allows_retry_with_the_original_target() -> TestResult {
+    let context =
+        Context::start_runtime_with_attempts(contracts::authoring::RuntimeKind::Container, 3)
+            .await?;
+    let target = Box::pin(context.pin()).await?;
+    context.fail_current().await?;
+    let current = context.store.load(context.initial.id).await?;
+    assert_eq!(current.operation.cleanup_target.as_ref(), Some(&target));
+    assert_eq!(
+        current.operation.cleanup_protocol_version,
+        Some(contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION)
+    );
+    let snapshot = context
+        .store
+        .get_operation(current.id, current.owner_id, current.operation.id)
+        .await?
+        .snapshot;
+    assert_eq!(snapshot.state, OperationState::Failed);
+    assert!(snapshot.retry_eligible);
+    let now = context.store.current_time().await?;
+    context
+        .store
+        .accept_command(
+            "bound-cleanup-retry",
+            &crate::LifecycleCommand {
+                environment_id: current.id,
+                kind: EnvironmentOperationKind::Retry,
+                expected_revision: current.revision,
+                actor_id: current.owner_id,
+                trace_id: "bound-cleanup".to_owned(),
+                accepted_at: now,
+                deadline_at: UtcTimestamp::from_utc(now.get() + time::Duration::minutes(10))?,
+                access_revocation_revision: current.operation.access_revocation_revision,
+                preserve_mutable_disk: false,
+                max_attempts: 3,
+                reset_target: None,
+            },
+        )
+        .await?;
+    let retried = context.store.load(current.id).await?;
+    assert_eq!(retried.operation.state, OperationState::Accepted);
+    assert_eq!(retried.operation.cleanup_target, Some(target));
     Ok(())
 }
 
