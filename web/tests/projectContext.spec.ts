@@ -66,7 +66,7 @@ describe('AppShell project context', () => {
     mounts = 0
     listProjects.mockReset()
     getProject.mockReset()
-    listProjects.mockResolvedValue({ data: [projectA, projectB], error: undefined })
+    listProjects.mockResolvedValue({ data: { items: [projectA, projectB], nextCursor: null }, error: undefined })
   })
 
   it('writes the selected project into the address of a scoped page', async () => {
@@ -139,7 +139,7 @@ describe('AppShell project context', () => {
     expect(getProject).not.toHaveBeenCalled()
     expect(document.title).toContain('项目不可用')
 
-    listProjects.mockResolvedValue({ data: [projectA, projectB], error: undefined })
+    listProjects.mockResolvedValue({ data: { items: [projectA, projectB], nextCursor: null }, error: undefined })
     await wrapper.get('[data-testid="project-context-list-error"] .diagnostic-banner > button.text-button').trigger('click')
     await flushPromises()
     await flushPromises()
@@ -175,11 +175,77 @@ describe('AppShell project context', () => {
     expect(wrapper.find('[data-testid="project-context-recovery"]').exists()).toBe(true)
 
     const projectX = { ...projectA, id: 'project-x', name: '项目 X' }
-    listProjects.mockResolvedValue({ data: [projectA, projectB, projectX], error: undefined })
+    listProjects.mockResolvedValue({ data: { items: [projectA, projectB, projectX], nextCursor: null }, error: undefined })
     await projects.load()
     await flushPromises()
     expect(wrapper.find('[data-testid="project-context-recovery"]').exists()).toBe(false)
     expect(wrapper.find('.scoped-page').exists()).toBe(true)
     expect(projects.selectedProjectId).toBe('project-x')
+  })
+
+  it('follows the cursor to a linked project beyond the first page instead of reporting it unavailable', async () => {
+    const projectX = { ...projectA, id: 'project-x', name: '项目 X' }
+    listProjects.mockImplementation(async (options: { query?: { cursor?: string } }) => (
+      options.query?.cursor === 'page-2'
+        ? { data: { items: [projectX], nextCursor: null }, error: undefined }
+        : { data: { items: [projectA, projectB], nextCursor: 'page-2' }, error: undefined }
+    ))
+    const { wrapper, projects } = await mountShell('/researcher/environments?projectId=project-x')
+    await flushPromises()
+
+    expect(listProjects).toHaveBeenCalledWith({ query: { limit: 50, cursor: 'page-2' } })
+    expect(getProject).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="project-context-recovery"]').exists()).toBe(false)
+    expect(wrapper.find('.scoped-page').exists()).toBe(true)
+    expect(projects.selectedProjectId).toBe('project-x')
+    expect(document.title).toBe('Work 环境 · 项目 X · LabWeaver')
+  })
+
+  it('keeps the loaded pages when locating a linked project fails midway and continues locating on retry', async () => {
+    const projectC = { ...projectA, id: 'project-c', name: '项目 C' }
+    const projectX = { ...projectA, id: 'project-x', name: '项目 X' }
+    let pageThreeFails = true
+    listProjects.mockImplementation(async (options: { query?: { cursor?: string } }) => {
+      if (options.query?.cursor === 'page-2') return { data: { items: [projectC], nextCursor: 'page-3' }, error: undefined }
+      if (options.query?.cursor === 'page-3') {
+        return pageThreeFails
+          ? { ...problem(503, 'CONTROL_UNAVAILABLE'), error: { ...problem(503, 'CONTROL_UNAVAILABLE').error, retryable: true } }
+          : { data: { items: [projectX], nextCursor: null }, error: undefined }
+      }
+      return { data: { items: [projectA, projectB], nextCursor: 'page-2' }, error: undefined }
+    })
+    const { wrapper, router, projects } = await mountShell('/researcher/environments?projectId=project-x')
+    // Imported after mountShell's vi.resetModules() so it shares this test's fresh project state.
+    const { default: GcpProjectSelector } = await import('@/components/layout/GcpProjectSelector.vue')
+    const selector = mount(GcpProjectSelector, { global: { plugins: [router] } })
+    await flushPromises()
+
+    // The failed third page is a retryable list error; pages one and two stay loaded.
+    expect(listProjects).toHaveBeenLastCalledWith({ query: { limit: 50, cursor: 'page-3' } })
+    expect(getProject).not.toHaveBeenCalled()
+    expect(projects.projects.kind === 'success' ? projects.projects.data.map((project) => project.id) : []).toEqual(['project-a', 'project-b', 'project-c'])
+    expect(wrapper.find('[data-testid="project-context-list-error"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="project-context-recovery"]').exists()).toBe(false)
+    expect(wrapper.find('.scoped-page').exists()).toBe(false)
+    expect(selector.find('.trigger-primary').text()).not.toBe('项目不可用')
+    expect(router.currentRoute.value.query.projectId).toBe('project-x')
+
+    pageThreeFails = false
+    const callsBeforeRetry = listProjects.mock.calls.length
+    await wrapper.get('[data-testid="project-context-list-error"] .diagnostic-retry').trigger('click')
+    await flushPromises()
+
+    // The retry continues from the failed page instead of restarting at page one.
+    expect(listProjects.mock.calls.slice(callsBeforeRetry)).toEqual([[{ query: { limit: 50, cursor: 'page-3' } }]])
+    expect(projects.projects.kind === 'success' ? projects.projects.data.map((project) => project.id) : []).toEqual(['project-a', 'project-b', 'project-c', 'project-x'])
+    expect(projects.hasMore).toBe(false)
+    expect(getProject).not.toHaveBeenCalled()
+    expect(router.currentRoute.value.query.projectId).toBe('project-x')
+    expect(projects.selectedProjectId).toBe('project-x')
+    expect(selector.find('.trigger-primary').text()).toBe('项目 X')
+    expect(wrapper.find('[data-testid="project-context-list-error"]').exists()).toBe(false)
+    expect(wrapper.find('.scoped-page').exists()).toBe(true)
+    expect(document.title).toBe('Work 环境 · 项目 X · LabWeaver')
+    selector.unmount()
   })
 })

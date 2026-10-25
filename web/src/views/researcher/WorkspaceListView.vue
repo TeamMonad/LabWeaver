@@ -56,6 +56,12 @@
                 </span>
               </button>
             </div>
+            <div v-if="projects.hasMore || projects.loadMoreError" class="load-more">
+              <button v-if="projects.hasMore" type="button" class="text-button" data-testid="projects-load-more" :disabled="projects.loadingMore" @click="projects.loadMore()">
+                {{ projects.loadingMore ? '加载中…' : '加载更多项目' }}
+              </button>
+              <DiagnosticBanner v-if="projects.loadMoreError" :diagnostic="projects.loadMoreError" severity="warning" @retry="projects.loadMore()" />
+            </div>
           </template>
         </AsyncStateView>
       </section>
@@ -139,6 +145,12 @@
                     <button v-if="canManageMembers && member.actorId !== selectedProject?.ownerActorId" type="button" class="text-button" :disabled="members.acting !== null" @click="openRemoveMemberConfirmation(member)">移除</button>
                   </li>
                 </ul>
+                <div v-if="members.hasMore || members.loadMoreError" class="load-more">
+                  <button v-if="members.hasMore" type="button" class="text-button" data-testid="members-load-more" :disabled="members.loadingMore" @click="members.loadMore()">
+                    {{ members.loadingMore ? '加载中…' : '加载更多成员' }}
+                  </button>
+                  <DiagnosticBanner v-if="members.loadMoreError" :diagnostic="members.loadMoreError" severity="warning" @retry="members.loadMore()" />
+                </div>
               </template>
             </AsyncStateView>
             <p v-if="!canManageMembers && selectedProject.state === 'active'" class="readonly-hint" data-testid="members-permission-hint" role="note">{{ availableActions.denialReason('manage_members') }}</p>
@@ -627,6 +639,7 @@ async function confirmDestructiveAction() {
 .project-list, .project-detail { padding: var(--space-5); }
 .project-detail-actions { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; justify-content: flex-end; }
 .project-items { display: grid; gap: var(--space-2); margin-top: var(--space-5); }
+.load-more { display: grid; justify-items: center; gap: var(--space-2); margin-top: var(--space-3); }
 .project-item { width: 100%; display: flex; justify-content: space-between; gap: var(--space-3); padding: var(--space-4); border: 1px solid transparent; border-radius: var(--md-sys-shape-medium); background: transparent; color: var(--md-sys-color-on-surface); text-align: left; cursor: pointer; }
 .project-item:hover { background: var(--md-sys-color-surface-container-high); }
 .project-item--selected { border-color: var(--md-sys-color-primary); background: var(--md-sys-color-primary-container); }

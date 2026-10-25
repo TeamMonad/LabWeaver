@@ -202,10 +202,18 @@ async function readResumableConfigProbePublication(page, resume, environmentSpec
 }
 
 async function ensureProjectStudentByUi(page, projectId, studentActorId) {
-  const memberships = await expectJson(
-    await page.request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/members`),
-    'CONFIG_PROBE_PROJECT_MEMBERS_READ_FAILED',
-  )
+  const memberships = []
+  let cursor = null
+  do {
+    const query = new URLSearchParams({ limit: '100', ...(cursor ? { cursor } : {}) })
+    const memberPage = await expectJson(
+      await page.request.get(`/api/v1/projects/${encodeURIComponent(projectId)}/members?${query.toString()}`),
+      'CONFIG_PROBE_PROJECT_MEMBERS_READ_FAILED',
+    )
+    if (!Array.isArray(memberPage?.items)) throw new Error('CONFIG_PROBE_PROJECT_MEMBERS_INVALID')
+    memberships.push(...memberPage.items)
+    cursor = memberPage.nextCursor ?? null
+  } while (cursor)
   const existing = memberships.find((membership) => (
     membership.projectId === projectId
     && membership.actorId === studentActorId

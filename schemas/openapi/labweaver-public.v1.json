@@ -3505,20 +3505,20 @@
           },
           {
             "in": "query",
-            "name": "page",
+            "name": "cursor",
             "required": false,
             "schema": {
-              "default": 1,
-              "minimum": 1,
-              "type": "integer"
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "pageSize",
+            "name": "limit",
             "required": false,
             "schema": {
-              "default": 25,
+              "default": 50,
               "maximum": 100,
               "minimum": 1,
               "type": "integer"
@@ -3756,20 +3756,20 @@
           },
           {
             "in": "query",
-            "name": "page",
+            "name": "cursor",
             "required": false,
             "schema": {
-              "default": 1,
-              "minimum": 1,
-              "type": "integer"
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "pageSize",
+            "name": "limit",
             "required": false,
             "schema": {
-              "default": 25,
+              "default": 50,
               "maximum": 100,
               "minimum": 1,
               "type": "integer"
@@ -6645,20 +6645,20 @@
         "parameters": [
           {
             "in": "query",
-            "name": "page",
+            "name": "cursor",
             "required": false,
             "schema": {
-              "default": 1,
-              "minimum": 1,
-              "type": "integer"
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "pageSize",
+            "name": "limit",
             "required": false,
             "schema": {
-              "default": 25,
+              "default": 50,
               "maximum": 100,
               "minimum": 1,
               "type": "integer"
@@ -7424,16 +7424,35 @@
       "get": {
         "description": "Permission: project:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
         "operationId": "listProjects",
-        "parameters": [],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "../contracts/v1/project.schema.json"
-                  },
-                  "type": "array"
+                  "$ref": "../contracts/v1/project-page.schema.json"
                 }
               }
             },
@@ -12721,20 +12740,20 @@
           },
           {
             "in": "query",
-            "name": "page",
+            "name": "cursor",
             "required": false,
             "schema": {
-              "default": 1,
-              "minimum": 1,
-              "type": "integer"
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "pageSize",
+            "name": "limit",
             "required": false,
             "schema": {
-              "default": 25,
+              "default": 50,
               "maximum": 100,
               "minimum": 1,
               "type": "integer"
@@ -12971,6 +12990,27 @@
               "minLength": 1,
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -12978,10 +13018,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "../contracts/v1/project-membership.schema.json"
-                  },
-                  "type": "array"
+                  "$ref": "../contracts/v1/project-membership-page.schema.json"
                 }
               }
             },

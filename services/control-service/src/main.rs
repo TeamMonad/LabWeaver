@@ -90,6 +90,13 @@ async fn main() -> Result<(), StartupError> {
     if !arguments.is_empty() {
         return Err(StartupError::Configuration);
     }
+    let cursor_current =
+        read_cursor_key(&required_env("LABWEAVER_CURSOR_SIGNING_KEY_CURRENT_FILE")?)?;
+    let cursor_previous = match std::env::var("LABWEAVER_CURSOR_SIGNING_KEY_PREVIOUS_FILE") {
+        Ok(path) => Some(read_cursor_key(&path)?),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(_) => return Err(StartupError::Configuration),
+    };
     telemetry::init(env!("CARGO_PKG_NAME"))?;
     let deployment = load_deployment()?;
     validate_deployment(&deployment)?;
@@ -151,7 +158,8 @@ async fn main() -> Result<(), StartupError> {
         )
         .await?,
     );
-    let mut service = ControlService::new(pool.clone(), objects, deployment.control)?;
+    let mut service = ControlService::new(pool.clone(), objects, deployment.control)?
+        .with_cursor_signing_keys(cursor_current, cursor_previous)?;
     if let Some(loaded) = loaded_configuration {
         service = service.with_loaded_platform_configuration(loaded);
     }
@@ -458,6 +466,14 @@ fn required_env(name: &'static str) -> Result<String, StartupError> {
     std::env::var(name).map_err(|_| StartupError::Configuration)
 }
 
+fn read_cursor_key(path: &str) -> Result<Vec<u8>, StartupError> {
+    let key = std::fs::read(path).map_err(|_| StartupError::Configuration)?;
+    if key.len() < 32 {
+        return Err(StartupError::Configuration);
+    }
+    Ok(key)
+}
+
 fn required_u64(name: &'static str) -> Result<u64, StartupError> {
     required_env(name)?
         .parse::<u64>()
@@ -597,6 +613,26 @@ enum StartupError {
 #[allow(clippy::expect_used, clippy::case_sensitive_file_extension_comparisons)]
 mod deployment_contract_tests {
     use super::DeploymentFile;
+
+    #[test]
+    fn cursor_secret_files_fail_closed_when_missing_or_short()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("signing-key");
+        let path = path.to_str().ok_or("fixture path is not UTF-8")?;
+        assert!(matches!(
+            super::read_cursor_key(path),
+            Err(super::StartupError::Configuration)
+        ));
+        std::fs::write(path, [0x61; 31])?;
+        assert!(matches!(
+            super::read_cursor_key(path),
+            Err(super::StartupError::Configuration)
+        ));
+        std::fs::write(path, [0x61; 32])?;
+        assert_eq!(super::read_cursor_key(path)?, vec![0x61; 32]);
+        Ok(())
+    }
 
     #[test]
     fn checked_in_platform_example_matches_the_runtime_contract() {

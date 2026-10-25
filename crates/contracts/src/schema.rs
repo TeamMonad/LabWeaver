@@ -66,6 +66,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::membership_governance::CourseMembershipPage
     );
     document!(
+        "schemas/contracts/v1/project-page.schema.json",
+        crate::membership_governance::ProjectPage
+    );
+    document!(
+        "schemas/contracts/v1/project-membership-page.schema.json",
+        crate::membership_governance::ProjectMembershipPage
+    );
+    document!(
         "schemas/contracts/v1/http/create-project-membership-invitation.schema.json",
         crate::membership_governance::CreateProjectMembershipInvitation
     );
@@ -1515,6 +1523,12 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 | "listOwnProjectEvaluationResults"
                 | "listSshPublicKeys"
                 | "listNotifications"
+                | "listProjects"
+                | "listProjectMemberships"
+                | "listCourseMemberships"
+                | "listProjectMembershipInvitations"
+                | "listCourseMembershipInvitations"
+                | "listIncomingMembershipInvitations"
         ) {
             parameters.push(json!({"name":"cursor","in":"query","required":false,"schema":{"type":"string","minLength":1,"maxLength":1024}}));
             parameters.push(json!({"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":50}}));
@@ -1558,10 +1572,6 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 | "getInternalAgentTaskProgress"
                 | "listProjectCreditLedger"
                 | "listProjectCreditHolds"
-                | "listCourseMemberships"
-                | "listProjectMembershipInvitations"
-                | "listCourseMembershipInvitations"
-                | "listIncomingMembershipInvitations"
         ) {
             parameters.extend([
                 json!({"name":"page","in":"query","required":false,"schema":{"type":"integer","minimum":1,"default":1}}),
@@ -2505,14 +2515,8 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "createProject" | "getProject" | "updateProject" | "archiveProject" => {
             contract_ref("project")
         }
-        "listProjects" => json!({
-            "type":"array",
-            "items":contract_ref("project")
-        }),
-        "listProjectMemberships" => json!({
-            "type":"array",
-            "items":contract_ref("project-membership")
-        }),
+        "listProjects" => contract_ref("project-page"),
+        "listProjectMemberships" => contract_ref("project-membership-page"),
         "listOrganizationUsers" => contract_ref("organization-user-page"),
         "listProjectAgentRuns" => contract_ref("agent-run-history-page"),
         "getProjectAgentRunDiagnostics" => contract_ref("agent-run-diagnostics"),

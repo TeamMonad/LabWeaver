@@ -10,8 +10,8 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
   return { ...actual, listProjectMemberships, listOrganizationUsers }
 })
 
-function result(data: unknown[]) {
-  return { data, error: undefined as never }
+function result(items: unknown[], nextCursor: string | null = null) {
+  return { data: { items, nextCursor }, error: undefined as never }
 }
 
 function membership(actorId: string) {
@@ -35,7 +35,8 @@ describe('useProjectMemberships', () => {
       kind: 'success',
       data: [membership('student-1')],
     }))
-    expect(listProjectMemberships).toHaveBeenCalledWith({ path: { projectId: 'project-1' } })
+    expect(listProjectMemberships).toHaveBeenCalledWith({ path: { projectId: 'project-1' }, query: { limit: 50 } })
+    expect(state.hasMore).toBe(false)
     scope.stop()
   })
 
@@ -99,6 +100,54 @@ describe('useProjectMemberships', () => {
       kind: 'success',
       data: [membership('student-2')],
     })
+    scope.stop()
+  })
+
+  it('appends the next cursor page and stops at the last page', async () => {
+    listProjectMemberships
+      .mockResolvedValueOnce(result([membership('student-1')], 'cursor-2'))
+      .mockResolvedValueOnce(result([membership('student-2')]))
+    const projectId = ref<string | null>('project-1')
+    const scope = effectScope()
+    let state!: ReturnType<typeof useProjectMemberships>
+    scope.run(() => { state = useProjectMemberships(projectId) })
+    await vi.waitFor(() => expect(state.hasMore).toBe(true))
+
+    await state.loadMore()
+    expect(listProjectMemberships).toHaveBeenLastCalledWith({ path: { projectId: 'project-1' }, query: { limit: 50, cursor: 'cursor-2' } })
+    expect(state.memberships).toEqual({ kind: 'success', data: [membership('student-1'), membership('student-2')] })
+    expect(state.hasMore).toBe(false)
+
+    await state.loadMore()
+    expect(listProjectMemberships).toHaveBeenCalledTimes(2)
+    scope.stop()
+  })
+
+  it('keeps loaded members when a later page fails and drops a page that arrives after a project switch', async () => {
+    let resolveLate!: (value: unknown) => void
+    listProjectMemberships
+      .mockResolvedValueOnce(result([membership('student-1')], 'cursor-2'))
+      .mockResolvedValueOnce({ data: undefined, error: { diagnosticCode: 'LW_HTTP_SERVICE_UNAVAILABLE', detail: '成员服务暂时不可用', retryable: true } })
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveLate = resolve }))
+      .mockResolvedValueOnce(result([membership('student-9')]))
+    const projectId = ref<string | null>('project-1')
+    const scope = effectScope()
+    let state!: ReturnType<typeof useProjectMemberships>
+    scope.run(() => { state = useProjectMemberships(projectId) })
+    await vi.waitFor(() => expect(state.hasMore).toBe(true))
+
+    await state.loadMore()
+    expect(state.loadMoreError).toMatchObject({ code: 'LW_HTTP_SERVICE_UNAVAILABLE', message: '成员服务暂时不可用' })
+    expect(state.memberships).toEqual({ kind: 'success', data: [membership('student-1')] })
+    expect(state.hasMore).toBe(true)
+
+    const late = state.loadMore()
+    projectId.value = 'project-2'
+    await vi.waitFor(() => expect(state.memberships).toEqual({ kind: 'success', data: [membership('student-9')] }))
+    resolveLate(result([membership('student-2')]))
+    await late
+    expect(state.memberships).toEqual({ kind: 'success', data: [membership('student-9')] })
+    expect(state.loadMoreError).toBeNull()
     scope.stop()
   })
 })

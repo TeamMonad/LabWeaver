@@ -2617,7 +2617,10 @@ impl EnvironmentAccessGrantListQuery {
     }
 }
 
-fn validate_cursor_page(cursor: Option<&str>, limit: Option<u16>) -> Result<(), HttpContractError> {
+pub(crate) fn validate_cursor_page(
+    cursor: Option<&str>,
+    limit: Option<u16>,
+) -> Result<(), HttpContractError> {
     if cursor.is_some_and(|value| {
         value.is_empty()
             || value.len() > MAX_CURSOR_LENGTH

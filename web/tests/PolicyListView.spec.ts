@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mount, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, onMounted } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import PolicyListView from '@/views/admin/PolicyListView.vue'
@@ -55,10 +55,18 @@ const policy = {
 }
 
 describe('PolicyListView', () => {
+  // The project store is module-wide; a view left mounted by an earlier test
+  // would keep steering its selection.
+  const mounted: VueWrapper[] = []
+
   beforeEach(() => {
     vi.resetAllMocks()
-    vi.mocked(listProjects).mockResolvedValue({ data: [project] as never, error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [project], nextCursor: null } as never, error: undefined as never })
     vi.mocked(getProjectLlmPolicyOptions).mockResolvedValue({ data: options as never, error: undefined as never })
+  })
+
+  afterEach(() => {
+    for (const wrapper of mounted.splice(0)) wrapper.unmount()
   })
 
   async function mountView(path = '/researcher/ai-policy?projectId=project-1') {
@@ -72,6 +80,7 @@ describe('PolicyListView', () => {
     await router.push(path)
     await router.isReady()
     const wrapper = mount(PolicyListView, { global: { plugins: [router] } })
+    mounted.push(wrapper)
     return { router, wrapper }
   }
 
@@ -136,7 +145,7 @@ describe('PolicyListView', () => {
 
   it('loads the selected private work on the admin route and keeps its policy scope denied', async () => {
     const privateWorkProject = { ...project, id: 'private-work', name: 'Private Work' }
-    vi.mocked(listProjects).mockResolvedValue({ data: [privateWorkProject] as never, error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [privateWorkProject], nextCursor: null } as never, error: undefined as never })
     vi.mocked(getProjectLlmPolicyOptions).mockResolvedValue({
       data: undefined as never,
       error: { diagnosticCode: 'LW_AUTH_SCOPE_DENIED', detail: 'denied', retryable: false } as never,
@@ -152,5 +161,22 @@ describe('PolicyListView', () => {
     expect(wrapper.text()).toContain('当前账号没有修改这个项目 AI 设置的权限')
     expect(wrapper.find('[data-testid="policy-form"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('选择一个项目')
+  })
+
+  it('follows the cursor to a linked project beyond the first page instead of reporting it unavailable', async () => {
+    const laterProject = { ...project, id: 'project-later', name: 'Later project' }
+    vi.mocked(listProjects).mockImplementation(async (request) => (
+      request?.query?.cursor === 'cursor-2'
+        ? { data: { items: [laterProject], nextCursor: null }, error: undefined }
+        : { data: { items: [project], nextCursor: 'cursor-2' }, error: undefined }
+    ) as never)
+    vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({ data: { ...policy, projectId: 'project-later' } as never, error: undefined as never })
+
+    const { wrapper } = await mountView('/admin/policies?projectId=project-later')
+    await vi.waitFor(() => expect(getProjectLlmPolicyOptions).toHaveBeenCalledWith({ path: { projectId: 'project-later' } }))
+    expect(listProjects).toHaveBeenCalledWith({ query: { limit: 50, cursor: 'cursor-2' } })
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="policy-form"]').exists()).toBe(true))
+    expect((wrapper.find('[data-testid="policy-project-select"]').element as HTMLSelectElement).value).toBe('project-later')
+    expect(wrapper.text()).not.toContain('PROJECT_CONTEXT_UNAVAILABLE')
   })
 })

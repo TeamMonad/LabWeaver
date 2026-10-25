@@ -1100,7 +1100,11 @@ def load_bundle(
         declared = dict(manifest[group], **optional)
         for name in bindings:
             keys = declared[name]
-            for ref in _exact(bindings[name], set(keys)).values():
+            binding = bindings[name]
+            optional_keys = set(manifest["optionalSecrets"].get(name, [])) if group == "secrets" else set()
+            if not isinstance(binding, dict) or not set(keys) <= set(binding) or set(binding) - set(keys) - optional_keys:
+                raise BundleError("LW_BUNDLE_MODEL_INVALID")
+            for ref in binding.values():
                 references.add(_relative(ref, prefix))
     if not isinstance(application["helmValues"], dict) or not isinstance(
         application["ansibleVariables"], dict

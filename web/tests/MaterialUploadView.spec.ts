@@ -129,7 +129,7 @@ describe('MaterialUploadView', () => {
   })
 
   it('shows a project-context diagnostic when no accessible project is returned', async () => {
-    vi.mocked(listProjects).mockResolvedValue({ data: [], error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined as never })
 
     const { wrapper } = await mountView()
     await vi.waitFor(() => expect(wrapper.text()).toContain('PROJECT_CONTEXT_MISSING'))
@@ -138,7 +138,7 @@ describe('MaterialUploadView', () => {
   })
 
   it('loads the active project policy for the selected project', async () => {
-    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject] as never, error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [mockProject], nextCursor: null } as never, error: undefined as never })
     vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({ data: mockPolicy as never, error: undefined as never })
 
     const { wrapper } = await mountView()
@@ -152,7 +152,7 @@ describe('MaterialUploadView', () => {
   })
 
   it('surfaces project policy errors as a diagnostic', async () => {
-    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject] as never, error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [mockProject], nextCursor: null } as never, error: undefined as never })
     vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({
       data: undefined as never,
       error: {
@@ -172,7 +172,7 @@ describe('MaterialUploadView', () => {
   })
 
   it('links to project AI settings when the active policy is missing', async () => {
-    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject] as never, error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [mockProject], nextCursor: null } as never, error: undefined as never })
     vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({
       data: undefined as never,
       error: {
@@ -189,7 +189,7 @@ describe('MaterialUploadView', () => {
   })
 
   it('opens an experiment task from history and restores its package', async () => {
-    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject] as never, error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [mockProject], nextCursor: null } as never, error: undefined as never })
     vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({ data: mockPolicy as never, error: undefined as never })
     vi.mocked(listProjectAgentRuns).mockResolvedValue({
       data: { items: [experimentHistoryItem], nextCursor: null } as never,
@@ -218,7 +218,7 @@ describe('MaterialUploadView', () => {
 
   it('ignores a late experiment history response after the project changes', async () => {
     const project2 = { ...mockProject, id: 'project-2', name: 'Second project' }
-    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject, project2] as never, error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [mockProject, project2], nextCursor: null } as never, error: undefined as never })
     vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({ data: mockPolicy as never, error: undefined as never })
     let resolveFirst!: (value: unknown) => void
     vi.mocked(listProjectAgentRuns).mockImplementation((options) => {
@@ -246,7 +246,7 @@ describe('MaterialUploadView', () => {
   })
 
   it('rejects a history item whose loaded run has another purpose', async () => {
-    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject] as never, error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [mockProject], nextCursor: null } as never, error: undefined as never })
     vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({ data: mockPolicy as never, error: undefined as never })
     vi.mocked(listProjectAgentRuns).mockResolvedValue({
       data: { items: [experimentHistoryItem], nextCursor: null } as never,
@@ -273,7 +273,7 @@ describe('MaterialUploadView', () => {
   })
 
   async function mountRestoredPackage(): Promise<VueWrapper> {
-    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject] as never, error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [mockProject], nextCursor: null } as never, error: undefined as never })
     vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({ data: mockPolicy as never, error: undefined as never })
     vi.mocked(getProjectProblemPackage).mockResolvedValue({ data: mockPackage as never, error: undefined as never })
     const router = createRouter({
@@ -358,7 +358,7 @@ describe('MaterialUploadView', () => {
       } as never,
       error: undefined as never,
     })
-    vi.mocked(listProjects).mockResolvedValue({ data: [mockProject] as never, error: undefined as never })
+    vi.mocked(listProjects).mockResolvedValue({ data: { items: [mockProject], nextCursor: null } as never, error: undefined as never })
     vi.mocked(getActiveProjectLlmPolicy).mockResolvedValue({ data: mockPolicy as never, error: undefined as never })
     vi.mocked(getProjectProblemPackage).mockResolvedValue({ data: mockPackage as never, error: undefined as never })
     const router = createRouter({
