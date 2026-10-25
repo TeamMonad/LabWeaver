@@ -22,7 +22,7 @@ fn manual_spec(kind: RuntimeKind, image: &PlatformImageEntry) -> TestResult<Envi
         "resources":{"cpuMillicores":1000,"memoryBytes":1_073_741_824_u64,"storageBytes":10_737_418_240_u64},
         "network":{"mode":"deny_all"},
         "entries":[{"name":"entry","protocol":if kind==RuntimeKind::Container {"http"} else {"ssh"},"servicePort":if kind==RuntimeKind::Container {8080} else {22}}],
-        "security":{"userPolicy":"non_root_required","rootFilesystemPolicy":if kind==RuntimeKind::Container {"read_only_required"} else {"mutable_required"},"privilegeEscalationPolicy":"deny","publicExposurePolicy":"deny","securityProfileBinding":"restricted-v1"},
+        "security":{"runAsUser":null,"readOnlyRootFilesystem":false,"allowPrivilegeEscalation":false,"publicExposurePolicy":"deny","securityProfileBinding":"restricted-v1"},
         "runtime":runtime,
         "retention":{"policyId":PolicyId::new(),"policyRevision":1,"class":"run_evidence","retainUntil":"2026-08-16T08:00:00.000Z","disposition":"delete"}
     }))?)
@@ -358,4 +358,84 @@ async fn manual_container_publication_needs_no_model_and_preserves_permissions_a
 #[tokio::test]
 async fn manual_vm_publication_needs_no_model_and_pins_the_reviewed_catalog_disk() -> TestResult {
     publish_without_model(RuntimeKind::VirtualMachine).await
+}
+
+#[tokio::test]
+async fn ordinary_capability_publication_requires_platform_range_and_current_scope_grant()
+-> TestResult {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        container.get_host_port_ipv4(5432).await?
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await?;
+    apply_domain_migrations(&pool, Domain::Control).await?;
+    let mut fixture = ManualPublication::new(&pool, RuntimeKind::Container).await?;
+    let owner = fixture.project.owner_actor_id;
+    let security = fixture
+        .request
+        .manual
+        .as_ref()
+        .ok_or("manual")?
+        .spec
+        .security
+        .clone();
+    for (index, rejected) in [
+        contracts::authoring::EnvironmentSecuritySpec {
+            privileged: true,
+            ..security.clone()
+        },
+        contracts::authoring::EnvironmentSecuritySpec {
+            capabilities: std::collections::BTreeSet::from([
+                contracts::platform_configuration::LinuxCapability::SysAdmin,
+            ]),
+            ..security.clone()
+        },
+        contracts::authoring::EnvironmentSecuritySpec {
+            run_as_user: Some(1000),
+            allow_privilege_escalation: true,
+            ..security
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut invalid = fixture.request.clone();
+        invalid.manual.as_mut().ok_or("manual")?.spec.security = rejected;
+        assert!(matches!(
+            fixture
+                .publish(owner, &format!("unsupported-security-{index}"), &invalid)
+                .await,
+            Err(ControlError::ContractInvalid)
+        ));
+    }
+    let releases: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM control.environment_template_releases")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        releases, 0,
+        "rejected permissions must not publish or enqueue a release"
+    );
+    let spec = &mut fixture.request.manual.as_mut().ok_or("manual")?.spec;
+    spec.security
+        .capabilities
+        .insert(contracts::platform_configuration::LinuxCapability::NetAdmin);
+    let mut encoded = serde_json::to_value(&*spec)?;
+    encoded["security"]["capabilities"] = serde_json::json!(["UNKNOWN_CAPABILITY"]);
+    assert!(serde_json::from_value::<EnvironmentSpec>(encoded).is_err());
+    let release = fixture
+        .publish(owner, "ordinary-net-admin", &fixture.request)
+        .await?;
+    super::runtime_authorization_cases::assert_manual_work_binding(
+        &pool,
+        &release,
+        owner,
+        fixture.now,
+    )
+    .await?;
+    Ok(())
 }

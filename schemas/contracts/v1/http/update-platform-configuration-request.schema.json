@@ -155,7 +155,7 @@
           "uniqueItems": true
         },
         "defaultContainerUid": {
-          "description": "Zero means guest/container root, without host privileges.",
+          "description": "Default ordinary-container UID; zero is container root, without host privileges.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"

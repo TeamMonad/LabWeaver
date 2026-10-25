@@ -28,6 +28,12 @@ One VM operation is admitted only when all of these identities agree:
 - security requires a non-root guest, mutable VM root disk, denied privilege
   escalation and denied public exposure.
 
+The ordinary-container security declaration does not change this guest identity. VM specifications
+must leave `runAsUser` null and container capabilities empty, with container privilege escalation
+and read-only-rootfs flags false. Explicit container UID/capability settings are rejected rather
+than translated into guest privileges. `defaultContainerUid` on a verified runtime receipt is not
+a VM guest-user selector; VM privileged execution and DinD remain outside this slice.
+
 `Stop` and namespace cleanup remain available after withdrawal so access and
 resources can fail closed. Provision, observe, start, restart, reset, retry and
 recover cannot create a Ready endpoint from a withdrawn, expired or trust-

@@ -6,9 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use contracts::authoring::{
-    EnvironmentRuntimeSpec, NetworkPolicySpec, RootFilesystemPolicy, RuntimeKind,
-};
+use contracts::authoring::{EnvironmentRuntimeSpec, NetworkPolicySpec, RuntimeKind};
 use contracts::environment::{
     EndpointHealth, EnvironmentEndpoint, EnvironmentInstance, ObservedEnvironmentState,
 };
@@ -508,6 +506,7 @@ pub trait ContainerExecutorBackend: Send + Sync {
 pub struct PgContainerExecutorFenceStore {
     pool: PgPool,
     namespace_profile: crate::ContainerNamespaceProfile,
+    projection_configuration: Option<(String, ContainerProviderConfiguration)>,
 }
 
 impl PgContainerExecutorFenceStore {
@@ -516,6 +515,7 @@ impl PgContainerExecutorFenceStore {
         Self {
             pool,
             namespace_profile: crate::ContainerNamespaceProfile::Dedicated {},
+            projection_configuration: None,
         }
     }
 
@@ -523,6 +523,18 @@ impl PgContainerExecutorFenceStore {
     pub fn with_namespace_profile(mut self, profile: crate::ContainerNamespaceProfile) -> Self {
         self.namespace_profile = profile;
         self
+    }
+
+    pub fn with_projection_configuration(
+        mut self,
+        binding: String,
+        configuration: ContainerProviderConfiguration,
+    ) -> Result<Self, ContainerExecutorFenceError> {
+        if !valid_binding(&binding) {
+            return Err(ContainerExecutorFenceError::ConfigurationInvalid);
+        }
+        self.projection_configuration = Some((binding, configuration));
+        Ok(self)
     }
 
     #[allow(
@@ -632,6 +644,13 @@ impl PgContainerExecutorFenceStore {
                 return Err(ContainerExecutorFenceError::IdentityMismatch);
             }
             runtime_gate?;
+            validate_container_execution_plan(
+                &mut transaction,
+                envelope,
+                self.projection_configuration.as_ref(),
+                &self.namespace_profile,
+            )
+            .await?;
             sqlx::query(
                 "UPDATE environment.container_executor_fences SET highest_generation=$2, \
                      operation_id=$3,provider_step=$4,attempt=$5,tombstoned=$6,last_action=$7, \
@@ -651,6 +670,13 @@ impl PgContainerExecutorFenceStore {
             .await?;
         } else {
             runtime_gate?;
+            validate_container_execution_plan(
+                &mut transaction,
+                envelope,
+                self.projection_configuration.as_ref(),
+                &self.namespace_profile,
+            )
+            .await?;
             sqlx::query(
                 "INSERT INTO environment.container_executor_fences \
                  (environment_id,highest_generation,operation_id,provider_step,attempt,tombstoned, \
@@ -744,13 +770,7 @@ impl<B: ContainerExecutorBackend> FencedContainerExecutor<B> {
         envelope: ContainerExecutorRequestEnvelope,
     ) -> Result<ContainerExecutorResponseEnvelope, ContainerExecutorFenceError> {
         validate_container_executor_request(&envelope)?;
-        let runtime_gate = if match &envelope.request {
-            ContainerExecutorRequest::Apply { plan } => !plan.resources.is_empty(),
-            ContainerExecutorRequest::Scale { replicas, .. } => *replicas > 0,
-            ContainerExecutorRequest::Restart { .. } => true,
-            ContainerExecutorRequest::Observe { .. }
-            | ContainerExecutorRequest::DeleteNamespace { .. } => false,
-        } {
+        let runtime_gate = if container_request_starts_compute(&envelope.request) {
             crate::runtime_admission::executor_authorization(
                 self.runtime_admission.as_ref(),
                 self.store.pool.clone(),
@@ -906,6 +926,12 @@ impl<B: ContainerExecutorBackend + 'static> NatsContainerExecutorServer<B> {
 fn container_executor_failure(error: &ContainerExecutorFenceError) -> ProviderFailure {
     match error {
         ContainerExecutorFenceError::RuntimeAdmission(error) => error.provider_failure(),
+        ContainerExecutorFenceError::IdentityMismatch => ProviderFailure {
+            code: ProviderFailureCode::RuntimeAdmission(contracts::DiagnosticCode::registered(
+                "LW_ENVIRONMENT_CONTAINER_EXECUTOR_IDENTITY_MISMATCH",
+            )),
+            retryable: false,
+        },
         ContainerExecutorFenceError::InProgress
         | ContainerExecutorFenceError::Database(_)
         | ContainerExecutorFenceError::Transport => ProviderFailure {
@@ -913,13 +939,82 @@ fn container_executor_failure(error: &ContainerExecutorFenceError) -> ProviderFa
             retryable: true,
         },
         ContainerExecutorFenceError::ConfigurationInvalid
-        | ContainerExecutorFenceError::IdentityMismatch
         | ContainerExecutorFenceError::DeadlineExceeded
         | ContainerExecutorFenceError::StaleGeneration
         | ContainerExecutorFenceError::Tombstoned => ProviderFailure {
             code: ProviderFailureCode::Rejected,
             retryable: false,
         },
+    }
+}
+
+async fn validate_container_execution_plan(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    envelope: &ContainerExecutorRequestEnvelope,
+    projection_configuration: Option<&(String, ContainerProviderConfiguration)>,
+    namespace_profile: &crate::ContainerNamespaceProfile,
+) -> Result<(), ContainerExecutorFenceError> {
+    if !container_request_starts_compute(&envelope.request)
+        && !matches!(&envelope.request, ContainerExecutorRequest::Observe { plan } if !plan.resources.is_empty())
+    {
+        return Ok(());
+    }
+    let plan = container_executor_plan(&envelope.request);
+    let row = sqlx::query("SELECT i.contract AS instance,p.contract AS projection,p.withdrawn_at,date_trunc('milliseconds',clock_timestamp()) AS authority_now FROM environment.environment_instances i JOIN environment.release_projections p ON p.release_id=i.release_id WHERE i.environment_id=$1")
+        .bind(plan.environment_id.as_uuid()).fetch_optional(&mut **transaction).await?
+        .ok_or(ContainerExecutorFenceError::IdentityMismatch)?;
+    let instance: EnvironmentInstance = serde_json::from_value(row.try_get("instance")?)
+        .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+    let projection: ReleasePublished = serde_json::from_value(row.try_get("projection")?)
+        .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+    let (binding, configuration) =
+        projection_configuration.ok_or(ContainerExecutorFenceError::ConfigurationInvalid)?;
+    let resolved = ResolvedContainerRelease {
+        projection,
+        authority_now: UtcTimestamp::from_utc(row.try_get("authority_now")?)
+            .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?,
+        withdrawn_at: row
+            .try_get::<Option<time::OffsetDateTime>, _>("withdrawn_at")?
+            .map(UtcTimestamp::from_utc)
+            .transpose()
+            .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?,
+    };
+    let expected = configuration
+        .project_plan(
+            binding,
+            namespace_profile,
+            &instance,
+            &resolved,
+            envelope.fence.action,
+        )
+        .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+    let received_sha256 = container_plan_sha256(
+        plan.environment_id,
+        &resolved.projection.release,
+        &plan.image,
+        &plan.resources,
+        plan.namespace_uid,
+    )
+    .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+    if received_sha256 != plan.plan_sha256 || received_sha256 != expected.plan_sha256 {
+        return Err(ContainerExecutorFenceError::IdentityMismatch);
+    }
+    crate::runtime_admission::validate_container_runtime_plan(
+        &instance,
+        &expected,
+        plan,
+        envelope.fence.operation_generation,
+    )
+    .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)
+}
+
+fn container_request_starts_compute(request: &ContainerExecutorRequest) -> bool {
+    match request {
+        ContainerExecutorRequest::Apply { plan } => !plan.resources.is_empty(),
+        ContainerExecutorRequest::Scale { replicas, .. } => *replicas > 0,
+        ContainerExecutorRequest::Restart { .. } => true,
+        ContainerExecutorRequest::Observe { .. }
+        | ContainerExecutorRequest::DeleteNamespace { .. } => false,
     }
 }
 
@@ -1127,6 +1222,421 @@ impl ContainerProviderConfiguration {
             workspace_storage_class_name,
             workspace_access_mode,
         })
+    }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the complete deterministic Kubernetes security bundle is reviewed as one projection"
+    )]
+    pub fn project_plan(
+        &self,
+        binding: &str,
+        namespace_profile: &crate::ContainerNamespaceProfile,
+        instance: &EnvironmentInstance,
+        resolved: &ResolvedContainerRelease,
+        action: ReconcileAction,
+    ) -> Result<ContainerResourcePlan, ReleaseProjectionError> {
+        let projection = &resolved.projection;
+        projection
+            .validate()
+            .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
+        self.validate_release_use(resolved, action)?;
+        if instance.runtime_kind != RuntimeKind::Container
+            || instance.class != projection.environment_spec.class
+            || instance.release_id != projection.release.id
+            || instance.release_version != projection.release.version
+            || !crate::runtime_admission::release_project_matches(instance, projection)
+            || instance.course_id != projection.release.course_id
+            || instance.provider_binding != binding
+            || container_provider_binding(projection)? != binding
+        {
+            return Err(ReleaseProjectionError::IdentityMismatch);
+        }
+        let (repository, digest) = projection
+            .release
+            .artifact
+            .container_reference()
+            .ok_or(ReleaseProjectionError::IdentityMismatch)?;
+        if !digest.starts_with("sha256:")
+            || repository.contains('@')
+            || repository.contains(char::is_whitespace)
+        {
+            return Err(ReleaseProjectionError::ContractInvalid);
+        }
+        match &projection.release.artifact {
+            ImageArtifact::Container { .. } => {
+                let candidate_id = projection
+                    .release
+                    .candidate_id
+                    .ok_or(ReleaseProjectionError::IdentityMismatch)?;
+                let expected_repository = match projection.release.course_id {
+                    Some(course_id) => format!(
+                        "{}/course-{course_id}-{candidate_id}",
+                        self.image_repository_prefix
+                    ),
+                    None => format!(
+                        "{}/project-{}-{candidate_id}",
+                        self.image_repository_prefix, projection.release.project_id
+                    ),
+                };
+                if repository != expected_repository {
+                    return Err(ReleaseProjectionError::IdentityMismatch);
+                }
+            }
+            ImageArtifact::CatalogContainer { .. } => {
+                if !repository.starts_with(&format!("{}/", self.image_repository_prefix))
+                    || projection.release.manual_approval.is_none()
+                {
+                    return Err(ReleaseProjectionError::IdentityMismatch);
+                }
+            }
+            ImageArtifact::VirtualMachine { .. } => {
+                return Err(ReleaseProjectionError::IdentityMismatch);
+            }
+        }
+        let image = format!("{repository}@{digest}");
+        let placement = namespace_profile
+            .for_instance(instance)
+            .map_err(|_| ReleaseProjectionError::IdentityMismatch)?;
+        if placement.namespace_uid.is_some()
+            && projection.environment_spec.network != NetworkPolicySpec::DenyAll
+        {
+            return Err(ReleaseProjectionError::ConfigurationInvalid);
+        }
+        let namespace = placement.namespace.clone();
+        let app_name = placement.resource_name("runtime");
+        let mut labels = json!({
+            "app.kubernetes.io/name": "labweaver-environment",
+            "labweaver.io/environment-id": instance.id.to_string(),
+            "labweaver.io/project-id": instance.project_id.to_string(),
+            "labweaver.io/managed": "true",
+            "labweaver.io/environment": "true",
+        });
+        if let Some(course_id) = instance.course_id {
+            labels["labweaver.io/course-id"] = json!(course_id.to_string());
+        }
+        let (cpu_millicores, memory_bytes, storage_bytes, gpu_allocation) =
+            approved_resources(instance, projection)?;
+        let service_port = match &projection.environment_spec.runtime {
+            EnvironmentRuntimeSpec::Container { service_port, .. } => *service_port,
+            EnvironmentRuntimeSpec::VirtualMachine { .. } => {
+                return Err(ReleaseProjectionError::IdentityMismatch);
+            }
+        };
+        if !projection.environment_spec.entries.iter().any(|entry| {
+            entry.service_port == service_port
+                && entry.protocol == contracts::environment::EndpointProtocol::Http
+        }) {
+            return Err(ReleaseProjectionError::SecurityPostureInvalid);
+        }
+        let security_context =
+            crate::runtime_admission::container_security_context(instance, projection)?;
+        let uid = security_context["runAsUser"]
+            .as_u64()
+            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        let cpu = format!("{cpu_millicores}m");
+        let memory = memory_bytes.to_string();
+        let quota_request_cpu = cpu_millicores
+            .checked_add(FREEZE_REQUEST_CPU_MILLICORES)
+            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        let quota_limit_cpu = cpu_millicores
+            .checked_add(FREEZE_LIMIT_CPU_MILLICORES)
+            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        let quota_request_memory = memory_bytes
+            .checked_add(FREEZE_REQUEST_MEMORY_BYTES)
+            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        let quota_limit_memory = memory_bytes
+            .checked_add(FREEZE_LIMIT_MEMORY_BYTES)
+            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
+        let storage = storage_bytes.to_string();
+        let mut quota_hard = serde_json::Map::from_iter([
+            (
+                "requests.cpu".to_owned(),
+                json!(format!("{quota_request_cpu}m")),
+            ),
+            (
+                "limits.cpu".to_owned(),
+                json!(format!("{quota_limit_cpu}m")),
+            ),
+            (
+                "requests.memory".to_owned(),
+                json!(quota_request_memory.to_string()),
+            ),
+            (
+                "limits.memory".to_owned(),
+                json!(quota_limit_memory.to_string()),
+            ),
+            ("requests.storage".to_owned(), json!(storage.clone())),
+            ("persistentvolumeclaims".to_owned(), json!("1")),
+            ("pods".to_owned(), json!("2")),
+        ]);
+        let mut workload_requests = serde_json::Map::from_iter([
+            ("cpu".to_owned(), json!(cpu)),
+            ("memory".to_owned(), json!(memory)),
+        ]);
+        let mut workload_limits = workload_requests.clone();
+        if let Some(allocation) = gpu_allocation {
+            // Resource resolves the catalog mode and binding before this projection. Exclusive
+            // and container-time-slice catalog entries must use distinct extended-resource
+            // bindings; this provider consumes the exact binding and never infers a mode from a
+            // node label or rewrites a shared resource name.
+            if allocation.mode == GpuAllocationMode::VmVgpu
+                || allocation.provider_binding != binding
+                || !valid_extended_resource_name(&allocation.allocation_binding)
+            {
+                return Err(ReleaseProjectionError::SecurityPostureInvalid);
+            }
+            let quantity = json!(allocation.count.to_string());
+            workload_requests.insert(allocation.allocation_binding.clone(), quantity.clone());
+            workload_limits.insert(allocation.allocation_binding.clone(), quantity.clone());
+            quota_hard.insert(
+                format!("requests.{}", allocation.allocation_binding),
+                quantity.clone(),
+            );
+        }
+        let mut pod_labels = json!({
+            "app": app_name,
+            "labweaver.io/environment-id": instance.id.to_string(),
+            "labweaver.io/project-id": instance.project_id.to_string(),
+            "labweaver.io/release-id": projection.release.id.to_string(),
+            "labweaver.io/release-version": projection.release.version.to_string()
+        });
+        if let Some(course_id) = instance.course_id {
+            pod_labels["labweaver.io/course-id"] = json!(course_id.to_string());
+        }
+        let mut namespace_labels = labels.clone();
+        // Root is allowed by baseline. Approved NET_ADMIN needs a less restrictive namespace
+        // admission level, not a privileged Pod or any Kubernetes API entitlement.
+        namespace_labels["pod-security.kubernetes.io/enforce"] =
+            json!(
+                if projection.environment_spec.security.capabilities.is_empty() {
+                    "baseline"
+                } else {
+                    "privileged"
+                }
+            );
+        namespace_labels["pod-security.kubernetes.io/audit"] = json!("restricted");
+        namespace_labels["pod-security.kubernetes.io/warn"] = json!("restricted");
+        let mut documents = vec![
+            resource(
+                "Namespace",
+                None,
+                &namespace,
+                json!({
+                    "apiVersion":"v1","kind":"Namespace",
+                    "metadata":{"name":namespace,"labels":namespace_labels,"finalizers":["labweaver.io/environment-cleanup"]}
+                }),
+            ),
+            resource(
+                "ResourceQuota",
+                Some(&namespace),
+                "runtime-quota",
+                json!({
+                    "apiVersion":"v1","kind":"ResourceQuota",
+                    "metadata":{
+                        "name":"runtime-quota",
+                        "namespace":namespace,
+                        "labels":labels,
+                        "annotations":{
+                            "labweaver.io/freeze-request-cpu-millicores":FREEZE_REQUEST_CPU_MILLICORES.to_string(),
+                            "labweaver.io/freeze-limit-cpu-millicores":FREEZE_LIMIT_CPU_MILLICORES.to_string(),
+                            "labweaver.io/freeze-request-memory-bytes":FREEZE_REQUEST_MEMORY_BYTES.to_string(),
+                            "labweaver.io/freeze-limit-memory-bytes":FREEZE_LIMIT_MEMORY_BYTES.to_string()
+                        }
+                    },
+                     "spec":{"hard":quota_hard}
+                }),
+            ),
+            resource(
+                "LimitRange",
+                Some(&namespace),
+                "runtime-limits",
+                json!({
+                    "apiVersion":"v1","kind":"LimitRange",
+                    "metadata":{"name":"runtime-limits","namespace":namespace,"labels":labels},
+                    "spec":{"limits":[{"type":"Container","default":{"cpu":cpu,"memory":memory},"defaultRequest":{"cpu":cpu,"memory":memory}}]}
+                }),
+            ),
+            resource(
+                "ServiceAccount",
+                Some(&namespace),
+                "runtime",
+                json!({
+                    "apiVersion":"v1","kind":"ServiceAccount",
+                    "metadata":{"name":"runtime","namespace":namespace,"labels":labels},
+                    "automountServiceAccountToken":false,
+                    "imagePullSecrets":[{"name":self.image_pull_secret_name}]
+                }),
+            ),
+            resource(
+                "PersistentVolumeClaim",
+                Some(&namespace),
+                "workspace",
+                json!({
+                    "apiVersion":"v1","kind":"PersistentVolumeClaim",
+                    "metadata":{"name":"workspace","namespace":namespace,"labels":labels},
+                    "spec":{"accessModes":[self.workspace_access_mode.as_str()],"storageClassName":self.workspace_storage_class_name,"resources":{"requests":{"storage":storage}}}
+                }),
+            ),
+            resource(
+                "NetworkPolicy",
+                Some(&namespace),
+                "default-deny-ingress",
+                json!({
+                    "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
+                    "metadata":{"name":"default-deny-ingress","namespace":namespace,"labels":labels},
+                    "spec":{"podSelector":{},"policyTypes":["Ingress"]}
+                }),
+            ),
+            resource(
+                "NetworkPolicy",
+                Some(&namespace),
+                "access-service-ingress",
+                json!({
+                    "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
+                    "metadata":{"name":"access-service-ingress","namespace":namespace,"labels":labels},
+                    "spec":{"podSelector":{"matchLabels":{"app":app_name}},"policyTypes":["Ingress"],"ingress":[{"from":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.access_namespace}},"podSelector":{"matchLabels":{"app.kubernetes.io/name":self.access_pod_label}}}],"ports":[{"protocol":"TCP","port":service_port}]}]}
+                }),
+            ),
+        ];
+        match &projection.environment_spec.network {
+            NetworkPolicySpec::AllowAll => {}
+            NetworkPolicySpec::DenyAll => {
+                documents.push(resource("NetworkPolicy", Some(&namespace), "deny-all-egress", json!({
+                    "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
+                    "metadata":{"name":"deny-all-egress","namespace":namespace,"labels":labels},
+                    "spec":{"podSelector":{"matchLabels":{"app":app_name}},"policyTypes":["Egress"]}
+                })));
+            }
+            NetworkPolicySpec::Restricted { policy_binding } => {
+                documents.push(resource("NetworkPolicy", Some(&namespace), "restricted-egress", json!({
+                    "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
+                    "metadata":{"name":"restricted-egress","namespace":namespace,"labels":labels},
+                    "spec":{"podSelector":{"matchLabels":{"app":app_name}},"policyTypes":["Egress"],"egress":[{"to":[{"namespaceSelector":{"matchLabels":{"labweaver.io/egress-policy":policy_binding}}}]}]}
+                })));
+            }
+        }
+        // Apply every quota and network policy before a Deployment can start its Pod.
+        documents.extend([
+            resource(
+                "Deployment",
+                Some(&namespace),
+                &app_name,
+                json!({
+                    "apiVersion":"apps/v1","kind":"Deployment",
+                    "metadata":{"name":app_name,"namespace":namespace,"labels":labels},
+                    "spec":{
+                        "replicas":1,
+                        "strategy":{"type":"Recreate"},
+                        "selector":{"matchLabels":{"app":app_name}},
+                        "template":{
+                            "metadata":{"labels":pod_labels},
+                            "spec":{
+                                "serviceAccountName":"runtime","automountServiceAccountToken":false,
+                                // Both the seed and runtime consume the same approved identity.
+                                "securityContext":{"runAsNonRoot":uid!=0,"runAsUser":uid,"runAsGroup":uid,"fsGroup":uid,"seccompProfile":{"type":"RuntimeDefault"}},
+                                "initContainers":[{
+                                    "name":"workspace-seed",
+                                    "image":image,
+                                    "imagePullPolicy":"IfNotPresent",
+                                    "command":["/bin/sh","-c",WORKSPACE_SEED_COMMAND],
+                                    "resources":{"requests":{"cpu":"50m","memory":"64Mi"},"limits":{"cpu":"100m","memory":"128Mi"}},
+                                    "securityContext":security_context,
+                                    "volumeMounts":[{"name":"workspace","mountPath":WORKSPACE_ROOT}]
+                                }],
+                                "containers":[{
+                                    "name":"runtime","image":image,"imagePullPolicy":"IfNotPresent",
+                                    "ports":[{"name":"service","containerPort":service_port}],
+                                     "resources":{"requests":workload_requests,"limits":workload_limits},
+                                    "securityContext":security_context,
+                                    "volumeMounts":[
+                                        {"name":"workspace","mountPath":WORKSPACE_ROOT},
+                                        {"name":"runtime-tmp","mountPath":"/tmp"}
+                                    ],
+                                    "readinessProbe":{"tcpSocket":{"port":"service"},"periodSeconds":2,"failureThreshold":30}
+                                }],
+                                "volumes":[
+                                    {"name":"workspace","persistentVolumeClaim":{"claimName":"workspace"}},
+                                    {"name":"runtime-tmp","emptyDir":{"sizeLimit":"64Mi"}}
+                                ]
+                            }
+                        }
+                    }
+                }),
+            ),
+            resource(
+                "Service",
+                Some(&namespace),
+                &app_name,
+                json!({
+                    "apiVersion":"v1","kind":"Service",
+                    "metadata":{"name":app_name,"namespace":namespace,"labels":labels},
+                    "spec":{"type":"ClusterIP","selector":{"app":app_name},"ports":[{"name":"http","port":8080,"targetPort":"service"}]}
+                }),
+            ),
+        ]);
+        if placement.namespace_uid.is_some() {
+            // The deployment operator owns namespace-wide admission and network policy.
+            documents.retain(|resource| {
+                !matches!(
+                    resource.kind.as_str(),
+                    "Namespace" | "ResourceQuota" | "LimitRange" | "NetworkPolicy"
+                )
+            });
+            for document in &mut documents {
+                if document.name != app_name {
+                    document.name = placement.resource_name(&document.name);
+                }
+                document.document["metadata"]["name"] = json!(document.name);
+                if document.kind == "ServiceAccount" {
+                    document.document["imagePullSecrets"][0]["name"] =
+                        json!(placement.resource_name("registry-pull"));
+                }
+                if document.kind == "Deployment" {
+                    document.document["spec"]["template"]["spec"]["serviceAccountName"] =
+                        json!(app_name);
+                    document.document["spec"]["template"]["spec"]["volumes"][0]["persistentVolumeClaim"]
+                        ["claimName"] = json!(placement.resource_name("workspace"));
+                }
+            }
+        }
+        let plan_sha256 = container_plan_sha256(
+            instance.id,
+            &projection.release,
+            &image,
+            &documents,
+            placement.namespace_uid,
+        )?;
+        Ok(ContainerResourcePlan {
+            environment_id: instance.id,
+            project_id: instance.project_id,
+            namespace,
+            namespace_uid: placement.namespace_uid,
+            image,
+            resources: documents,
+            plan_sha256,
+        })
+    }
+
+    fn validate_release_use(
+        &self,
+        resolved: &ResolvedContainerRelease,
+        action: ReconcileAction,
+    ) -> Result<(), ReleaseProjectionError> {
+        if action == ReconcileAction::Stop {
+            return Ok(());
+        }
+        let release = &resolved.projection.release;
+        if resolved.withdrawn_at.is_some() {
+            return Err(ReleaseProjectionError::Withdrawn);
+        }
+        if release
+            .trust_revision()
+            .map_err(|_| ReleaseProjectionError::ContractInvalid)?
+            != self.release_policy.trust_revision
+        {
+            return Err(ReleaseProjectionError::TrustRevisionMismatch);
+        }
+        Ok(())
     }
 }
 
@@ -1361,13 +1871,7 @@ pub struct ContainerProvider<B, R> {
     binding: String,
     backend: Arc<B>,
     releases: Arc<R>,
-    release_policy: ContainerReleasePolicy,
-    image_repository_prefix: String,
-    access_namespace: String,
-    access_pod_label: String,
-    image_pull_secret_name: String,
-    workspace_storage_class_name: String,
-    workspace_access_mode: ContainerWorkspaceAccessMode,
+    configuration: ContainerProviderConfiguration,
     namespace_profile: crate::ContainerNamespaceProfile,
 }
 
@@ -1389,13 +1893,7 @@ where
             binding,
             backend,
             releases,
-            release_policy: configuration.release_policy,
-            image_repository_prefix: configuration.image_repository_prefix,
-            access_namespace: configuration.access_namespace,
-            access_pod_label: configuration.access_pod_label,
-            image_pull_secret_name: configuration.image_pull_secret_name,
-            workspace_storage_class_name: configuration.workspace_storage_class_name,
-            workspace_access_mode: configuration.workspace_access_mode,
+            configuration,
             namespace_profile: crate::ContainerNamespaceProfile::Dedicated {},
         })
     }
@@ -1411,408 +1909,19 @@ where
         Ok(self)
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "the complete deterministic Kubernetes security bundle is reviewed as one projection"
-    )]
     pub fn plan(
         &self,
         instance: &EnvironmentInstance,
         resolved: &ResolvedContainerRelease,
         action: ReconcileAction,
     ) -> Result<ContainerResourcePlan, ReleaseProjectionError> {
-        let projection = &resolved.projection;
-        projection
-            .validate()
-            .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
-        self.validate_release_use(resolved, action)?;
-        if instance.runtime_kind != RuntimeKind::Container
-            || instance.class != projection.environment_spec.class
-            || instance.release_id != projection.release.id
-            || instance.release_version != projection.release.version
-            || !crate::runtime_admission::release_project_matches(instance, projection)
-            || instance.course_id != projection.release.course_id
-            || instance.provider_binding != self.binding
-            || container_provider_binding(projection)? != self.binding
-        {
-            return Err(ReleaseProjectionError::IdentityMismatch);
-        }
-        let (repository, digest) = projection
-            .release
-            .artifact
-            .container_reference()
-            .ok_or(ReleaseProjectionError::IdentityMismatch)?;
-        if !digest.starts_with("sha256:")
-            || repository.contains('@')
-            || repository.contains(char::is_whitespace)
-        {
-            return Err(ReleaseProjectionError::ContractInvalid);
-        }
-        match &projection.release.artifact {
-            ImageArtifact::Container { .. } => {
-                let candidate_id = projection
-                    .release
-                    .candidate_id
-                    .ok_or(ReleaseProjectionError::IdentityMismatch)?;
-                let expected_repository = match projection.release.course_id {
-                    Some(course_id) => format!(
-                        "{}/course-{course_id}-{candidate_id}",
-                        self.image_repository_prefix
-                    ),
-                    None => format!(
-                        "{}/project-{}-{candidate_id}",
-                        self.image_repository_prefix, projection.release.project_id
-                    ),
-                };
-                if repository != expected_repository {
-                    return Err(ReleaseProjectionError::IdentityMismatch);
-                }
-            }
-            ImageArtifact::CatalogContainer { .. } => {
-                if !repository.starts_with(&format!("{}/", self.image_repository_prefix))
-                    || projection.release.manual_approval.is_none()
-                {
-                    return Err(ReleaseProjectionError::IdentityMismatch);
-                }
-            }
-            ImageArtifact::VirtualMachine { .. } => {
-                return Err(ReleaseProjectionError::IdentityMismatch);
-            }
-        }
-        let image = format!("{repository}@{digest}");
-        let placement = self
-            .namespace_profile
-            .for_instance(instance)
-            .map_err(|_| ReleaseProjectionError::IdentityMismatch)?;
-        if placement.namespace_uid.is_some()
-            && projection.environment_spec.network != NetworkPolicySpec::DenyAll
-        {
-            return Err(ReleaseProjectionError::ConfigurationInvalid);
-        }
-        let namespace = placement.namespace.clone();
-        let app_name = placement.resource_name("runtime");
-        let mut labels = json!({
-            "app.kubernetes.io/name": "labweaver-environment",
-            "labweaver.io/environment-id": instance.id.to_string(),
-            "labweaver.io/project-id": instance.project_id.to_string(),
-            "labweaver.io/managed": "true",
-            "labweaver.io/environment": "true",
-        });
-        if let Some(course_id) = instance.course_id {
-            labels["labweaver.io/course-id"] = json!(course_id.to_string());
-        }
-        let (cpu_millicores, memory_bytes, storage_bytes, gpu_allocation) =
-            approved_resources(instance, projection)?;
-        let service_port = match &projection.environment_spec.runtime {
-            EnvironmentRuntimeSpec::Container { service_port, .. } => *service_port,
-            EnvironmentRuntimeSpec::VirtualMachine { .. } => {
-                return Err(ReleaseProjectionError::IdentityMismatch);
-            }
-        };
-        if !projection.environment_spec.entries.iter().any(|entry| {
-            entry.service_port == service_port
-                && entry.protocol == contracts::environment::EndpointProtocol::Http
-        }) {
-            return Err(ReleaseProjectionError::SecurityPostureInvalid);
-        }
-        if projection.environment_spec.security.root_filesystem_policy
-            != RootFilesystemPolicy::ReadOnlyRequired
-        {
-            return Err(ReleaseProjectionError::SecurityPostureInvalid);
-        }
-        let cpu = format!("{cpu_millicores}m");
-        let memory = memory_bytes.to_string();
-        let quota_request_cpu = cpu_millicores
-            .checked_add(FREEZE_REQUEST_CPU_MILLICORES)
-            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
-        let quota_limit_cpu = cpu_millicores
-            .checked_add(FREEZE_LIMIT_CPU_MILLICORES)
-            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
-        let quota_request_memory = memory_bytes
-            .checked_add(FREEZE_REQUEST_MEMORY_BYTES)
-            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
-        let quota_limit_memory = memory_bytes
-            .checked_add(FREEZE_LIMIT_MEMORY_BYTES)
-            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
-        let storage = storage_bytes.to_string();
-        let mut quota_hard = serde_json::Map::from_iter([
-            (
-                "requests.cpu".to_owned(),
-                json!(format!("{quota_request_cpu}m")),
-            ),
-            (
-                "limits.cpu".to_owned(),
-                json!(format!("{quota_limit_cpu}m")),
-            ),
-            (
-                "requests.memory".to_owned(),
-                json!(quota_request_memory.to_string()),
-            ),
-            (
-                "limits.memory".to_owned(),
-                json!(quota_limit_memory.to_string()),
-            ),
-            ("requests.storage".to_owned(), json!(storage.clone())),
-            ("persistentvolumeclaims".to_owned(), json!("1")),
-            ("pods".to_owned(), json!("2")),
-        ]);
-        let mut workload_requests = serde_json::Map::from_iter([
-            ("cpu".to_owned(), json!(cpu)),
-            ("memory".to_owned(), json!(memory)),
-        ]);
-        let mut workload_limits = workload_requests.clone();
-        if let Some(allocation) = gpu_allocation {
-            // Resource resolves the catalog mode and binding before this projection. Exclusive
-            // and container-time-slice catalog entries must use distinct extended-resource
-            // bindings; this provider consumes the exact binding and never infers a mode from a
-            // node label or rewrites a shared resource name.
-            if allocation.mode == GpuAllocationMode::VmVgpu
-                || allocation.provider_binding != self.binding
-                || !valid_extended_resource_name(&allocation.allocation_binding)
-            {
-                return Err(ReleaseProjectionError::SecurityPostureInvalid);
-            }
-            let quantity = json!(allocation.count.to_string());
-            workload_requests.insert(allocation.allocation_binding.clone(), quantity.clone());
-            workload_limits.insert(allocation.allocation_binding.clone(), quantity.clone());
-            quota_hard.insert(
-                format!("requests.{}", allocation.allocation_binding),
-                quantity.clone(),
-            );
-        }
-        let mut pod_labels = json!({
-            "app": app_name,
-            "labweaver.io/environment-id": instance.id.to_string(),
-            "labweaver.io/project-id": instance.project_id.to_string(),
-            "labweaver.io/release-id": projection.release.id.to_string(),
-            "labweaver.io/release-version": projection.release.version.to_string()
-        });
-        if let Some(course_id) = instance.course_id {
-            pod_labels["labweaver.io/course-id"] = json!(course_id.to_string());
-        }
-        let mut documents = vec![
-            resource(
-                "Namespace",
-                None,
-                &namespace,
-                json!({
-                    "apiVersion":"v1","kind":"Namespace",
-                    "metadata":{"name":namespace,"labels":labels,"finalizers":["labweaver.io/environment-cleanup"]}
-                }),
-            ),
-            resource(
-                "ResourceQuota",
-                Some(&namespace),
-                "runtime-quota",
-                json!({
-                    "apiVersion":"v1","kind":"ResourceQuota",
-                    "metadata":{
-                        "name":"runtime-quota",
-                        "namespace":namespace,
-                        "labels":labels,
-                        "annotations":{
-                            "labweaver.io/freeze-request-cpu-millicores":FREEZE_REQUEST_CPU_MILLICORES.to_string(),
-                            "labweaver.io/freeze-limit-cpu-millicores":FREEZE_LIMIT_CPU_MILLICORES.to_string(),
-                            "labweaver.io/freeze-request-memory-bytes":FREEZE_REQUEST_MEMORY_BYTES.to_string(),
-                            "labweaver.io/freeze-limit-memory-bytes":FREEZE_LIMIT_MEMORY_BYTES.to_string()
-                        }
-                    },
-                     "spec":{"hard":quota_hard}
-                }),
-            ),
-            resource(
-                "LimitRange",
-                Some(&namespace),
-                "runtime-limits",
-                json!({
-                    "apiVersion":"v1","kind":"LimitRange",
-                    "metadata":{"name":"runtime-limits","namespace":namespace,"labels":labels},
-                    "spec":{"limits":[{"type":"Container","default":{"cpu":cpu,"memory":memory},"defaultRequest":{"cpu":cpu,"memory":memory}}]}
-                }),
-            ),
-            resource(
-                "ServiceAccount",
-                Some(&namespace),
-                "runtime",
-                json!({
-                    "apiVersion":"v1","kind":"ServiceAccount",
-                    "metadata":{"name":"runtime","namespace":namespace,"labels":labels},
-                    "automountServiceAccountToken":false,
-                    "imagePullSecrets":[{"name":self.image_pull_secret_name}]
-                }),
-            ),
-            resource(
-                "PersistentVolumeClaim",
-                Some(&namespace),
-                "workspace",
-                json!({
-                    "apiVersion":"v1","kind":"PersistentVolumeClaim",
-                    "metadata":{"name":"workspace","namespace":namespace,"labels":labels},
-                    "spec":{"accessModes":[self.workspace_access_mode.as_str()],"storageClassName":self.workspace_storage_class_name,"resources":{"requests":{"storage":storage}}}
-                }),
-            ),
-            resource(
-                "NetworkPolicy",
-                Some(&namespace),
-                "default-deny-ingress",
-                json!({
-                    "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
-                    "metadata":{"name":"default-deny-ingress","namespace":namespace,"labels":labels},
-                    "spec":{"podSelector":{},"policyTypes":["Ingress"]}
-                }),
-            ),
-            resource(
-                "NetworkPolicy",
-                Some(&namespace),
-                "access-service-ingress",
-                json!({
-                    "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
-                    "metadata":{"name":"access-service-ingress","namespace":namespace,"labels":labels},
-                    "spec":{"podSelector":{"matchLabels":{"app":app_name}},"policyTypes":["Ingress"],"ingress":[{"from":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":self.access_namespace}},"podSelector":{"matchLabels":{"app.kubernetes.io/name":self.access_pod_label}}}],"ports":[{"protocol":"TCP","port":service_port}]}]}
-                }),
-            ),
-            resource(
-                "Deployment",
-                Some(&namespace),
-                &app_name,
-                json!({
-                    "apiVersion":"apps/v1","kind":"Deployment",
-                    "metadata":{"name":app_name,"namespace":namespace,"labels":labels},
-                    "spec":{
-                        "replicas":1,
-                        "strategy":{"type":"Recreate"},
-                        "selector":{"matchLabels":{"app":app_name}},
-                        "template":{
-                            "metadata":{"labels":pod_labels},
-                            "spec":{
-                                "serviceAccountName":"runtime","automountServiceAccountToken":false,
-                                // The shared NFS PVC is provisioned with the `nobody` owner.
-                                // Pinning the runtime identity to that non-root UID keeps the
-                                // student workspace writable. The fixed init command copies the
-                                // approved image's seed exactly once and preserves an existing
-                                // workspace across stop/start and pod replacement.
-                                "securityContext":{"runAsNonRoot":true,"runAsUser":65534,"runAsGroup":65534,"fsGroup":65534,"seccompProfile":{"type":"RuntimeDefault"}},
-                                "initContainers":[{
-                                    "name":"workspace-seed",
-                                    "image":image,
-                                    "imagePullPolicy":"IfNotPresent",
-                                    "command":["/bin/sh","-c",WORKSPACE_SEED_COMMAND],
-                                    "resources":{"requests":{"cpu":"50m","memory":"64Mi"},"limits":{"cpu":"100m","memory":"128Mi"}},
-                                    "securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]}},
-                                    "volumeMounts":[{"name":"workspace","mountPath":WORKSPACE_ROOT}]
-                                }],
-                                "containers":[{
-                                    "name":"runtime","image":image,"imagePullPolicy":"IfNotPresent",
-                                    "ports":[{"name":"service","containerPort":service_port}],
-                                     "resources":{"requests":workload_requests,"limits":workload_limits},
-                                    "securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]}},
-                                    "volumeMounts":[
-                                        {"name":"workspace","mountPath":WORKSPACE_ROOT},
-                                        {"name":"runtime-tmp","mountPath":"/tmp"}
-                                    ],
-                                    "readinessProbe":{"tcpSocket":{"port":"service"},"periodSeconds":2,"failureThreshold":30}
-                                }],
-                                "volumes":[
-                                    {"name":"workspace","persistentVolumeClaim":{"claimName":"workspace"}},
-                                    {"name":"runtime-tmp","emptyDir":{"sizeLimit":"64Mi"}}
-                                ]
-                            }
-                        }
-                    }
-                }),
-            ),
-            resource(
-                "Service",
-                Some(&namespace),
-                &app_name,
-                json!({
-                    "apiVersion":"v1","kind":"Service",
-                    "metadata":{"name":app_name,"namespace":namespace,"labels":labels},
-                    "spec":{"type":"ClusterIP","selector":{"app":app_name},"ports":[{"name":"http","port":8080,"targetPort":"service"}]}
-                }),
-            ),
-        ];
-        match &projection.environment_spec.network {
-            NetworkPolicySpec::AllowAll => {}
-            NetworkPolicySpec::DenyAll => {
-                documents.push(resource("NetworkPolicy", Some(&namespace), "deny-all-egress", json!({
-                    "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
-                    "metadata":{"name":"deny-all-egress","namespace":namespace,"labels":labels},
-                    "spec":{"podSelector":{"matchLabels":{"app":app_name}},"policyTypes":["Egress"]}
-                })));
-            }
-            NetworkPolicySpec::Restricted { policy_binding } => {
-                documents.push(resource("NetworkPolicy", Some(&namespace), "restricted-egress", json!({
-                    "apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
-                    "metadata":{"name":"restricted-egress","namespace":namespace,"labels":labels},
-                    "spec":{"podSelector":{"matchLabels":{"app":app_name}},"policyTypes":["Egress"],"egress":[{"to":[{"namespaceSelector":{"matchLabels":{"labweaver.io/egress-policy":policy_binding}}}]}]}
-                })));
-            }
-        }
-        if placement.namespace_uid.is_some() {
-            // The deployment operator owns namespace-wide admission and network policy.
-            documents.retain(|resource| {
-                !matches!(
-                    resource.kind.as_str(),
-                    "Namespace" | "ResourceQuota" | "LimitRange" | "NetworkPolicy"
-                )
-            });
-            for document in &mut documents {
-                if document.name != app_name {
-                    document.name = placement.resource_name(&document.name);
-                }
-                document.document["metadata"]["name"] = json!(document.name);
-                if document.kind == "ServiceAccount" {
-                    document.document["imagePullSecrets"][0]["name"] =
-                        json!(placement.resource_name("registry-pull"));
-                }
-                if document.kind == "Deployment" {
-                    document.document["spec"]["template"]["spec"]["serviceAccountName"] =
-                        json!(app_name);
-                    document.document["spec"]["template"]["spec"]["volumes"][0]["persistentVolumeClaim"]
-                        ["claimName"] = json!(placement.resource_name("workspace"));
-                }
-            }
-        }
-        let plan_sha256 = canonical_hash(&json!({
-            "environmentId": instance.id,
-            "releaseId": projection.release.id,
-            "releaseVersion": projection.release.version,
-            "image": image,
-            "resources": documents,
-            "namespaceUid": placement.namespace_uid,
-        }))?;
-        Ok(ContainerResourcePlan {
-            environment_id: instance.id,
-            project_id: instance.project_id,
-            namespace,
-            namespace_uid: placement.namespace_uid,
-            image,
-            resources: documents,
-            plan_sha256,
-        })
-    }
-
-    fn validate_release_use(
-        &self,
-        resolved: &ResolvedContainerRelease,
-        action: ReconcileAction,
-    ) -> Result<(), ReleaseProjectionError> {
-        if action == ReconcileAction::Stop {
-            return Ok(());
-        }
-        let release = &resolved.projection.release;
-        if resolved.withdrawn_at.is_some() {
-            return Err(ReleaseProjectionError::Withdrawn);
-        }
-        if release
-            .trust_revision()
-            .map_err(|_| ReleaseProjectionError::ContractInvalid)?
-            != self.release_policy.trust_revision
-        {
-            return Err(ReleaseProjectionError::TrustRevisionMismatch);
-        }
-        Ok(())
+        self.configuration.project_plan(
+            &self.binding,
+            &self.namespace_profile,
+            instance,
+            resolved,
+            action,
+        )
     }
 
     fn cleanup_plan(
@@ -2162,6 +2271,23 @@ fn log_projection_failure(
         phase,
         diagnostic_code = %error,
     );
+}
+
+fn container_plan_sha256(
+    environment_id: EnvironmentId,
+    release: &contracts::supply_chain::EnvironmentTemplateRelease,
+    image: &str,
+    resources: &[ContainerResource],
+    namespace_uid: Option<uuid::Uuid>,
+) -> Result<Sha256Digest, ReleaseProjectionError> {
+    canonical_hash(&json!({
+        "environmentId": environment_id,
+        "releaseId": release.id,
+        "releaseVersion": release.version,
+        "image": image,
+        "resources": resources,
+        "namespaceUid": namespace_uid,
+    }))
 }
 
 fn canonical_hash<T: Serialize>(value: &T) -> Result<Sha256Digest, ReleaseProjectionError> {

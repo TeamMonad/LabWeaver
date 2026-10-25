@@ -37,6 +37,10 @@
 {{- if and $containerPlacement (or (hasKey (default dict $input.env) "LABWEAVER_CONTAINER_PLACEMENT_CONFIG_FILE") (hasKey (default dict $input.secretEnv) "LABWEAVER_CONTAINER_PLACEMENT_CONFIG_FILE")) }}
 {{- fail "containerPlacementProfileConfigMap owns LABWEAVER_CONTAINER_PLACEMENT_CONFIG_FILE; remove the workload override" }}
 {{- end }}
+{{- $containerProjection := eq $name "container-executor" }}
+{{- if and $containerProjection (or (hasKey (default dict $input.env) "LABWEAVER_ENVIRONMENT_PROVIDER_BINDINGS_PATH") (hasKey (default dict $input.secretEnv) "LABWEAVER_ENVIRONMENT_PROVIDER_BINDINGS_PATH")) }}
+{{- fail "container projection owns LABWEAVER_ENVIRONMENT_PROVIDER_BINDINGS_PATH; remove the workload override" }}
+{{- end }}
 {{- $imageKey := required (printf "workloads.%s.imageKey is required" $name) $configuration.imageKey }}
 {{- $image := index $root.Values.images $imageKey }}
 ---
@@ -140,7 +144,7 @@ spec:
           args:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- if or $input.env $input.secretEnv $containerPlacement (eq $name "kubevirt-executor") }}
+          {{- if or $input.env $input.secretEnv $containerPlacement $containerProjection (eq $name "kubevirt-executor") }}
           env:
             {{- if $managedControl }}
             {{- range $reserved := list "LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FILE" "LABWEAVER_PLATFORM_CONFIGURATION_SOURCE_FILE" "LABWEAVER_CONTROL_POD_NAME" "LABWEAVER_CONTROL_POD_NAMESPACE" "LABWEAVER_CONTROL_POD_UID" }}
@@ -156,6 +160,10 @@ spec:
               valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
             - name: LABWEAVER_CONTROL_POD_UID
               valueFrom: {fieldRef: {fieldPath: metadata.uid}}
+            {{- end }}
+            {{- if $containerProjection }}
+            - name: LABWEAVER_ENVIRONMENT_PROVIDER_BINDINGS_PATH
+              value: /etc/labweaver/container-projection/providers.json
             {{- end }}
             {{- if $containerPlacement }}
             - name: LABWEAVER_CONTAINER_PLACEMENT_CONFIG_FILE
@@ -233,6 +241,9 @@ spec:
           resources:
             {{- toYaml (default $root.Values.resources $configuration.resources) | nindent 12 }}
           volumeMounts:
+            {{- if $containerProjection }}
+            - {name: container-projection, mountPath: /etc/labweaver/container-projection, readOnly: true}
+            {{- end }}
             {{- if $environmentAuthority }}
             - {name: environment-authority, mountPath: /etc/labweaver/environment-authority, readOnly: true}
             {{- end }}
@@ -259,6 +270,12 @@ spec:
             - {name: object-store-nginx, mountPath: /etc/nginx/labweaver-conf.d, readOnly: true}
             {{- end }}
       volumes:
+        {{- if $containerProjection }}
+        - name: container-projection
+          configMap:
+            name: {{ required "Container executor requires the Environment owner's configMap" (index $root.Values.workloads "environment-service").configMap | quote }}
+            items: [{key: providers.json, path: providers.json}]
+        {{- end }}
         {{- if $environmentAuthority }}
         - name: environment-authority
           projected:

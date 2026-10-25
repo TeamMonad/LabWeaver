@@ -78,6 +78,11 @@ impl EnvironmentRuntimeAuthority for PgAuthority {
             diagnostic_code: error.to_string(),
         })?;
         Ok(EnvironmentRuntimeAuthorizationResolution {
+            default_container_uid: value
+                .applied_configuration
+                .configuration
+                .runtime_policy
+                .default_container_uid,
             valid_until: value.lease.expires_at.min(value.approval_valid_until),
             provider_binding: value.provider_binding,
             owner_actor_id: value.lease.owner_actor_id,
@@ -719,7 +724,96 @@ impl environment_service::ContainerExecutorBackend for PhysicalClusterFixture {
         }
     }
 }
-fn physical_envelope(
+fn projection_configuration(
+    projection: &contracts::events::ReleasePublished,
+) -> Result<environment_service::ContainerProviderConfiguration> {
+    let (repository, _) = projection
+        .release
+        .artifact
+        .container_reference()
+        .ok_or("container image")?;
+    let approval = projection
+        .release
+        .approval
+        .as_ref()
+        .ok_or("generated container approval")?;
+    Ok(environment_service::ContainerProviderConfiguration::new(
+        environment_service::ContainerReleasePolicy::new(
+            contracts::PolicyId::new(),
+            approval.policy_revision,
+            approval.trust_revision,
+        )?,
+        repository
+            .rsplit_once('/')
+            .ok_or("image repository prefix")?
+            .0
+            .into(),
+        "synthetic-access".into(),
+        "synthetic-access".into(),
+        "registry-pull".into(),
+        "synthetic-storage".into(),
+        "ReadWriteOnce",
+    )?)
+}
+
+// The fixture deployment profile does not change when a Work selects a compatible release.
+// Resolve it from the original approved publication, not the newly selected manual template.
+async fn original_projection_configuration(
+    pool: &PgPool,
+    instance: &contracts::environment::EnvironmentInstance,
+) -> Result<environment_service::ContainerProviderConfiguration> {
+    use environment_service::ContainerReleaseResolver as _;
+    let identity = &instance
+        .runtime_authorization
+        .as_ref()
+        .ok_or("runtime receipt")?
+        .authorization
+        .configuration;
+    let source = PgReleaseProjectionStore::new(pool.clone())
+        .resolve(identity.release_id, identity.release_version)
+        .await?;
+    projection_configuration(&source.projection)
+}
+
+async fn trusted_container_plan(
+    pool: &PgPool,
+    instance: &contracts::environment::EnvironmentInstance,
+) -> Result<environment_service::ContainerResourcePlan> {
+    use environment_service::ContainerReleaseResolver as _;
+    let current = PgEnvironmentStore::new(pool.clone())
+        .load(instance.id)
+        .await?;
+    let resolved = PgReleaseProjectionStore::new(pool.clone())
+        .resolve(current.release_id, current.release_version)
+        .await?;
+    let configuration = original_projection_configuration(pool, &current).await?;
+    Ok(configuration.project_plan(
+        &current.provider_binding,
+        &environment_service::ContainerNamespaceProfile::Dedicated {},
+        &current,
+        &resolved,
+        environment_service::ReconcileAction::Stop,
+    )?)
+}
+
+async fn container_fence_store(
+    pool: PgPool,
+    instance: &contracts::environment::EnvironmentInstance,
+) -> Result<environment_service::PgContainerExecutorFenceStore> {
+    let store = environment_service::PgContainerExecutorFenceStore::new(pool.clone());
+    if instance.runtime_kind == contracts::authoring::RuntimeKind::Container {
+        let configuration = original_projection_configuration(&pool, instance).await?;
+        Ok(
+            store
+                .with_projection_configuration(instance.provider_binding.clone(), configuration)?,
+        )
+    } else {
+        Ok(store)
+    }
+}
+
+async fn physical_envelope(
+    pool: &PgPool,
     instance: &contracts::environment::EnvironmentInstance,
     step: u32,
     cleanup: bool,
@@ -730,20 +824,25 @@ fn physical_envelope(
         ContainerResource, ContainerResourcePlan, ReconcileAction,
     };
     let namespace = format!("lw-env-{}", instance.id);
-    let plan = ContainerResourcePlan {
-        environment_id: instance.id,
-        project_id: instance.project_id,
-        namespace: namespace.clone(),
-        namespace_uid: None,
-        image: "synthetic/runtime".into(),
-        plan_sha256: persistence_sqlx::Sha256Digest::of_bytes(b"funded-pvc"),
-        resources: vec![ContainerResource {
-            kind: "PersistentVolumeClaim".into(),
-            namespace: Some(namespace),
-            name: "workspace".into(),
-            document: serde_json::json!({"kind":"PersistentVolumeClaim"}),
-        }],
+    let mut plan = if instance.runtime_kind == contracts::authoring::RuntimeKind::Container {
+        trusted_container_plan(pool, instance).await?
+    } else {
+        ContainerResourcePlan {
+            environment_id: instance.id,
+            project_id: instance.project_id,
+            namespace: namespace.clone(),
+            namespace_uid: None,
+            image: "synthetic/runtime".into(),
+            plan_sha256: persistence_sqlx::Sha256Digest::of_bytes(b"funded-pvc"),
+            resources: vec![ContainerResource {
+                kind: "PersistentVolumeClaim".into(),
+                namespace: Some(namespace),
+                name: "workspace".into(),
+                document: serde_json::json!({"kind":"PersistentVolumeClaim"}),
+            }],
+        }
     };
+    plan.project_id = instance.project_id;
     let action = if cleanup {
         ReconcileAction::Cleanup
     } else {
@@ -894,34 +993,14 @@ async fn exercise_execution(
         .resolve(instance.release_id, instance.release_version)
         .await?;
     let projection = &resolved.projection;
-    if let contracts::supply_chain::ImageArtifact::Container { repository, .. } =
-        &projection.release.artifact
-    {
-        let prefix = repository
-            .rsplit_once('/')
-            .ok_or("image repository prefix")?
-            .0;
+    if matches!(
+        &projection.release.artifact,
+        contracts::supply_chain::ImageArtifact::Container { .. }
+    ) {
         assert_eq!(instance.project_id, projection.release.project_id);
         assert_eq!(instance.release_id, projection.release.id);
         assert_eq!(instance.release_version, projection.release.version);
-        let approval = projection
-            .release
-            .approval
-            .as_ref()
-            .ok_or("generated container approval")?;
-        let configuration = environment_service::ContainerProviderConfiguration::new(
-            environment_service::ContainerReleasePolicy::new(
-                contracts::PolicyId::new(),
-                approval.policy_revision,
-                approval.trust_revision,
-            )?,
-            prefix.into(),
-            "synthetic-access".into(),
-            "synthetic-access".into(),
-            "registry-pull".into(),
-            "synthetic-storage".into(),
-            "ReadWriteOnce",
-        )?;
+        let configuration = projection_configuration(projection)?;
         let provider = environment_service::ContainerProvider::new(
             instance.provider_binding.clone(),
             Arc::new(ClusterFixture {
@@ -932,11 +1011,39 @@ async fn exercise_execution(
             Arc::new(projections),
             configuration,
         )?;
-        provider.plan(
+        let plan = provider.plan(
             instance,
             &resolved,
             environment_service::ReconcileAction::Validate,
         )?;
+        assert_eq!(
+            plan.resources
+                .iter()
+                .find(|r| r.kind == "Deployment")
+                .and_then(|r| r
+                    .document
+                    .pointer("/spec/template/spec/containers/0/securityContext/runAsUser")),
+            Some(&serde_json::json!(0)),
+            "the real approved baseline runs as ordinary root"
+        );
+        let pod = plan
+            .resources
+            .iter()
+            .find(|r| r.kind == "Deployment")
+            .ok_or("deployment")?
+            .document
+            .pointer("/spec/template/spec")
+            .ok_or("pod")?;
+        for containers in ["containers", "initContainers"] {
+            let security = &pod[containers][0]["securityContext"];
+            assert_eq!(security["privileged"], false);
+            assert_eq!(security["readOnlyRootFilesystem"], false);
+            assert_eq!(
+                security["capabilities"],
+                serde_json::json!({"drop":["ALL"],"add":projection.environment_spec.security.capabilities})
+            );
+        }
+        executor_gate::assert_security_rejections(pool, admission, instance, &plan).await?;
         let provider = Arc::new(provider);
         container_provider = Some(provider.clone());
         registry.register(provider)?;
@@ -948,6 +1055,12 @@ async fn exercise_execution(
             calls.clone(),
             reject_next_restart.clone(),
         )?;
+    }
+    if let Some(fault @ super::ExecutorFailure::Security(_)) = http.executor_failure {
+        return Box::pin(executor_gate::exercise_transport(
+            pool, resource, admission, instance, http, fault,
+        ))
+        .await;
     }
     let worker = environment_service::ReconcileWorker::new(
         store.clone(),
@@ -974,14 +1087,14 @@ async fn exercise_execution(
     assert_eq!(ready.lease_id, instance.lease_id);
     let physical_calls = Arc::new(AtomicUsize::new(0));
     let executor = environment_service::FencedContainerExecutor::new(
-        environment_service::PgContainerExecutorFenceStore::new(pool.clone()),
+        container_fence_store(pool.clone(), instance).await?,
         PhysicalClusterFixture(physical_calls.clone(), store.current_time().await?),
     )
     .with_runtime_admission(admission.clone());
     let deadline =
         UtcTimestamp::from_utc(store.current_time().await?.get() + time::Duration::seconds(30))?;
     let container = instance.runtime_kind == contracts::authoring::RuntimeKind::Container;
-    let first = physical_envelope(&ready, 1, false, deadline)?;
+    let first = physical_envelope(pool, &ready, 1, false, deadline).await?;
     if !container {
         assert!(
             matches!(
@@ -1009,7 +1122,7 @@ async fn exercise_execution(
         ] {
             assert!(matches!(
                 executor
-                    .execute(physical_envelope(&foreign, 1, false, deadline)?)
+                    .execute(physical_envelope(pool, &foreign, 1, false, deadline).await?)
                     .await,
                 Err(
                     environment_service::ContainerExecutorFenceError::RuntimeAdmission(
@@ -1180,7 +1293,7 @@ async fn exercise_execution(
         ));
         let deleted = store.load(instance.id).await?;
         executor
-            .execute(physical_envelope(&deleted, 1, true, deadline)?)
+            .execute(physical_envelope(pool, &deleted, 1, true, deadline).await?)
             .await?;
         assert_eq!(physical_calls.load(Ordering::SeqCst), 2);
         assert_original_release(
@@ -1213,7 +1326,7 @@ async fn exercise_execution(
     if container {
         assert!(matches!(
             executor
-                .execute(physical_envelope(&restarted, 1, false, deadline)?)
+                .execute(physical_envelope(pool, &restarted, 1, false, deadline).await?)
                 .await,
             Err(
                 environment_service::ContainerExecutorFenceError::RuntimeAdmission(
@@ -1224,7 +1337,7 @@ async fn exercise_execution(
     }
     // A restarted executor replays an already completed effect, despite loss of current funding.
     let recovered = environment_service::FencedContainerExecutor::new(
-        environment_service::PgContainerExecutorFenceStore::new(pool.clone()),
+        container_fence_store(pool.clone(), instance).await?,
         PhysicalClusterFixture(physical_calls.clone(), store.current_time().await?),
     )
     .with_runtime_admission(admission.clone());
@@ -1274,7 +1387,7 @@ async fn exercise_execution(
     if container {
         assert!(matches!(
             recovered
-                .execute(physical_envelope(&failed, 1, false, deadline)?)
+                .execute(physical_envelope(pool, &failed, 1, false, deadline).await?)
                 .await,
             Err(
                 environment_service::ContainerExecutorFenceError::RuntimeAdmission(
@@ -1294,7 +1407,7 @@ async fn exercise_execution(
     let deleted = store.load(instance.id).await?;
     if container {
         recovered
-            .execute(physical_envelope(&deleted, 1, true, deadline)?)
+            .execute(physical_envelope(pool, &deleted, 1, true, deadline).await?)
             .await?;
         assert_eq!(physical_calls.load(Ordering::SeqCst), 2);
     }

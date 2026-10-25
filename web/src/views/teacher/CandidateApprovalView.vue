@@ -122,7 +122,7 @@
                               <dd>{{ row.value }}<small v-if="row.hint" class="row-hint">{{ row.hint }}</small></dd>
                             </template>
                           </dl>
-                          <p class="pane-note" data-testid="permission-gap">平台目前只返回上面这些安全策略，还没有特权模式、capability 列表和管理员允许范围，因此这里无法逐项显示。</p>
+                          <p class="pane-note" data-testid="permission-gap">普通容器支持 root 和受控 capability；此页尚未逐项展示 capability 与管理员允许范围。特权容器和 DinD 暂不支持。</p>
                           <p class="pane-note">权限随环境、镜像和评分规则一起绑定到发布版本。构建成功不代表已获得运行权限，学生启动时平台仍会按管理员策略检查。</p>
                         </section>
                       </div>

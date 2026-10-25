@@ -2692,6 +2692,10 @@ export type EnvironmentResetTarget = {
  */
 export type EnvironmentRuntimeAuthorizationResolution = {
     authorization: RuntimeAuthorizationBinding;
+    /**
+     * Default from the exact verified platform version identified by authorization.
+     */
+    defaultContainerUid: number;
     leaseAuthorization: EnvironmentLeaseAuthorization;
     ownerActorId: EnvironmentDetailSchemaActorId;
     providerBinding: string;
@@ -3155,6 +3159,10 @@ export type EnvironmentInstanceSchemaEnvironmentResetTarget = {
  */
 export type EnvironmentInstanceSchemaEnvironmentRuntimeAuthorizationResolution = {
     authorization: EnvironmentInstanceSchemaRuntimeAuthorizationBinding;
+    /**
+     * Default from the exact verified platform version identified by authorization.
+     */
+    defaultContainerUid: number;
     leaseAuthorization: EnvironmentInstanceSchemaEnvironmentLeaseAuthorization;
     ownerActorId: EnvironmentInstanceSchemaActorId;
     providerBinding: string;
@@ -5336,14 +5344,20 @@ export type EnvironmentRuntimeSpec = {
 };
 
 /**
- * Runtime-independent minimum security posture.
+ * Runtime permissions, independently declared and bound to the immutable approved spec.
  */
 export type EnvironmentSecuritySpec = {
-    privilegeEscalationPolicy: PrivilegeEscalationPolicy;
+    allowPrivilegeEscalation?: false | null;
+    capabilities?: Array<CreateEnvironmentTemplateReleaseRequestSchemaLinuxCapability>;
+    privileged?: boolean;
     publicExposurePolicy: PublicExposurePolicy;
-    rootFilesystemPolicy: RootFilesystemPolicy;
+    readOnlyRootFilesystem?: boolean;
+    /**
+     * Null consumes the default UID from the same verified platform configuration as approval.
+     */
+    runAsUser?: number | null;
+    seccomp?: RuntimeSeccompProfile;
     securityProfileBinding: string;
-    userPolicy: RuntimeUserPolicy;
 };
 
 /**
@@ -5369,6 +5383,11 @@ export type CreateEnvironmentTemplateReleaseRequestSchemaGpuRequest = {
     class: string;
     count: number;
 };
+
+/**
+ * Linux capability names from the kernel UAPI. `ALL` is never an addition.
+ */
+export type CreateEnvironmentTemplateReleaseRequestSchemaLinuxCapability = 'CHOWN' | 'DAC_OVERRIDE' | 'DAC_READ_SEARCH' | 'FOWNER' | 'FSETID' | 'KILL' | 'SETGID' | 'SETUID' | 'SETPCAP' | 'LINUX_IMMUTABLE' | 'NET_BIND_SERVICE' | 'NET_BROADCAST' | 'NET_ADMIN' | 'NET_RAW' | 'IPC_LOCK' | 'IPC_OWNER' | 'SYS_MODULE' | 'SYS_RAWIO' | 'SYS_CHROOT' | 'SYS_PTRACE' | 'SYS_PACCT' | 'SYS_ADMIN' | 'SYS_BOOT' | 'SYS_NICE' | 'SYS_RESOURCE' | 'SYS_TIME' | 'SYS_TTY_CONFIG' | 'MKNOD' | 'LEASE' | 'AUDIT_WRITE' | 'AUDIT_CONTROL' | 'SETFCAP' | 'MAC_OVERRIDE' | 'MAC_ADMIN' | 'SYSLOG' | 'WAKE_ALARM' | 'BLOCK_SUSPEND' | 'AUDIT_READ' | 'PERFMON' | 'BPF' | 'CHECKPOINT_RESTORE';
 
 /**
  * One explicit human approval publishes this exact platform image and Work specification.
@@ -5404,8 +5423,6 @@ export type CreateEnvironmentTemplateReleaseRequestSchemaPlatformImageId = strin
  * Strongly typed UUIDv7 identifier for `PolicyId`.
  */
 export type CreateEnvironmentTemplateReleaseRequestSchemaPolicyId = string;
-
-export type PrivilegeEscalationPolicy = 'deny';
 
 /**
  * Strongly typed UUIDv7 identifier for `ProjectId`.
@@ -5469,14 +5486,12 @@ export type CreateEnvironmentTemplateReleaseRequestSchemaRetentionSnapshot = {
  */
 export type CreateEnvironmentTemplateReleaseRequestSchemaRevision = number;
 
-export type RootFilesystemPolicy = 'read_only_required' | 'mutable_required';
-
 /**
  * Runtime kind shared by candidates, releases, and instances.
  */
 export type CreateEnvironmentTemplateReleaseRequestSchemaRuntimeKind = 'container' | 'virtual_machine';
 
-export type RuntimeUserPolicy = 'non_root_required';
+export type RuntimeSeccompProfile = 'runtime_default' | 'unconfined';
 
 /**
  * Bounded direct-exec terminal owned by an immutable Container release.
@@ -6191,14 +6206,20 @@ export type EnvironmentCandidateViewSchemaEnvironmentRuntimeSpec = {
 };
 
 /**
- * Runtime-independent minimum security posture.
+ * Runtime permissions, independently declared and bound to the immutable approved spec.
  */
 export type EnvironmentCandidateViewSchemaEnvironmentSecuritySpec = {
-    privilegeEscalationPolicy: EnvironmentCandidateViewSchemaPrivilegeEscalationPolicy;
+    allowPrivilegeEscalation?: false | null;
+    capabilities?: Array<EnvironmentCandidateViewSchemaLinuxCapability>;
+    privileged?: boolean;
     publicExposurePolicy: EnvironmentCandidateViewSchemaPublicExposurePolicy;
-    rootFilesystemPolicy: EnvironmentCandidateViewSchemaRootFilesystemPolicy;
+    readOnlyRootFilesystem?: boolean;
+    /**
+     * Null consumes the default UID from the same verified platform configuration as approval.
+     */
+    runAsUser?: number | null;
+    seccomp?: EnvironmentCandidateViewSchemaRuntimeSeccompProfile;
     securityProfileBinding: string;
-    userPolicy: EnvironmentCandidateViewSchemaRuntimeUserPolicy;
 };
 
 /**
@@ -6255,6 +6276,11 @@ export type EnvironmentCandidateViewSchemaImageArtifact = {
 export type EnvironmentCandidateViewSchemaImageArtifactId = string;
 
 /**
+ * Linux capability names from the kernel UAPI. `ALL` is never an addition.
+ */
+export type EnvironmentCandidateViewSchemaLinuxCapability = 'CHOWN' | 'DAC_OVERRIDE' | 'DAC_READ_SEARCH' | 'FOWNER' | 'FSETID' | 'KILL' | 'SETGID' | 'SETUID' | 'SETPCAP' | 'LINUX_IMMUTABLE' | 'NET_BIND_SERVICE' | 'NET_BROADCAST' | 'NET_ADMIN' | 'NET_RAW' | 'IPC_LOCK' | 'IPC_OWNER' | 'SYS_MODULE' | 'SYS_RAWIO' | 'SYS_CHROOT' | 'SYS_PTRACE' | 'SYS_PACCT' | 'SYS_ADMIN' | 'SYS_BOOT' | 'SYS_NICE' | 'SYS_RESOURCE' | 'SYS_TIME' | 'SYS_TTY_CONFIG' | 'MKNOD' | 'LEASE' | 'AUDIT_WRITE' | 'AUDIT_CONTROL' | 'SETFCAP' | 'MAC_OVERRIDE' | 'MAC_ADMIN' | 'SYSLOG' | 'WAKE_ALARM' | 'BLOCK_SUSPEND' | 'AUDIT_READ' | 'PERFMON' | 'BPF' | 'CHECKPOINT_RESTORE';
+
+/**
  * Network egress posture for a published environment.
  */
 export type EnvironmentCandidateViewSchemaNetworkPolicySpec = {
@@ -6275,8 +6301,6 @@ export type EnvironmentCandidateViewSchemaPlatformImageId = string;
  * Strongly typed UUIDv7 identifier for `PolicyId`.
  */
 export type EnvironmentCandidateViewSchemaPolicyId = string;
-
-export type EnvironmentCandidateViewSchemaPrivilegeEscalationPolicy = 'deny';
 
 /**
  * Strongly typed UUIDv7 identifier for `ProjectId`.
@@ -6340,9 +6364,7 @@ export type EnvironmentCandidateViewSchemaRetentionSnapshot = {
  */
 export type EnvironmentCandidateViewSchemaRevision = number;
 
-export type EnvironmentCandidateViewSchemaRootFilesystemPolicy = 'read_only_required' | 'mutable_required';
-
-export type EnvironmentCandidateViewSchemaRuntimeUserPolicy = 'non_root_required';
+export type EnvironmentCandidateViewSchemaRuntimeSeccompProfile = 'runtime_default' | 'unconfined';
 
 /**
  * Bounded direct-exec terminal owned by an immutable Container release.
@@ -6928,14 +6950,20 @@ export type EnvironmentTemplateReleaseViewSchemaEnvironmentRuntimeSpec = {
 };
 
 /**
- * Runtime-independent minimum security posture.
+ * Runtime permissions, independently declared and bound to the immutable approved spec.
  */
 export type EnvironmentTemplateReleaseViewSchemaEnvironmentSecuritySpec = {
-    privilegeEscalationPolicy: EnvironmentTemplateReleaseViewSchemaPrivilegeEscalationPolicy;
+    allowPrivilegeEscalation?: false | null;
+    capabilities?: Array<EnvironmentTemplateReleaseViewSchemaLinuxCapability>;
+    privileged?: boolean;
     publicExposurePolicy: EnvironmentTemplateReleaseViewSchemaPublicExposurePolicy;
-    rootFilesystemPolicy: EnvironmentTemplateReleaseViewSchemaRootFilesystemPolicy;
+    readOnlyRootFilesystem?: boolean;
+    /**
+     * Null consumes the default UID from the same verified platform configuration as approval.
+     */
+    runAsUser?: number | null;
+    seccomp?: EnvironmentTemplateReleaseViewSchemaRuntimeSeccompProfile;
     securityProfileBinding: string;
-    userPolicy: EnvironmentTemplateReleaseViewSchemaRuntimeUserPolicy;
 };
 
 /**
@@ -6990,6 +7018,11 @@ export type EnvironmentTemplateReleaseViewSchemaImageArtifact = {
  * Strongly typed UUIDv7 identifier for `ImageArtifactId`.
  */
 export type EnvironmentTemplateReleaseViewSchemaImageArtifactId = string;
+
+/**
+ * Linux capability names from the kernel UAPI. `ALL` is never an addition.
+ */
+export type EnvironmentTemplateReleaseViewSchemaLinuxCapability = 'CHOWN' | 'DAC_OVERRIDE' | 'DAC_READ_SEARCH' | 'FOWNER' | 'FSETID' | 'KILL' | 'SETGID' | 'SETUID' | 'SETPCAP' | 'LINUX_IMMUTABLE' | 'NET_BIND_SERVICE' | 'NET_BROADCAST' | 'NET_ADMIN' | 'NET_RAW' | 'IPC_LOCK' | 'IPC_OWNER' | 'SYS_MODULE' | 'SYS_RAWIO' | 'SYS_CHROOT' | 'SYS_PTRACE' | 'SYS_PACCT' | 'SYS_ADMIN' | 'SYS_BOOT' | 'SYS_NICE' | 'SYS_RESOURCE' | 'SYS_TIME' | 'SYS_TTY_CONFIG' | 'MKNOD' | 'LEASE' | 'AUDIT_WRITE' | 'AUDIT_CONTROL' | 'SETFCAP' | 'MAC_OVERRIDE' | 'MAC_ADMIN' | 'SYSLOG' | 'WAKE_ALARM' | 'BLOCK_SUSPEND' | 'AUDIT_READ' | 'PERFMON' | 'BPF' | 'CHECKPOINT_RESTORE';
 
 /**
  * Human-reviewed Work configuration. No model, Agent run, or LLM policy is fabricated.
@@ -7078,8 +7111,6 @@ export type PlatformImageStatus = 'active' | 'disabled';
  */
 export type EnvironmentTemplateReleaseViewSchemaPolicyId = string;
 
-export type EnvironmentTemplateReleaseViewSchemaPrivilegeEscalationPolicy = 'deny';
-
 /**
  * Strongly typed UUIDv7 identifier for `ProjectId`.
  */
@@ -7158,14 +7189,12 @@ export type EnvironmentTemplateReleaseViewSchemaRetentionSnapshot = {
  */
 export type EnvironmentTemplateReleaseViewSchemaRevision = number;
 
-export type EnvironmentTemplateReleaseViewSchemaRootFilesystemPolicy = 'read_only_required' | 'mutable_required';
-
 /**
  * Runtime kind shared by candidates, releases, and instances.
  */
 export type EnvironmentTemplateReleaseViewSchemaRuntimeKind = 'container' | 'virtual_machine';
 
-export type EnvironmentTemplateReleaseViewSchemaRuntimeUserPolicy = 'non_root_required';
+export type EnvironmentTemplateReleaseViewSchemaRuntimeSeccompProfile = 'runtime_default' | 'unconfined';
 
 export type EnvironmentTemplateReleaseViewSchemaSubmissionApiVersion = 'evaluation.labweaver.io/v1';
 
@@ -8822,14 +8851,20 @@ export type InternalAgentRunOutcomeSchemaEnvironmentRuntimeSpec = {
 };
 
 /**
- * Runtime-independent minimum security posture.
+ * Runtime permissions, independently declared and bound to the immutable approved spec.
  */
 export type InternalAgentRunOutcomeSchemaEnvironmentSecuritySpec = {
-    privilegeEscalationPolicy: InternalAgentRunOutcomeSchemaPrivilegeEscalationPolicy;
+    allowPrivilegeEscalation?: false | null;
+    capabilities?: Array<InternalAgentRunOutcomeSchemaLinuxCapability>;
+    privileged?: boolean;
     publicExposurePolicy: InternalAgentRunOutcomeSchemaPublicExposurePolicy;
-    rootFilesystemPolicy: InternalAgentRunOutcomeSchemaRootFilesystemPolicy;
+    readOnlyRootFilesystem?: boolean;
+    /**
+     * Null consumes the default UID from the same verified platform configuration as approval.
+     */
+    runAsUser?: number | null;
+    seccomp?: InternalAgentRunOutcomeSchemaRuntimeSeccompProfile;
     securityProfileBinding: string;
-    userPolicy: InternalAgentRunOutcomeSchemaRuntimeUserPolicy;
 };
 
 /**
@@ -8981,6 +9016,11 @@ export type InternalAgentRunOutcomeSchemaGpuRequest = {
 };
 
 /**
+ * Linux capability names from the kernel UAPI. `ALL` is never an addition.
+ */
+export type InternalAgentRunOutcomeSchemaLinuxCapability = 'CHOWN' | 'DAC_OVERRIDE' | 'DAC_READ_SEARCH' | 'FOWNER' | 'FSETID' | 'KILL' | 'SETGID' | 'SETUID' | 'SETPCAP' | 'LINUX_IMMUTABLE' | 'NET_BIND_SERVICE' | 'NET_BROADCAST' | 'NET_ADMIN' | 'NET_RAW' | 'IPC_LOCK' | 'IPC_OWNER' | 'SYS_MODULE' | 'SYS_RAWIO' | 'SYS_CHROOT' | 'SYS_PTRACE' | 'SYS_PACCT' | 'SYS_ADMIN' | 'SYS_BOOT' | 'SYS_NICE' | 'SYS_RESOURCE' | 'SYS_TIME' | 'SYS_TTY_CONFIG' | 'MKNOD' | 'LEASE' | 'AUDIT_WRITE' | 'AUDIT_CONTROL' | 'SETFCAP' | 'MAC_OVERRIDE' | 'MAC_ADMIN' | 'SYSLOG' | 'WAKE_ALARM' | 'BLOCK_SUSPEND' | 'AUDIT_READ' | 'PERFMON' | 'BPF' | 'CHECKPOINT_RESTORE';
+
+/**
  * Frozen LLM usage for one attempt.
  */
 export type InternalAgentRunOutcomeSchemaLlmUsage = {
@@ -9011,8 +9051,6 @@ export type InternalAgentRunOutcomeSchemaNetworkPolicySpec = {
  * Strongly typed UUIDv7 identifier for `PolicyId`.
  */
 export type InternalAgentRunOutcomeSchemaPolicyId = string;
-
-export type InternalAgentRunOutcomeSchemaPrivilegeEscalationPolicy = 'deny';
 
 /**
  * Strongly typed UUIDv7 identifier for `ProblemPackageId`.
@@ -9099,14 +9137,12 @@ export type InternalAgentRunOutcomeSchemaReviewPolicy = {
  */
 export type InternalAgentRunOutcomeSchemaRevision = number;
 
-export type InternalAgentRunOutcomeSchemaRootFilesystemPolicy = 'read_only_required' | 'mutable_required';
-
 /**
  * Runtime kind shared by candidates, releases, and instances.
  */
 export type InternalAgentRunOutcomeSchemaRuntimeKind = 'container' | 'virtual_machine';
 
-export type InternalAgentRunOutcomeSchemaRuntimeUserPolicy = 'non_root_required';
+export type InternalAgentRunOutcomeSchemaRuntimeSeccompProfile = 'runtime_default' | 'unconfined';
 
 /**
  * Failure behavior for a Score step.
@@ -11242,7 +11278,7 @@ export type PlatformLifecycleDefaults = {
 export type PlatformRuntimePolicy = {
     allowedCapabilities: Array<UpdatePlatformConfigurationRequestSchemaLinuxCapability>;
     /**
-     * Zero means guest/container root, without host privileges.
+     * Default ordinary-container UID; zero is container root, without host privileges.
      */
     defaultContainerUid: number;
     preauthorizations: Array<UpdatePlatformConfigurationRequestSchemaRuntimePreauthorization>;
@@ -12295,7 +12331,7 @@ export type PlatformConfigurationStatusSchemaPlatformLifecycleDefaults = {
 export type PlatformConfigurationStatusSchemaPlatformRuntimePolicy = {
     allowedCapabilities: Array<PlatformConfigurationStatusSchemaLinuxCapability>;
     /**
-     * Zero means guest/container root, without host privileges.
+     * Default ordinary-container UID; zero is container root, without host privileges.
      */
     defaultContainerUid: number;
     preauthorizations: Array<PlatformConfigurationStatusSchemaRuntimePreauthorization>;
@@ -12412,7 +12448,7 @@ export type PlatformConfigurationVersionSchemaPlatformLifecycleDefaults = {
 export type PlatformConfigurationVersionSchemaPlatformRuntimePolicy = {
     allowedCapabilities: Array<PlatformConfigurationVersionSchemaLinuxCapability>;
     /**
-     * Zero means guest/container root, without host privileges.
+     * Default ordinary-container UID; zero is container root, without host privileges.
      */
     defaultContainerUid: number;
     preauthorizations: Array<PlatformConfigurationVersionSchemaRuntimePreauthorization>;

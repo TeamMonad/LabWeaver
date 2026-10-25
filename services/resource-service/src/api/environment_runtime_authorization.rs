@@ -18,6 +18,11 @@ pub(super) async fn resolve(
     .await
     .map_err(crate::store::ResourceStoreError::from)?;
     Ok(Json(EnvironmentRuntimeAuthorizationResolution {
+        default_container_uid: current
+            .applied_configuration
+            .configuration
+            .runtime_policy
+            .default_container_uid,
         valid_until: current.lease.expires_at.min(current.approval_valid_until),
         authorization: current.binding,
         owner_actor_id: current.lease.owner_actor_id,

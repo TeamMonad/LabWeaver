@@ -13,7 +13,7 @@ pub(crate) fn projection(instance: &EnvironmentInstance) -> TestResult<ReleasePu
         "apiVersion":"environment.labweaver.io/v1","kind":"EnvironmentSpec","name":"manual-work","class":"work",
         "resources":instance.approved_resources,"network":{"mode":"deny_all"},
         "entries":[{"name":"app","protocol":"http","servicePort":8080}],
-        "security":{"userPolicy":"non_root_required","rootFilesystemPolicy":"read_only_required","privilegeEscalationPolicy":"deny","publicExposurePolicy":"deny","securityProfileBinding":"restricted-v1"},
+        "security":{"runAsUser":null,"readOnlyRootFilesystem":false,"allowPrivilegeEscalation":false,"publicExposurePolicy":"deny","securityProfileBinding":"restricted-v1"},
         "runtime":{"kind":"container","provider_binding":instance.provider_binding,"service_port":8080},
         "retention":{"policyId":contracts::PolicyId::new(),"policyRevision":1,"class":"run_evidence","retainUntil":instance.eligibility_expires_at,"disposition":"delete"}
     });

@@ -701,19 +701,20 @@ async fn seed_existing_running_work(
     let resolved = releases
         .resolve(instance.release_id, instance.release_version)
         .await?;
-    let provider = container_provider(releases.clone(), Arc::clone(backend))?;
-    backend
-        .install(&provider.plan(
-            instance,
-            &resolved,
-            environment_service::ReconcileAction::Provision,
-        )?)
-        .await
-        .map_err(|failure| {
-            std::io::Error::other(format!(
-                "fixture Kubernetes observation failed: {failure:?}"
-            ))
-        })?;
+    // Seed an already-running Kubernetes boundary, not a new compute plan: this historical
+    // fixture intentionally has no current Resource runtime approval. New compute is covered
+    // by Control's funded journey and must continue to fail closed in these HTTP tests.
+    let contracts::supply_chain::ImageArtifact::CatalogContainer {
+        repository, digest, ..
+    } = &resolved.projection.release.artifact
+    else {
+        return Err("manual container image".into());
+    };
+    *backend.installed.lock().await = Some(InstalledDeployment {
+        image: format!("{repository}@{digest}"),
+        namespace: format!("lw-env-{}", instance.id),
+        workspace_claim: "workspace".to_owned(),
+    });
     let lease = store
         .claim_due("existing-running-fixture", Duration::from_secs(10))
         .await?

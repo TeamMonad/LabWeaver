@@ -422,6 +422,8 @@ pub struct ResolveEnvironmentRuntimeAuthorizationRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EnvironmentRuntimeAuthorizationResolution {
     pub provider_binding: String,
+    /// Default from the exact verified platform version identified by authorization.
+    pub default_container_uid: u32,
     pub valid_until: UtcTimestamp,
     pub lease_authorization: EnvironmentLeaseAuthorization,
     pub authorization: crate::runtime_authorization::RuntimeAuthorizationBinding,
@@ -445,7 +447,7 @@ impl EnvironmentRuntimeAuthorizationResolution {
         };
         self.lease_authorization.validate()?;
         let declared =
-            crate::runtime_authorization::declared_baseline_permissions(spec, request.project_id)
+            crate::runtime_authorization::declared_runtime_permissions(spec, request.project_id)
                 .map_err(|_| EnvironmentError::InvalidResourceHandoff)?;
         let scope_matches = match self.authorization.permissions.scope {
             crate::platform_configuration::RuntimePreauthorizationScope::Project { project_id } => {
@@ -456,6 +458,7 @@ impl EnvironmentRuntimeAuthorizationResolution {
             }
         };
         if !scope_matches
+            || self.default_container_uid == u32::MAX
             || self.authorization.configuration.course_id != request.course_id
             || self.lease_authorization.resource_request_id != request.resource_request_id
             || self.lease_authorization.environment_id != environment_id

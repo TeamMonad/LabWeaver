@@ -1,7 +1,5 @@
 //! Runtime authorization identities attached to existing Control and Resource approvals.
-use crate::authoring::{
-    EnvironmentSecuritySpec, EnvironmentSpec, PrivilegeEscalationPolicy, RuntimeUserPolicy,
-};
+use crate::authoring::{EnvironmentSecuritySpec, EnvironmentSpec};
 use crate::platform_configuration::{
     PlatformConfigurationAppliedState, PlatformConfigurationStatus, PlatformRuntimePolicy,
     RuntimePreauthorization, RuntimePreauthorizationScope,
@@ -10,7 +8,6 @@ use crate::resource::{ResourceRequest, ResourceTarget};
 use crate::{ActorId, ApprovalId, CourseId, ProjectId, ReleaseId, Revision};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 
 /// Captured by Control while the verified teacher and current course instructor are checked.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -106,28 +103,17 @@ pub fn check_policy_use(
     Ok(())
 }
 
-/// Reads the entire current security declaration. Adding fields requires updating this projection.
-/// #207 owns that extension. This baseline does not accept extra permission parameters.
-pub fn declared_baseline_permissions(
+/// Reads permissions from the exact configuration covered by the existing approval.
+pub fn declared_runtime_permissions(
     spec: &EnvironmentSpec,
     project_id: ProjectId,
 ) -> Result<RuntimePreauthorization, RuntimeAuthorizationError> {
-    let EnvironmentSecuritySpec {
-        user_policy: runtime_user_policy,
-        root_filesystem_policy: _,
-        privilege_escalation_policy,
-        public_exposure_policy: _,
-        security_profile_binding: _,
-    } = &spec.security;
-    match (runtime_user_policy, privilege_escalation_policy) {
-        (RuntimeUserPolicy::NonRootRequired, PrivilegeEscalationPolicy::Deny) => {}
-    }
     spec.validate()
         .map_err(|_| RuntimeAuthorizationError::ConfigurationMismatch)?;
     Ok(RuntimePreauthorization {
         scope: RuntimePreauthorizationScope::Project { project_id },
-        capabilities: BTreeSet::new(),
-        privileged: false,
+        capabilities: spec.security.capabilities.clone(),
+        privileged: spec.security.privileged,
     })
 }
 
@@ -259,6 +245,7 @@ impl RuntimeAuthorizationBinding {
 mod tests {
     use super::*;
     use crate::platform_configuration::LinuxCapability;
+    use std::collections::BTreeSet;
 
     #[test]
     fn preauthorization_requires_the_matching_project_or_an_approved_course() {

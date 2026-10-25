@@ -1305,9 +1305,23 @@ fn platform_values_schema() -> Result<Value, GenerationError> {
     lifecycle["properties"]["expiryReminderSeconds"]["items"]["minimum"] = json!(1);
     lifecycle["properties"]["expiryReminderSeconds"]["items"]["maximum"] = json!(31_536_000);
     let runtime = &mut policy["properties"]["runtimePolicy"];
-    runtime["properties"]["defaultContainerUid"] = json!({"const": 0, "type": "integer"});
-    runtime["properties"]["allowedCapabilities"]["maxItems"] = json!(0);
-    runtime["properties"]["preauthorizations"]["maxItems"] = json!(0);
+    runtime["properties"]["defaultContainerUid"] =
+        json!({"minimum": 0, "maximum": u32::MAX - 1, "type": "integer"});
+    let supported_capabilities: Vec<_> = desired["$defs"]["LinuxCapability"]["enum"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|name| {
+            serde_json::from_value::<crate::platform_configuration::LinuxCapability>(
+                (*name).clone(),
+            )
+            .is_ok_and(crate::platform_configuration::LinuxCapability::supported_in_container)
+        })
+        .cloned()
+        .collect();
+    runtime["properties"]["allowedCapabilities"]["items"] =
+        json!({"enum": supported_capabilities, "type":"string"});
+    runtime["properties"]["preauthorizations"]["maxItems"] = json!(512);
     let prefixed_shape = format!(
         "^{} / {}$",
         crate::platform_configuration::label_prefix_pattern()
@@ -1393,6 +1407,10 @@ fn platform_values_schema() -> Result<Value, GenerationError> {
     if defs.is_null() {
         defs = json!({});
     }
+    defs["RuntimePreauthorization"]["properties"]["privileged"] =
+        json!({"const":false,"type":"boolean"});
+    defs["RuntimePreauthorization"]["properties"]["capabilities"]["items"] =
+        json!({"enum":supported_capabilities,"type":"string"});
     let schema = json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
         "$defs": defs,

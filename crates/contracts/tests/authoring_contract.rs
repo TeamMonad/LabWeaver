@@ -293,9 +293,12 @@ fn environment_spec_value(gpu: Option<Value>) -> Value {
         "network": {"mode": "deny_all"},
         "entries": [{"name": "web", "protocol": "http", "servicePort": 8080}],
         "security": {
-            "userPolicy": "non_root_required",
-            "rootFilesystemPolicy": "read_only_required",
-            "privilegeEscalationPolicy": "deny",
+            "runAsUser": null,
+            "readOnlyRootFilesystem": false,
+            "allowPrivilegeEscalation": false,
+            "privileged": false,
+            "capabilities": [],
+            "seccomp": "runtime_default",
             "publicExposurePolicy": "deny",
             "securityProfileBinding": "restricted-v1"
         },
@@ -347,6 +350,9 @@ fn runtime_permission_projection_covers_every_authority_bearing_field()
             "/security/securityProfileBinding",
             json!("restricted-other"),
         ),
+        ("/security/runAsUser", json!(0)),
+        ("/security/capabilities", json!(["NET_ADMIN"])),
+        ("/security/readOnlyRootFilesystem", json!(true)),
         ("/entries/0/name", json!("other")),
         ("/runtime/provider_binding", json!("container-other")),
         ("/runtime/service_port", json!(8081)),
@@ -436,5 +442,46 @@ fn course_policy_operation_exposes_optional_if_match() -> Result<(), Box<dyn std
             && parameter["in"] == "header"
             && parameter["required"] == json!(false)
     }));
+    Ok(())
+}
+
+#[test]
+fn ordinary_runtime_security_defaults_and_rejections() -> Result<(), Box<dyn std::error::Error>> {
+    use contracts::platform_configuration::LinuxCapability;
+    let mut value = environment_spec_value(None);
+    value["security"] = json!({"publicExposurePolicy":"deny","securityProfileBinding":"ordinary"});
+    let baseline: EnvironmentSpec = serde_json::from_value(value.clone())?;
+    assert_eq!(baseline.security.run_as_user, None);
+    assert!(!baseline.security.read_only_root_filesystem);
+    assert!(!baseline.security.allow_privilege_escalation);
+    assert!(!baseline.security.privileged);
+    assert!(baseline.security.capabilities.is_empty());
+    value["security"]["allowPrivilegeEscalation"] = json!(null);
+    let nullable: EnvironmentSpec = serde_json::from_value(value.clone())?;
+    assert!(!nullable.security.allow_privilege_escalation);
+    value["security"]["capabilities"] = json!(["NET_ADMIN"]);
+    value["security"]["runAsUser"] = json!(0);
+    let root: EnvironmentSpec = serde_json::from_value(value.clone())?;
+    assert_eq!(
+        root.security.capabilities.into_iter().collect::<Vec<_>>(),
+        vec![LinuxCapability::NetAdmin]
+    );
+    for (field, unsupported) in [
+        ("capabilities", json!(["ALL"])),
+        ("capabilities", json!(["UNKNOWN_CAPABILITY"])),
+        ("capabilities", json!(["SYS_ADMIN"])),
+        ("capabilities", json!(["BPF"])),
+        ("privileged", json!(true)),
+        ("allowPrivilegeEscalation", json!(true)),
+        ("seccomp", json!("unconfined")),
+        ("runAsUser", json!(u32::MAX)),
+    ] {
+        let mut invalid = value.clone();
+        invalid["security"][field] = unsupported;
+        assert!(
+            serde_json::from_value::<EnvironmentSpec>(invalid).is_err(),
+            "{field}"
+        );
+    }
     Ok(())
 }

@@ -12,7 +12,7 @@ Environment 是交互环境的唯一业务生命周期。Experiment 与 Work 表
 
 ## 既有 namespace 运行落点
 
-本增量支持一个部署指定项目的普通 Container Work。它仍通过 Resource 授权、lease 和 Environment 生命周期创建；客户端不能选择 namespace。VM 和 Experiment 不使用此模式。现有安全上下文保持生效，网络声明须为 `deny_all`。它不提供 privileged、额外 capabilities、root 默认值、持久盘独立回收、7天保留或导入导出；这些属于 #207 的后续范围。Namespace 不是宿主隔离或特权运行边界。
+本增量支持一个部署指定项目的普通 Container Work。它仍通过 Resource 授权、lease 和 Environment 生命周期创建；客户端不能选择 namespace。VM 和 Experiment 不使用此模式。普通容器的 UID、capabilities 和 rootfs 声明沿下文同一运行授权执行，网络声明须为 `deny_all`。既有 namespace 的 PSA、配额和网络策略由部署管理员提供，Environment 不覆盖或绕过它们；配置不被该空间准入时明确失败。本模式不提供 privileged、持久盘独立回收、7天保留或导入导出。Namespace 不是宿主隔离或特权运行边界。
 
 默认不设置 `LABWEAVER_CONTAINER_PLACEMENT_CONFIG_FILE`，继续使用 `lw-env-{environmentId}` 专用 namespace。启用时按以下步骤准备部署输入：
 
@@ -110,9 +110,75 @@ Access 的 `0008_funded_experiment_console_fence.sql` 将控制台能力的租�
 本地保护创建到回收、重复/乱序、取消、超时、旧 Worker 更新、跨项目访问、撤销后拒绝访问和释放失败。真实容器、KubeVirt、设备和网络行为需对应执行后端验证；本轮本地测试结果不表示完成远端部署。
 
 
+## 普通容器运行权限
+
+`EnvironmentSpec.security` 分别声明容器执行身份、能力与安全开关。同一不可变 release 的规范化规格摘要
+绑定全部字段，消费者从这份声明与匹配的 verified receipt 投影，不提供另一套兼容权限路径：
+
+| 字段 | 默认与当前执行边界 |
+| --- | --- |
+| `runAsUser` | `null` 消费同一已验证平台版本的 `defaultContainerUid`；平台默认值为 `0`。显式 `0` 表示容器 root，`1..4294967294` 原样使用；保留 UID `4294967295` 被拒绝。 |
+| `privileged` | 默认 `false`；当前 `true` 明确拒绝。root 不等于 privileged，也不开放 DinD。 |
+| `capabilities` | 默认空集合；始终 `drop: [ALL]`，只把本版本实际声明且获准的能力加入 `add`。平台允许清单是上限，不是自动授予实例的最大权限。 |
+| `allowPrivilegeEscalation` | 仅支持 `false` 或 `null`；缺省及 `null` 归一化为 `false`。`true` 在唯一 Rust spec 语义校验中拒绝，Provider 不能静默改为 false 执行。root、capabilities 和 rootfs 声明均不能绕过此限制。 |
+| `readOnlyRootFilesystem` | 默认 `false`，允许容器系统目录临时可写；显式 `true` 投影为只读 rootfs，不等于整个 Work 磁盘只读保留。 |
+| `seccomp` | 默认且当前仅支持 `runtime_default`；`unconfined` 被拒绝。 |
+
+普通能力只接受 `LinuxCapability::supported_in_container` 当前支持的 Linux UAPI 名称，例如
+`NET_ADMIN`、`NET_RAW`、`CHOWN`。`ALL`、未知名称及 `SYS_ADMIN`、`SYS_MODULE`、`BPF`、
+`PERFMON` 等更广的内核权限不开放。声明仍须满足平台 `allowedCapabilities`、当前对象范围及适用的
+原教师批准/项目或课程预授权；更改运行权限要形成新的配置版本并重新核对，不能扩大旧批准。
+
+运行授权 receipt 带上同一 verified applied 版本的 `defaultContainerUid`。消费者从不可变 spec 与该
+receipt 唯一计算实际 UID、安全上下文及规格身份；不能从另一份 desired 或最新配置拼入默认 UID。
+创建、启动、重启、重置及会产生计算的恢复都沿原 Resource 申请、审批、lease 和资金覆盖重核。
+平台换版后旧 receipt 不会自动升级成新权限。`securityProfileBinding` 和禁止公开暴露的约束保持生效。
+
+Environment 自己创建的运行 Namespace 使用 PSA `enforce=baseline`（能力集合为空）或
+`enforce=privileged`（能力集合非空），`audit/warn=restricted`。后者仅使该运行空间能够准入
+获准的能力，例如 baseline 不接受的 `NET_ADMIN`；Pod 仍为 `privileged=false`，仍 drop ALL 后只 add
+获准集合。这个 PSA 标签不是特权执行授权，不改变平台、Evaluation 或 builder 所在空间，也不给用户
+或运行 Pod Kubernetes API 权限。运行 ServiceAccount 不自动挂载 token，不增补 RBAC；宿主 namespace、
+hostPath、平台凭据和额外设备不会因 root/capabilities 自动开放。既有 namespace 模式不改管理员的 PSA。
+
+普通容器的所有带对象 Apply 和会创建或变更计算的动作，持久 executor 都从可信不可变 spec/release、
+同一 verified receipt 和部署配置调用现有唯一投影，重建该动作的完整可信计划。接收列表必须与它的
+**对象数量、顺序和内容全部相同**；按身份逐对象比较不能接受有序子集，也不保留携带计算对象的稀疏例外。
+即使 Pod/Deployment 本身的 securityContext 完全相同，遗漏 NetworkPolicy、ResourceQuota、LimitRange
+或其他应有对象也必须拒绝，不能把隔离策略和资源上限视为可选附带对象。
+
+executor 使用与可信投影相同的 canonical 摘要函数、相同输入结构重算接收对象列表的 SHA，再与可信计划
+SHA 比较。复制可信 planSha256 却删改列表会失败；为被裁剪、重排或修改的列表自算一个新 SHA 也不能
+取得执行权。调用方声明的摘要不是完整性事实，更不能代替数量、顺序和逐对象内容一致性检查。
+
+完整安全面包括 Pod/Deployment 的命令和参数、环境、工作目录、安全上下文、init/sidecar、ServiceAccount
+与 token 挂载、卷及挂载、宿主 namespace/网络设置、Namespace PSA，以及隔离策略、配额和 LimitRange。
+未声明字段、额外对象、缺少对象、对象重排或任何漂移都会在 Kubernetes 副作用前拒绝。合法计算路径使用
+完整计划；测试中的稀疏消息只用于无授权攻击负向场景，不能作为生产计算路径的兼容入口。
+只读观察、纯停止/回收仍沿其各自协议与 fence，不因此取得新运行权限；这些路径不构成上述 Apply 与计算动作的稀疏计划豁免。
+
+`allowPrivilegeEscalation=true` 的拒绝由 Rust spec 语义校验这一真源完成；显式 `false` 和输入 `null`
+得到同一规范化 false 投影。Provider/Executor 不能把不支持的 true 静默钳制为 false，也不能通过相同
+securityContext 放行带有 hostPath、额外 init container、宿主 namespace 或更宽 PSA 的其他对象字段。
+
+Provider 与 container executor 共用 `ContainerProviderConfiguration.project_plan`，不另建一份权限表或简化
+投影。Helm 仅为 container-executor 添加 `container-projection` 只读卷，来源是 environment-service 已有
+ConfigMap 的 `providers.json`；目录挂载为 `/etc/labweaver/container-projection`，只投影该 key。
+模板独占 `LABWEAVER_ENVIRONMENT_PROVIDER_BINDINGS_PATH=/etc/labweaver/container-projection/providers.json`，
+拒绝 workload env/secretEnv 覆盖（即使 env 重复填写相同路径也不接受）。该文件提供同一部署输入，
+不是第二份 profile、策略或授权，不能替代原 spec、receipt、资金覆盖与 Kubernetes 对象归属检查。
+
+普通容器 rootfs 的安装和系统修改仍是临时层，`/workspace` 持久盘与其分开；需要保存软件环境时走
+现有模板/镜像构建流程，不把停止后保盘理解为保留系统层。权限声明也不会增加 builder 的 capabilities、
+提权或 entitlements。
+
+VM 此切片保持原 guest 用户、SSH 和持久系统盘行为：不能用 `runAsUser` 指定 guest UID，不能添加容器
+capabilities、启用容器提权或声明容器只读 rootfs；不支持的组合直接拒绝，不伪装成 guest 能力已经执行。
+当前没有 privileged、DinD、宿主隔离/fencing 或回收站验收结果，不能从投影字段或 PSA 标签推定这些能力。
+
 ## Original funded lease and ResourceApproval consumption
 
-Existing runtime declarations and security contexts remain unchanged. This slice consumes the original baseline approval; it does not add root/capability/privileged declaration or execution support.
+The original approval now binds the complete ordinary-container security declaration described above. The same verified receipt supplies the default container UID; no second grant or independent permission state is created. VM guest execution and privileged/DinD support are not expanded by this slice.
 
 Environment calls Resource's authenticated `POST /internal/v1/environment-runtime-authorization`
 under the existing `resource.environment.resolve` permission and Environment client

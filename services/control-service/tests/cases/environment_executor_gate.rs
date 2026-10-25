@@ -4,13 +4,12 @@ use async_trait::async_trait;
 use contracts::{UtcTimestamp, authoring::RuntimeKind, environment::EnvironmentInstance};
 use environment_service::{
     ContainerApplyObservation, ContainerBackendFence, ContainerExecutorBackend,
-    ContainerExecutorRequest, ContainerExecutorResponse, ContainerResource,
-    FencedContainerExecutor, FencedKubeVirtExecutor, KUBEVIRT_BACKEND_PROTOCOL_VERSION,
-    KubeVirtBackendFence, KubeVirtBaseDiskIdentity, KubeVirtExecutionInstance,
-    KubeVirtExecutionPermit, KubeVirtExecutorBackend, KubeVirtExecutorRequest,
-    KubeVirtExecutorRequestEnvelope, KubeVirtExecutorResponse, KubeVirtResourcePlan,
-    KubeVirtRunningObservation, PgContainerExecutorFenceStore, PgKubeVirtExecutorFenceStore,
-    ProviderFailure, ProviderFailureCode, ReconcileAction,
+    ContainerExecutorRequest, ContainerExecutorResponse, FencedContainerExecutor,
+    FencedKubeVirtExecutor, KUBEVIRT_BACKEND_PROTOCOL_VERSION, KubeVirtBackendFence,
+    KubeVirtBaseDiskIdentity, KubeVirtExecutionInstance, KubeVirtExecutionPermit,
+    KubeVirtExecutorBackend, KubeVirtExecutorRequest, KubeVirtExecutorRequestEnvelope,
+    KubeVirtExecutorResponse, KubeVirtResourcePlan, KubeVirtRunningObservation,
+    PgKubeVirtExecutorFenceStore, ProviderFailure, ProviderFailureCode, ReconcileAction,
 };
 use persistence_sqlx::Sha256Digest;
 use sqlx::PgPool;
@@ -55,7 +54,16 @@ pub(super) async fn exercise(
             .bind(serde_json::to_value(&denied)?)
             .execute(pool).await?;
         for &action in actions(instance.runtime_kind) {
-            let result = execute(pool, admission, instance, action, deadline, calls.clone()).await;
+            let result = execute(
+                pool,
+                admission,
+                instance,
+                action,
+                deadline,
+                calls.clone(),
+                true,
+            )
+            .await;
             if !matches!(&result, Err(error) if error.to_string().contains("LW_RUNTIME_LEASE_NOT_ACTIVE"))
             {
                 unexpected.push(format!(
@@ -78,7 +86,16 @@ pub(super) async fn exercise(
         "denied leases must cause zero Kubernetes effects"
     );
     for (index, &action) in actions(instance.runtime_kind).iter().enumerate() {
-        execute(pool, admission, instance, action, deadline, calls.clone()).await?;
+        execute(
+            pool,
+            admission,
+            instance,
+            action,
+            deadline,
+            calls.clone(),
+            false,
+        )
+        .await?;
         assert_eq!(
             calls.load(Ordering::SeqCst),
             index + 1,
@@ -107,24 +124,25 @@ async fn execute(
     action: ReconcileAction,
     deadline: UtcTimestamp,
     calls: Arc<AtomicUsize>,
+    sparse_attack: bool,
 ) -> Result {
     let backend = Cluster(
         calls,
         PgEnvironmentStore::new(pool.clone()).current_time().await?,
     );
     if instance.runtime_kind == RuntimeKind::Container {
-        let mut envelope = super::physical_envelope(instance, 1, false, deadline)?;
+        // These grant probes precede the outer step-1 replay/tombstone probe. Full plans must
+        // not rely on different database clock ticks to distinguish the two effect identities.
+        let mut envelope = super::physical_envelope(pool, instance, 0, false, deadline).await?;
         let ContainerExecutorRequest::Apply { mut plan } = envelope.request else {
             return Err("apply fixture".into());
         };
-        plan.resources.clear();
-        // Apply with no Deployment/PVC must not bypass admission either: any nonempty apply is a write.
-        if matches!(action, ReconcileAction::Provision | ReconcileAction::Reset) {
-            plan.resources.push(ContainerResource {
-                kind: "Service".into(),
-                namespace: Some(plan.namespace.clone()),
-                name: "runtime".into(),
-                document: serde_json::json!({"kind":"Service"}),
+        if sparse_attack {
+            // Malformed sparse requests must not bypass the fresh grant gate. Legitimate writes
+            // below always carry the complete trusted plan; there is no sparse-write exception.
+            plan.resources.retain(|resource| {
+                matches!(action, ReconcileAction::Provision | ReconcileAction::Reset)
+                    && resource.kind == "Service"
             });
         }
         envelope.request = match action {
@@ -141,14 +159,16 @@ async fn execute(
         envelope.fence.action = action;
         envelope.fence.request_id = Sha256Digest::of_canonical(&serde_json::json!({
             "protocolVersion": envelope.fence.protocol_version, "environmentId": instance.id,
-            "operationId": instance.operation.id, "providerStep": 1, "operationGeneration": instance.generation,
+            "operationId": instance.operation.id, "providerStep": envelope.fence.provider_step, "operationGeneration": instance.generation,
             "attempt": 1, "action": action, "deadlineAt": deadline, "request": envelope.request,
         }))?;
-        let response =
-            FencedContainerExecutor::new(PgContainerExecutorFenceStore::new(pool.clone()), backend)
-                .with_runtime_admission(admission.clone())
-                .execute(envelope)
-                .await?;
+        let response = FencedContainerExecutor::new(
+            super::container_fence_store(pool.clone(), instance).await?,
+            backend,
+        )
+        .with_runtime_admission(admission.clone())
+        .execute(envelope)
+        .await?;
         assert!(matches!(
             response.response,
             ContainerExecutorResponse::Observed { .. }
@@ -285,4 +305,73 @@ impl KubeVirtExecutorBackend for Cluster {
             },
         }
     }
+}
+
+pub(super) async fn assert_security_rejections(
+    pool: &PgPool,
+    admission: &EnvironmentRuntimeAdmission,
+    instance: &EnvironmentInstance,
+    original: &environment_service::ContainerResourcePlan,
+) -> Result {
+    use environment_service::{ContainerExecutorFenceError, ContainerExecutorRequestEnvelope};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let executor = FencedContainerExecutor::new(
+        super::container_fence_store(pool.clone(), instance).await?,
+        Cluster(
+            calls.clone(),
+            PgEnvironmentStore::new(pool.clone()).current_time().await?,
+        ),
+    )
+    .with_runtime_admission(admission.clone());
+    admission.for_instance(instance).await?;
+    for (field, value) in [
+        ("runAsUser", serde_json::json!(12345)),
+        (
+            "capabilities",
+            serde_json::json!({"drop":["ALL"],"add":["SYS_ADMIN"]}),
+        ),
+        ("readOnlyRootFilesystem", serde_json::json!(true)),
+        ("privileged", serde_json::json!(true)),
+    ] {
+        let mut plan = original.clone();
+        let deployment = plan
+            .resources
+            .iter_mut()
+            .find(|r| r.kind == "Deployment")
+            .ok_or("deployment")?;
+        deployment.document["spec"]["template"]["spec"]["containers"][0]["securityContext"]
+            [field] = value;
+        let request = ContainerExecutorRequest::Apply { plan };
+        let deadline = instance.operation.deadline_at.min(
+            instance
+                .runtime_authorization
+                .as_ref()
+                .ok_or("receipt")?
+                .valid_until,
+        );
+        let mut fence = super::physical_envelope(pool, instance, 1, false, deadline)
+            .await?
+            .fence;
+        fence.request_id = Sha256Digest::of_canonical(&serde_json::json!({
+            "protocolVersion": fence.protocol_version, "environmentId": fence.environment_id,
+            "operationId": fence.operation_id, "providerStep": fence.provider_step,
+            "operationGeneration": fence.operation_generation, "attempt": fence.attempt,
+            "action": fence.action, "deadlineAt": fence.deadline_at, "request": request,
+        }))?;
+        assert!(
+            matches!(
+                executor
+                    .execute(ContainerExecutorRequestEnvelope { fence, request })
+                    .await,
+                Err(ContainerExecutorFenceError::IdentityMismatch)
+            ),
+            "{field}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "inconsistent {field} must never reach Kubernetes"
+        );
+    }
+    Ok(())
 }

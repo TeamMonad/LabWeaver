@@ -455,6 +455,12 @@
         "authorization": {
           "$ref": "#/$defs/RuntimeAuthorizationBinding"
         },
+        "defaultContainerUid": {
+          "description": "Default from the exact verified platform version identified by authorization.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
         "leaseAuthorization": {
           "$ref": "#/$defs/EnvironmentLeaseAuthorization"
         },
@@ -470,6 +476,7 @@
       },
       "required": [
         "providerBinding",
+        "defaultContainerUid",
         "validUntil",
         "leaseAuthorization",
         "authorization",

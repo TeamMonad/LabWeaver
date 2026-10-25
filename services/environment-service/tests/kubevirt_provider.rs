@@ -1375,9 +1375,9 @@ fn projection() -> ReleasePublished {
         "network":{"mode":"deny_all"},
         "entries":[{"name":"ssh","protocol":"ssh","servicePort":22}],
         "security":{
-            "userPolicy":"non_root_required",
-            "rootFilesystemPolicy":"mutable_required",
-            "privilegeEscalationPolicy":"deny",
+            "runAsUser":null,
+            "readOnlyRootFilesystem":false,
+            "allowPrivilegeEscalation":false,
             "publicExposurePolicy":"deny",
             "securityProfileBinding":"kubevirt-restricted-v1"
         },

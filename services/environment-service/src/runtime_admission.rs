@@ -379,6 +379,86 @@ pub(crate) fn release_project_matches(
             )
             .is_ok()
 }
+
+/// The only ordinary-container security projection, consumed by provider and durable executor.
+pub(crate) fn container_security_context(
+    instance: &EnvironmentInstance,
+    projection: &contracts::events::ReleasePublished,
+) -> Result<serde_json::Value, crate::ReleaseProjectionError> {
+    let receipt = instance
+        .runtime_authorization
+        .as_ref()
+        .ok_or(crate::ReleaseProjectionError::IdentityMismatch)?;
+    let digest =
+        if projection.environment_spec.class == contracts::authoring::EnvironmentClass::Work {
+            Sha256Digest::of_canonical(&projection.environment_spec.permission_projection())
+        } else {
+            Sha256Digest::of_canonical(&projection.environment_spec)
+        }
+        .map_err(|_| crate::ReleaseProjectionError::ContractInvalid)?;
+    receipt
+        .validate_for(
+            &ResolveEnvironmentRuntimeAuthorizationRequest {
+                expected_lease_id: instance.lease_id,
+                resource_request_id: receipt.authorization.request_id,
+                environment_id: Some(instance.id),
+                project_id: instance.project_id,
+                course_id: instance.course_id,
+                owner_actor_id: instance.owner_id,
+                release_id: instance.release_id,
+                release_version: instance.release_version,
+            },
+            &projection.environment_spec,
+            &digest.to_string(),
+        )
+        .map_err(|_| crate::ReleaseProjectionError::IdentityMismatch)?;
+    if instance.runtime_kind != contracts::authoring::RuntimeKind::Container
+        || receipt.provider_binding != instance.provider_binding
+        || receipt.authorization.configuration.authoring_project_id != projection.release.project_id
+    {
+        return Err(crate::ReleaseProjectionError::IdentityMismatch);
+    }
+    let security = &projection.environment_spec.security;
+    let uid = security
+        .run_as_user
+        .unwrap_or(receipt.default_container_uid);
+    Ok(serde_json::json!({
+        "runAsNonRoot":uid!=0,"runAsUser":uid,"privileged":false,
+        "allowPrivilegeEscalation":security.allow_privilege_escalation,
+        "readOnlyRootFilesystem":security.read_only_root_filesystem,
+        "capabilities":{"drop":["ALL"],"add":security.capabilities},
+        "seccompProfile":{"type":"RuntimeDefault"}
+    }))
+}
+
+pub(crate) fn validate_container_runtime_plan(
+    instance: &EnvironmentInstance,
+    expected: &crate::ContainerResourcePlan,
+    plan: &crate::ContainerResourcePlan,
+    generation: u64,
+) -> Result<(), crate::ReleaseProjectionError> {
+    if instance.id != plan.environment_id
+        || instance.project_id != plan.project_id
+        || instance.generation != generation
+    {
+        return Err(crate::ReleaseProjectionError::IdentityMismatch);
+    }
+    if plan.environment_id != expected.environment_id
+        || plan.project_id != expected.project_id
+        || plan.namespace != expected.namespace
+        || plan.namespace_uid != expected.namespace_uid
+        || plan.image != expected.image
+        || plan.plan_sha256 != expected.plan_sha256
+    {
+        return Err(crate::ReleaseProjectionError::IdentityMismatch);
+    }
+    // The security objects are part of the approved computation, not optional dependencies.
+    // Vec equality covers count, order and the complete contents of every resource.
+    if plan.resources != expected.resources {
+        return Err(crate::ReleaseProjectionError::SecurityPostureInvalid);
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;

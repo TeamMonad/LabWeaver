@@ -140,8 +140,9 @@ export function manualTemplateSpec(draft: ManualWorkTemplateDraft, image: Templa
     storageBytes: draft.storageGiB * GIB,
   }
   const security = {
-    userPolicy: 'non_root_required' as const,
-    privilegeEscalationPolicy: 'deny' as const,
+    runAsUser: null,
+    allowPrivilegeEscalation: false as const,
+    readOnlyRootFilesystem: false,
     publicExposurePolicy: 'deny' as const,
     securityProfileBinding: draft.securityProfileBinding.trim(),
   }
@@ -158,7 +159,7 @@ export function manualTemplateSpec(draft: ManualWorkTemplateDraft, image: Templa
       ...base,
       network: { mode: 'deny_all' },
       entries: [{ name: 'ssh', protocol: 'ssh', servicePort: 22 }],
-      security: { ...security, rootFilesystemPolicy: 'mutable_required' },
+      security,
       runtime: {
         kind: 'virtual_machine',
         provider_binding: draft.providerBinding.trim(),
@@ -172,7 +173,7 @@ export function manualTemplateSpec(draft: ManualWorkTemplateDraft, image: Templa
     ...base,
     network: { mode: draft.network },
     entries: [{ name: 'app', protocol: draft.entryProtocol, servicePort: draft.servicePort }],
-    security: { ...security, rootFilesystemPolicy: 'read_only_required' },
+    security,
     runtime: {
       kind: 'container',
       provider_binding: draft.providerBinding.trim(),

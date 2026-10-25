@@ -177,6 +177,10 @@ class BundleProfileTests(unittest.TestCase):
         f = self.fixture
         settings = copy.deepcopy(f.configuration)
         settings["lifecycle"]["preemptionGraceSeconds"] = 90
+        settings["runtimePolicy"].update(
+            defaultContainerUid=1000,
+            allowedCapabilities=["NET_ADMIN"],
+        )
         source = f.private / "custom/settings.yaml"
         write(source, yaml.safe_dump(settings).encode())
         output = f.private / "custom/request.json"
@@ -190,6 +194,14 @@ class BundleProfileTests(unittest.TestCase):
         rejected = f.private / "custom/rejected.json"
         with self.assertRaisesRegex(
             bundle.BundleError, "LW_BUNDLE_CONFIGURATION_INVALID"
+        ):
+            bundle.initialize_settings(source, rejected)
+        self.assertFalse(rejected.exists())
+        settings["runtimePolicy"]["allowedCapabilities"] = ["SYS_ADMIN"]
+        write(source, yaml.safe_dump(settings).encode())
+        with self.assertRaisesRegex(
+            bundle.BundleError,
+            "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED:runtimePolicy.allowedCapabilities",
         ):
             bundle.initialize_settings(source, rejected)
         self.assertFalse(rejected.exists())

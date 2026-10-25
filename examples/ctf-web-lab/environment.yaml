@@ -14,9 +14,9 @@ entries:
     protocol: http
     servicePort: 8080
 security:
-  userPolicy: non_root_required
-  rootFilesystemPolicy: read_only_required
-  privilegeEscalationPolicy: deny
+  runAsUser: null
+  readOnlyRootFilesystem: false
+  allowPrivilegeEscalation: false
   publicExposurePolicy: deny
   securityProfileBinding: ctf-web-lab-container-v1
 runtime:

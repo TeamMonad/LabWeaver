@@ -40,6 +40,26 @@ pub(super) enum ExecutorFailure {
     Lease,
     Funding,
     ResourceUnavailable,
+    Security(ContainerSecurityTampering),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ContainerSecurityTampering {
+    HostNetwork,
+    HostPid,
+    HostIpc,
+    HostPath,
+    ExtraContainer,
+    ServiceAccount,
+    ServiceAccountToken,
+    PrivilegeEscalation,
+    NamespacePsa,
+    MissingNetworkPolicy,
+    RehashedMissingNetworkPolicy,
+    MissingResourceQuota,
+    MissingLimitRange,
+    EphemeralContainers,
+    InitPrivilegeEscalation,
 }
 
 async fn progress(
@@ -276,12 +296,25 @@ pub(super) async fn assert_bindings_after_publication(
             RuntimeAuthorizationError::PolicyNotVerified
         ))
     ));
+    let mut platform = PlatformConfigurationDesired::default();
+    if !candidate.spec.security.capabilities.is_empty() {
+        platform.runtime_policy.allowed_capabilities = candidate.spec.security.capabilities.clone();
+        platform.runtime_policy.preauthorizations.push(
+            contracts::platform_configuration::RuntimePreauthorization {
+                scope: contracts::platform_configuration::RuntimePreauthorizationScope::Project {
+                    project_id: payer_project_id,
+                },
+                capabilities: candidate.spec.security.capabilities.clone(),
+                privileged: false,
+            },
+        );
+    }
     let first = configuration::update(
         pool,
         ActorId::new(),
         &UpdatePlatformConfigurationRequest {
             expected_revision: 0,
-            configuration: PlatformConfigurationDesired::default(),
+            configuration: platform,
         },
         &IdempotencyKey::parse("runtime-initial-draft")?,
         now,
@@ -294,7 +327,7 @@ pub(super) async fn assert_bindings_after_publication(
         ))
     ));
     let mut unsupported = PlatformConfigurationDesired::default();
-    unsupported.runtime_policy.allowed_capabilities = BTreeSet::from([LinuxCapability::NetAdmin]);
+    unsupported.runtime_policy.allowed_capabilities = BTreeSet::from([LinuxCapability::SysAdmin]);
     let Err(error) = configuration::update(
         pool,
         ActorId::new(),
@@ -319,8 +352,18 @@ pub(super) async fn assert_bindings_after_publication(
     ));
     verified(pool, first, now, "runtime-baseline").await?;
     let binding = resolve_binding(pool, &request).await?;
-    assert_eq!(binding.basis, RuntimeAdmissionBasis::RestrictedBaseline);
-    assert!(binding.permissions.capabilities.is_empty());
+    assert_eq!(
+        binding.basis,
+        if candidate.spec.security.capabilities.is_empty() {
+            RuntimeAdmissionBasis::RestrictedBaseline
+        } else {
+            RuntimeAdmissionBasis::ProjectPreauthorization
+        }
+    );
+    assert_eq!(
+        binding.permissions.capabilities,
+        candidate.spec.security.capabilities
+    );
     assert!(!binding.permissions.privileged);
     let store = PgResourceStore::new(pool.clone())
         .with_environment_credit_owner("synthetic-environment".into());
@@ -546,6 +589,9 @@ pub(super) async fn assert_manual_work_binding(
         updated_at: now,
         diagnostic_code: None,
     };
+    if !spec.security.capabilities.is_empty() {
+        assert_capability_admission(pool, &request, owner, now).await?;
+    }
     let binding = resolve_binding(pool, &request).await?;
     assert_eq!(binding.configuration.release_id, release.id);
     assert_eq!(binding.configuration.release_version, release.version);
@@ -554,7 +600,14 @@ pub(super) async fn assert_manual_work_binding(
         binding.configuration.configuration_sha256,
         Sha256Digest::of_canonical(spec)?.to_string()
     );
-    assert_eq!(binding.basis, RuntimeAdmissionBasis::RestrictedBaseline);
+    assert_eq!(
+        binding.basis,
+        if spec.security.capabilities.is_empty() {
+            RuntimeAdmissionBasis::RestrictedBaseline
+        } else {
+            RuntimeAdmissionBasis::ProjectPreauthorization
+        }
+    );
     let mut foreign = request.clone();
     foreign.project_id = contracts::ProjectId::new();
     assert!(matches!(
@@ -567,5 +620,77 @@ pub(super) async fn assert_manual_work_binding(
         resolve_binding(pool, &no_membership).await,
         Err(RuntimeBindingError::ScopeDenied)
     ));
+    Ok(())
+}
+
+async fn assert_capability_admission(
+    pool: &PgPool,
+    request: &ResourceRequest,
+    owner: ActorId,
+    now: UtcTimestamp,
+) -> TestResult {
+    use contracts::platform_configuration::{
+        RuntimePreauthorization, RuntimePreauthorizationScope,
+    };
+    assert!(matches!(
+        resolve_binding(pool, request).await,
+        Err(RuntimeBindingError::Authorization(
+            RuntimeAuthorizationError::OutsidePlatformRange
+        ))
+    ));
+    let mut configuration = PlatformConfigurationDesired::default();
+    configuration.runtime_policy.default_container_uid = 1000;
+    configuration
+        .runtime_policy
+        .allowed_capabilities
+        .insert(LinuxCapability::NetAdmin);
+    for granted in [false, true] {
+        if granted {
+            configuration
+                .runtime_policy
+                .preauthorizations
+                .push(RuntimePreauthorization {
+                    scope: RuntimePreauthorizationScope::Project {
+                        project_id: request.project_id,
+                    },
+                    capabilities: BTreeSet::from([LinuxCapability::NetAdmin]),
+                    privileged: false,
+                });
+        }
+        let state = configuration::get(pool).await?;
+        let next = configuration::update(
+            pool,
+            owner,
+            &UpdatePlatformConfigurationRequest {
+                expected_revision: state.revision,
+                configuration: configuration.clone(),
+            },
+            &IdempotencyKey::parse(&format!("capability-policy-{granted}"))?,
+            now,
+        )
+        .await?;
+        verified(pool, next, now, &format!("capability-policy-{granted}")).await?;
+        if !granted {
+            assert!(matches!(
+                resolve_binding(pool, request).await,
+                Err(RuntimeBindingError::Authorization(
+                    RuntimeAuthorizationError::ApprovalRequired
+                ))
+            ));
+        }
+    }
+    let binding = resolve_binding(pool, request).await?;
+    assert_eq!(
+        binding.permissions.capabilities,
+        BTreeSet::from([LinuxCapability::NetAdmin])
+    );
+    assert!(!binding.permissions.privileged);
+    let side_effects: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM resource.resource_approvals),(SELECT count(*) FROM resource.capacity_claims),(SELECT count(*) FROM resource.credit_holds)")
+        .fetch_one(pool).await?;
+    assert_eq!(
+        side_effects,
+        (0, 0, 0),
+        "read-only binding resolution cannot allocate, approve or reserve funds"
+    );
     Ok(())
 }

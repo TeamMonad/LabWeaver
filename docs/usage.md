@@ -123,6 +123,41 @@ Work 和 Experiment 首次创建都需完成 Resource 申请、审批及原租�
 
 VM Work 不支持原地模板升级：服务端返回 `LW_WORK_TEMPLATE_UPGRADE_UNSUPPORTED_FOR_VM` 和中文原因“需要导出/导入流程，当前不可用”。拒绝时不重建实例、不修改原模板或磁盘。
 
+## 普通容器的运行用户与能力
+
+本节说明已发布配置和后端执行边界，不表示页面已经提供所有字段的编辑开关。先核对所选模板版本的
+运行声明和管理员策略，再申请资源；权限增加需要新的配置版本及相应授权，不能通过重启扩大旧批准。
+
+- `runAsUser` 未指定或为 `null` 时，使用同一已验证平台配置的默认容器 UID；平台默认是 `0`（root），
+  管理员也可配置非零 UID。显式 UID 按声明执行，保留值 `4294967295` 不可用。root 不等于特权容器。
+- 普通容器仍为 `privileged=false`，默认不添加 capabilities，先丢弃全部能力，再只加入本次声明且获准的
+  集合。`NET_ADMIN` 等能力必须在平台可执行清单和允许范围内，并通过相应对象/课程或项目授权；
+  `ALL`、未知能力及 `SYS_ADMIN`、`BPF` 等广泛内核能力不能用来绕过拒绝。
+- `allowPrivilegeEscalation` 只接受 `false` 或 `null`（缺省或 `null` 统一按 `false`）；普通切片在 Rust
+  配置语义校验中明确拒绝 `true`，不会由 Provider 静默改成 `false` 后执行。使用 root 也不例外。
+  `readOnlyRootFilesystem` 默认关闭，因此普通容器系统目录可以临时写入；它与 UID 分开表达。
+  seccomp 保持 `runtime_default`，不支持关闭。
+- 容器系统层的安装和改动不等于持久化工作文件。`/workspace` 仍是独立工作盘；需要保留软件环境时，
+  使用已有的模板/镜像构建流程。停止保盘不代表保存临时系统层，也不提供七天回收站或导入导出。
+
+部署方只会为 Environment 自己创建的运行空间选择合适的 Pod Security 准入：无额外能力使用 baseline，
+有能力声明的空间可能标为 privileged，以允许 baseline 不接纳的能力。这个标签不表示 Pod 被授予
+`privileged=true`，也不给工作负载 Kubernetes API 权限；平台服务、Evaluation 和 builder 不随之提权。
+使用管理员预置运行空间时，平台不会修改其安全策略；不符合该空间准入的配置会失败，请联系管理员核对，
+不要自行放宽整个集群或添加宿主挂载。实际能力还受镜像、安全模块和运行集群约束，字段存在不是实机验收。
+
+普通容器的带对象 Apply 和会创建或变更计算的动作，必须携带从可信模板规格、同版本授权回执和部署配置
+重建的完整计划：对象数量、顺序、内容都要一致。不能只保留 Pod/Deployment 而省略 NetworkPolicy、
+ResourceQuota 或 LimitRange，也没有携带计算对象的“稀疏计划”或“有序子集”例外。执行器用同一 canonical
+摘要规则重算收到的对象列表，再核对可信计划摘要；请求自报的 securityContext 或摘要不能单独授权执行。
+对象缺失、多出、重排或内容漂移均在 Kubernetes 写入前拒绝。若旧配置声明了 `allowPrivilegeEscalation=true`，
+应修正为支持的配置并重新走原版本/权限流程；平台不改写旧声明来降权运行。
+
+创建、启动、重启、重置及会产生计算的恢复都会重新核对原运行权限和资金覆盖。管理员保存 desired 后，必须按正常流程
+验证 applied 版本才会用于新运行授权；旧批准不会悄悄取得新默认 UID 或更大的能力范围。权限失败时先查看
+原申请、模板版本与诊断，不要重复创建或尝试添加更强权限。VM 仍使用原 guest 用户、SSH 和持久系统盘行为，
+不把这些容器字段当作 guest UID/能力开关。本切片不提供真正的 privileged 或 DinD。
+
 ## SSH 与环境生命周期
 
 在“SSH 公钥”登记自己的公钥，私钥留在客户端。环境就绪并获得访问授权后，从环境页面复制完整 SSH 命令并实际连接。连接中断后先检查环境与授权状态，再使用页面命令重连；授权过期时从界面重新签发，撤销后不能继续使用原授权。
@@ -196,12 +231,14 @@ tar -czf vm-template.tar.gz disk/disk.qcow2
 
 1. 在任务导航中打开“平台配置”。查看“当前事实”：desired 是已保存的期望配置，applied 是最后一次完整验证通过的版本。状态为“待核对”时，先核对外部实际状态。
 2. 在“表单”中修改生命周期设置。留存与提醒必须在 1 秒到 365 天之间，提醒最多 16 个且不能重复，抢占宽限为 1–300 秒。这些值目前只作为配置保存，清理、提醒和抢占尚未按它们执行。
-3. 需要特权运行时，在“特权运行”中选择“允许，仅在专用节点池运行”，填写 nodeSelector 和 taint。nodeSelector 至少 1 项、最多 16 项；key 的 prefix 最长 253 字符、name 最长 63 字符，value 最长 63 字符且必须非空；taintKey 遵循同样的 key 规则，taintValue 最长 63 字符且必须非空。这些限制比原生 Kubernetes 对应字段更严格。VM guest 位置尚无执行侧实现，因此不能选择。
+3. 如需记录特权执行位置声明，可在“特权运行”中选择“允许，仅在专用节点池运行”，填写 nodeSelector 和 taint。nodeSelector 至少 1 项、最多 16 项；key 的 prefix 最长 253 字符、name 最长 63 字符，value 最长 63 字符且必须非空；taintKey 遵循同样的 key 规则，taintValue 最长 63 字符且必须非空。这些限制比原生 Kubernetes 对应字段更严格。该声明不启用当前容器的 privileged/DinD，执行侧仍拒绝 privileged=true；VM guest 特权位置尚无执行实现，因此不能选择。
 4. 点击“保存为新 desired 版本”。也可以在“高级 YAML”中编辑同一请求。
 5. 在受限本地目录导出并加密对应 Bundle，然后在“登记加密 Bundle”中选择实际的 `.age` 文件并点击“登记所选 Bundle”。核对页面显示的密文 SHA-256 与本地导出结果一致。登记不是批准，也不是部署。
 6. 点击“提交应用请求…”并在确认框中确认。页面只记录请求；获准执行者执行部署并报告阶段。完整验证成功后 applied 才会更新。
 
-普通容器 capabilities 允许清单、项目/课程预授权、非 0 默认容器 UID，以及 builder 的 capabilities、提权和 entitlements 尚无执行侧实现。Control 会在保存或 Bundle 登记校验阶段拒绝这些设置，并返回具体字段诊断；若已保存的旧 desired 含有这些设置，登记和应用也会失败。
+普通容器的 capabilities 允许清单、项目/课程普通预授权和默认 UID 已由同一后端契约接入执行消费。表单未提供的字段可通过现有“高级 YAML”编辑同一完整配置：默认 UID 可为 `0..4294967294`，能力只选平台支持且确有需要的集合，scope 预授权不得超过平台允许清单，也不能声明 privileged。保存 desired、登记 Bundle 不等于批准某个实例；实际运行只消费匹配的 verified applied 版本、原配置身份与原资金租约。
+
+builder 的 capabilities、提权和 entitlements 仍无新增执行支持，Control 在保存或 Bundle 登记阶段拒绝这些设置。运行容器的 root 或 NET_ADMIN 不会给平台 builder、executor 服务进程或它们的 ServiceAccount 增权；VM guest 特权位置、广泛内核能力和保留 UID 同样拒绝，不用普通权限切片掩盖未实现边界。
 
 保存时提示“配置已被其他管理员更新”，说明期间有人保存了更新的版本。你的草稿和所选文件都会保留。比较字段差异后，选择“保留我的草稿”继续编辑，或者放弃草稿并载入最新配置，然后再次保存。保存新的 desired 版本会清空已有的 Bundle 登记，需要重新导出并登记。网络中断时，用同一文件按原样重试，不要重新加密生成不同的密文。
 

@@ -68,13 +68,21 @@ JSON 使用 `application/json`。高级 YAML 使用 `application/yaml`。两个�
 
 默认值为 7 天只读保留、30 天详细日志、24h/1h 到期提醒和 60 秒抢占宽限。留存与提醒必须在 1 秒到 365 天之间。提醒最多 16 个且不能重复。抢占宽限必须在 1 到 300 秒之间。
 
-这些值目前作为配置保存。相应数据清理、通知和抢占消费者尚未接入。保存配置不会删除文件、发送提醒、收取费用或停止 Work。缩短留存、修改运行策略或 builder 策略的实际影响，需要后续消费者和部署验证落实。
+生命周期值目前作为配置保存；对应的数据清理、通知和抢占消费者尚未接入。保存配置不会删除文件、发送提醒、收取费用或停止 Work。普通容器运行策略的当前消费者见下文：实际执行依赖同一 verified applied 版本、原对象授权与资金覆盖；builder 的执行能力不随 runtime 策略开放。未实现的生命周期与特权执行边界仍需后续消费者及部署验收，不能从保存成功推定。
 
-普通容器 capabilities 使用 [Linux UAPI 名称](https://github.com/torvalds/linux/blob/master/include/uapi/linux/capability.h)，不接受 `ALL` 或未知名称。项目/课程预授权不能超过平台允许清单，同一 scope 不能重复。特权准入必须声明专用节点池及其 selector/taint，或明确的 VM guest provider binding。仅声明 namespace 不构成执行位置。
+普通容器 capabilities 使用 [Linux UAPI 名称](https://github.com/torvalds/linux/blob/master/include/uapi/linux/capability.h)，且必须属于 `LinuxCapability::supported_in_container` 的当前可执行集合；例如 `NET_ADMIN`、`NET_RAW` 可配置，`ALL`、未知名称和 `SYS_ADMIN`、`SYS_MODULE`、`BPF`、`PERFMON` 等广泛内核能力拒绝。项目/课程预授权不能超过平台允许清单，同一 scope 不能重复，普通预授权不能声明 privileged。`defaultContainerUid` 支持 `0..4294967294`，默认 `0`；`4294967295` 是保留 UID，拒绝保存。运行 spec 的 `runAsUser=null` 消费同一 verified applied receipt 的默认值，显式 UID 不被管理员默认值覆盖。
 
 专用节点池的 nodeSelector 必须有 1–16 项。key 的可选 DNS prefix 总长最多 253 字符，每个点分段必须有 1–63 个小写字母、数字或连字符，段首尾只能为字母或数字；斜线后的 name 最长 63 字符。taintKey 使用相同规则。selector value 与 taintValue 最长 63 字符且必须非空：这是 LabWeaver 比原生 Kubernetes 更严格的 fail-closed 限制。Rust 校验与 Helm 原生 schema 共用长度常量；共享样例覆盖单段及中间段 63/64 字符边界。
 
-配置解析只验证声明和范围，不能证明节点已经专用或 VM guest 可用。#207 消费者必须验证实际对象授权、执行位置、Pod Security 和调度边界。此接口不会放宽 namespace 标签。
+配置解析验证声明、支持范围和 scope，不证明节点已经专用或 VM guest 可用。当前普通 Container 消费者会重新核对原对象授权、同一 verified applied 版本及资金租约后投影实际 UID/capabilities；保存 desired 本身不会放宽 namespace 标签。运行时仅调整 Environment 自己创建的 Namespace 的 PSA，既有 Namespace 策略不覆盖。专用执行位置声明仍不是 privileged/DinD 的执行实现；VM guest 特权位置、不支持的能力与未授权组合继续拒绝。仅有 namespace 也不构成宿主执行隔离边界。
+
+实例的 `allowPrivilegeEscalation=true` 不属于普通运行支持范围，不能因默认 UID 为 root 或 scope 预授权而
+放开。缺省/false/null 只对应规范化 false；唯一 Rust spec 语义校验负责拒绝 true，Provider 不做静默降权。
+执行器还使用同一可信 spec、receipt 和部署配置重建完整可信计划。所有带对象 Apply 与计算动作都要求
+接收对象的数量、顺序和内容与其完全相同，包括 Pod/Deployment、Namespace PSA、NetworkPolicy、配额
+和 LimitRange；缺少任一应有对象都拒绝，不提供携带计算对象的稀疏或有序子集例外。接收对象列表还要
+通过同一 canonical 摘要函数独立重算 SHA 并与可信 SHA 比对，不能只相信调用方的安全上下文或摘要。
+平台配置和权限回执都不授予任意对象补丁或裁剪完整计划的能力。
 
 `runtimePolicy` 与 `builderPolicy` 独立。更改特权运行或 runtime capabilities 不会增加 builder capabilities、提权或 entitlements。`impact` 比较 desired 与最后验证的 applied，分别提示运行、构建和生命周期设置变化。它不提供虚构的受影响资源数量。
 
