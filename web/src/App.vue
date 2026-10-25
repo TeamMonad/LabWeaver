@@ -1,7 +1,6 @@
 <template>
-  <AppShell>
-    <RouterView />
-  </AppShell>
+  <!-- The AppShell renders the router outlet keyed by project and session epoch. -->
+  <AppShell />
 </template>
 
 <script setup lang="ts">

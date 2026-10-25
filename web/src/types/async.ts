@@ -113,6 +113,11 @@ function readableDiagnosticMessage(code: string, message: string): string {
     case 'LW_CREDITS_STORAGE':
     case 'LW_CREDITS_PERSISTENCE':
       return 'Credits 账本暂时无法写入或读取，本次操作没有完成。'
+    // Browser session codes (#198): the request was not carried out for the current actor.
+    case 'LW_AUTH_CSRF_REJECTED':
+      return '登录会话已在其他页面变化或安全校验已失效，这次操作没有执行。'
+    case 'LW_SDK_SESSION_CHANGED':
+      return '登录账号已变化，这次操作属于之前的账号，没有执行或结果已丢弃。'
     default:
       return message
   }
@@ -147,6 +152,9 @@ function codeNextStep(code: string): string | undefined {
       return '请联系平台管理员为项目发放 Credits，或等待已有资源回收释放预占后再试。'
     case 'LW_CREDITS_CONFLICT':
       return '请先刷新账目确认这笔操作是否已经生效，不要换一笔新操作重复提交。'
+    case 'LW_AUTH_CSRF_REJECTED':
+    case 'LW_SDK_SESSION_CHANGED':
+      return '平台会重新确认当前登录账号。请核对页面上的账号和内容，再手动重新提交；平台不会自动重试。'
     default:
       return undefined
   }

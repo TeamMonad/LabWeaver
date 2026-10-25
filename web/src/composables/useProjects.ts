@@ -17,6 +17,7 @@ import type {
   ProjectSchema,
   UpdateProjectRequestSchema,
 } from '@/generated/contracts'
+import { sessionEpoch } from '@/api/session'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey, ifMatch } from '@/utils/format'
 
@@ -91,6 +92,13 @@ async function loadProjects() {
   projects.value = { kind: 'success', data: result.data }
   settledProjects.value = projects.value
 }
+
+// The previous actor's list must not decide the new actor's project context:
+// the AppShell waits for this actor's list before it renders a scoped page.
+watch(sessionEpoch, () => {
+  settledProjects.value = { kind: 'idle' }
+  void loadProjects()
+})
 
 /**
  * Project is the browser's durable context for Work, Agent and Resource calls.
