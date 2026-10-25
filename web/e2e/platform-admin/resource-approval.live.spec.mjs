@@ -12,6 +12,7 @@ import {
   selectProjectByUi,
   uuidv7,
 } from '../support/live.mjs'
+import { openResourceDecisionNotificationByUi } from '../support/notifications.mjs'
 import { addProjectStudentByUi, readActorId } from '../support/real-experiment.mjs'
 import {
   ADMIN_LEASE_STATE,
@@ -354,6 +355,16 @@ test('platform administrator approves a real resource request and reads back its
     await auditAccessibility(page, 'admin-resource-approval', testInfo)
     adminGuards.assertCleanConsole('admin-resource-approval')
 
+    // The requester learns about the decision from the notification center and
+    // lands on the located request row without a second mark-read write.
+    const decisionNotice = await openResourceDecisionNotificationByUi(studentPage, {
+      projectId: project.id,
+      requestId: resourceRequest.requestId,
+    })
+    await assertNoStuckProgress(studentPage, 'researcher-notification-target')
+    await auditAccessibility(studentPage, 'researcher-notification-target', testInfo)
+    studentGuards.assertCleanConsole('researcher-notification-target')
+
     const lease = await readBackLeaseByUi(studentPage, {
       projectName: project.name,
       projectId: project.id,
@@ -390,6 +401,8 @@ test('platform administrator approves a real resource request and reads back its
         gpuCatalog: catalog.kind,
         gpuMode: resourceRequest.gpuMode,
         gpuClass: resourceRequest.gpuClass,
+        notificationId: decisionNotice.notificationId,
+        notificationEmailState: decisionNotice.emailState,
       }),
     })
   } catch (error) {

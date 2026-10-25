@@ -5,6 +5,8 @@ import { OIDC_ENABLED } from '@/config'
 import {
   NAVIGATION_DETAIL_ROUTES,
   NAVIGATION_GROUPS,
+  NOTIFICATION_CENTER_PATH,
+  PLATFORM_ROLES,
   rolesFromProfile,
   type NavigationGroupId,
   type NavigationItemId,
@@ -121,6 +123,12 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/AuthErrorView.vue'),
     props: (route) => ({ reason: route.query.reason }),
     meta: { title: '认证失败' },
+  },
+  {
+    path: NOTIFICATION_CENTER_PATH,
+    name: 'notifications',
+    component: () => import('@/views/NotificationListView.vue'),
+    meta: { title: '通知', requiredRoles: [...PLATFORM_ROLES] },
   },
   ...workbenchRoutes(),
   {

@@ -132,6 +132,9 @@ function readableDiagnosticMessage(code: string, message: string): string {
       return '登录会话已在其他页面变化或安全校验已失效，这次操作没有执行。'
     case 'LW_SDK_SESSION_CHANGED':
       return '登录账号已变化，这次操作属于之前的账号，没有执行或结果已丢弃。'
+    // Notification codes (#224): Control rechecks recipient and membership on every read.
+    case 'LW_NOTIFICATION_NOT_FOUND':
+      return '这条通知已不可查看：你可能已不再是对应项目或课程的成员，或这条提醒已失效。页面不会打开对应对象，也不会显示它的内容。'
     default:
       return message
   }
@@ -179,6 +182,8 @@ function codeNextStep(code: string): string | undefined {
     case 'LW_STORAGE_HEALTH_STALE':
     case 'LW_STORAGE_UNSAFE':
       return '这是平台存储问题，请稍后重试；多次失败请把下方诊断信息发给管理员。'
+    case 'LW_NOTIFICATION_NOT_FOUND':
+      return '请刷新通知列表；如需继续访问该对象，请联系项目负责人或课程教师确认你的成员资格。'
     default:
       return undefined
   }
