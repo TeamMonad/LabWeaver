@@ -21,7 +21,7 @@ import time
 import tomllib
 import uuid
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import SplitResult, urlsplit
 from urllib.request import Request, urlopen
@@ -131,6 +131,7 @@ def run(
     input_bytes: bytes | None = None,
     capture: bool = False,
     check: bool = True,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[Any]:
     if input_text is not None and input_bytes is not None:
         fail("run accepts either input_text or input_bytes, not both")
@@ -139,6 +140,7 @@ def run(
             result = subprocess.run(
                 argv,
                 cwd=ROOT,
+                env=env,
                 input=input_bytes,
                 text=False,
                 capture_output=capture,
@@ -148,6 +150,7 @@ def run(
             result = subprocess.run(
                 argv,
                 cwd=ROOT,
+                env=env,
                 input=input_text,
                 text=True,
                 capture_output=capture,
@@ -1607,7 +1610,7 @@ def author_foundation(output: Path) -> None:
     spec.loader.exec_module(module)
     base = output.resolve()
 
-    def docker_nsc(_nsc: Path, _store: Path, args: list[str], _home: Path) -> None:
+    def docker_nsc(_nsc: Path, _store: Path, args: list[str], home: Path) -> None:
         mapped: list[str] = []
         for arg in args:
             try:
@@ -1616,7 +1619,13 @@ def author_foundation(output: Path) -> None:
                 mapped.append(arg)
             else:
                 mapped.append("/work/" + rel.as_posix())
-        run(["docker", "run", "--rm", "-v", f"{base}:/work", "-w", "/work",
+        # Run as the invoking user: the image defaults to root, which would leave
+        # root-owned keys and creds in the private state directory that this
+        # process can neither chmod during authoring nor remove during cleanup.
+        container_home = "/work/" + home.resolve().relative_to(base).as_posix()
+        run(["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}",
+             "-e", f"HOME={container_home}",
+             "-v", f"{base}:/work", "-w", "/work",
              NATS_BOX_IMAGE, "nsc", "--all-dirs", "/work/nsc", *mapped])
 
     module._nsc = docker_nsc
@@ -1650,6 +1659,65 @@ def verify_loopback_nip_io() -> None:
             fail(f"{hostname} did not resolve exclusively to 127.0.0.1")
 
 
+def kind_create_environment(registry: str) -> dict[str, str]:
+    """Return the ``kind create`` environment that keeps the local registry off any proxy.
+
+    Kind copies HTTP(S)_PROXY and NO_PROXY into every node's containerd.  The local
+    registry is addressed by its container name, which only resolves on the Kind
+    network, so a proxied pull of it can never succeed.
+    """
+
+    environment = dict(os.environ)
+    proxied = any(environment.get(name) for name in
+                  ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"))
+    if not proxied:
+        return environment
+    for name in ("NO_PROXY", "no_proxy"):
+        entries = [item.strip() for item in environment.get(name, "").split(",") if item.strip()]
+        if registry not in entries:
+            entries.append(registry)
+        environment[name] = ",".join(entries)
+    return environment
+
+
+def host_docker_registry_mirrors() -> list[str]:
+    """Return the Docker Hub mirrors the host Docker daemon is configured with.
+
+    Kind node containerd does not inherit ``registry-mirrors`` from the host
+    daemon, so a host that can only reach Docker Hub through a mirror would
+    otherwise fail every in-node ``docker.io`` pull.
+    """
+
+    result = run(["docker", "info", "--format", "{{json .RegistryConfig.Mirrors}}"],
+                 capture=True)
+    try:
+        mirrors = json.loads(result.stdout or "null") or []
+    except json.JSONDecodeError:
+        fail("docker info returned an unreadable registry mirror list")
+    if not isinstance(mirrors, list):
+        fail("docker info returned an unreadable registry mirror list")
+    normalized: list[str] = []
+    for mirror in mirrors:
+        if not isinstance(mirror, str):
+            fail("docker info returned an unreadable registry mirror list")
+        parts = urlsplit(mirror.strip())
+        if parts.scheme not in ("http", "https") or not parts.netloc or parts.query or parts.fragment:
+            fail(f"host Docker registry mirror is not an http(s) URL: {mirror!r}")
+        normalized.append(f"{parts.scheme}://{parts.netloc}{parts.path.rstrip('/')}")
+    return normalized
+
+
+def docker_hub_hosts_toml(mirrors: list[str]) -> str | None:
+    """Render a containerd ``hosts.toml`` trying each mirror before Docker Hub."""
+
+    if not mirrors:
+        return None
+    lines = ['server = "https://registry-1.docker.io"', ""]
+    for mirror in mirrors:
+        lines += [f'[host."{mirror}"]', '  capabilities = ["pull", "resolve"]', ""]
+    return "\n".join(lines)
+
+
 def create_cluster(kubeconfig: Path, *, expose_registry: bool) -> str | None:
     kind_config = STATE_DIR / "kind-config.yaml"
     # gVisor keeps every guest process inside the sandbox's own host threads, so
@@ -1664,7 +1732,8 @@ def create_cluster(kubeconfig: Path, *, expose_registry: bool) -> str | None:
     )
     write(kind_config, f"""kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nname: {CLUSTER}\n{kubelet_patch}nodes:\n- role: control-plane\n  image: {KIND_IMAGE}\n""")
     run(["kind", "create", "cluster", "--name", CLUSTER, "--config",
-         str(kind_config), "--kubeconfig", str(kubeconfig), "--wait", "120s"])
+         str(kind_config), "--kubeconfig", str(kubeconfig), "--wait", "120s"],
+        env=kind_create_environment(REGISTRY))
     configure_kind_sandbox_runtime(kubeconfig)
     configure_kindnet_resources(kubeconfig)
     run(["docker", "run", "-d", "--restart=always", "--name", REGISTRY,
@@ -1679,11 +1748,17 @@ def create_cluster(kubeconfig: Path, *, expose_registry: bool) -> str | None:
         '  capabilities = ["pull", "resolve"]\n'
     )
     hosts_dir = hosts_path.rsplit("/", 1)[0]
+    docker_hub_toml = docker_hub_hosts_toml(host_docker_registry_mirrors())
     for node in nodes:
         node = node.strip()
         run(["docker", "exec", node, "mkdir", "-p", hosts_dir])
         run(["docker", "exec", "-i", node, "sh", "-c", f"cat > {hosts_path}"],
             input_text=hosts_toml)
+        if docker_hub_toml is not None:
+            run(["docker", "exec", node, "mkdir", "-p", "/etc/containerd/certs.d/docker.io"])
+            run(["docker", "exec", "-i", node, "sh", "-c",
+                 "cat > /etc/containerd/certs.d/docker.io/hosts.toml"],
+                input_text=docker_hub_toml)
     if not expose_registry:
         return None
     inspection = run(
@@ -1697,27 +1772,99 @@ def create_cluster(kubeconfig: Path, *, expose_registry: bool) -> str | None:
     return registry_ip
 
 
-def preload_foundation_images() -> None:
-    """Pull exact foundation digests into every owned Kind node.
+FOUNDATION_IMAGES = (
+    POSTGRES_IMAGE,
+    NATS_IMAGE,
+    MINIO_IMAGE,
+    KEYCLOAK_IMAGE,
+    NATS_BOX_IMAGE,
+)
+
+
+def preload_images(images: Iterable[str]) -> None:
+    """Place exact locked digests into every owned Kind node.
 
     Loading a digest-only Docker reference with ``kind load`` can import it
     under a generated ``import-YYYY-MM-DD`` name.  Containerd then has the
     image content but cannot resolve the digest reference used by the Pod
-    spec.  Pulling from the node's containerd resolver preserves the registry
-    identity and digest, so kubelet can use the image without a second pull.
+    spec.  A host Docker image whose saved archive carries the locked index
+    digest is therefore imported with ``ctr --digests`` under its registry
+    name, which needs no registry access (quay.io refuses anonymous pulls of
+    the locked MinIO release, and the node may not reach Docker Hub).
+    Otherwise the node's containerd pulls the exact digest.  Either way the
+    node must resolve the locked reference afterwards.
     """
 
-    images = (
-        POSTGRES_IMAGE,
-        NATS_IMAGE,
-        MINIO_IMAGE,
-        KEYCLOAK_IMAGE,
-        NATS_BOX_IMAGE,
-    )
     nodes = kind_nodes()
     for image in images:
-        for node in nodes:
-            run(["docker", "exec", node, "crictl", "pull", image])
+        archive = save_host_image(image)
+        try:
+            for node in nodes:
+                if archive is None:
+                    run(["docker", "exec", node, "crictl", "pull", image])
+                else:
+                    import_image_archive(node, image, archive)
+        finally:
+            if archive is not None:
+                archive.unlink(missing_ok=True)
+
+
+def _image_repository_and_digest(image: str) -> tuple[str, str]:
+    """Split a locked ``registry/repo:tag@sha256:...`` reference."""
+
+    name, separator, digest = image.partition("@")
+    if not separator or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        fail(f"foundation image is not pinned by digest: {image}")
+    slash = name.rfind("/")
+    colon = name.rfind(":")
+    repository = name[:colon] if colon > slash else name
+    return repository, digest
+
+
+def save_host_image(image: str) -> Path | None:
+    """Save a host Docker image when its archive carries the locked digest.
+
+    Docker's classic image store re-serializes manifests, so an archive whose
+    ``index.json`` lacks the locked digest is discarded and the caller pulls.
+    """
+
+    _repository, digest = _image_repository_and_digest(image)
+    if run(["docker", "image", "inspect", image], capture=True, check=False).returncode != 0:
+        return None
+    archive = STATE_DIR / "images" / f"{digest.removeprefix('sha256:')}.tar"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    run(["docker", "save", image, "-o", str(archive)])
+    try:
+        with tarfile.open(archive) as bundle:
+            member = bundle.extractfile("index.json")
+            index = json.load(member) if member is not None else {}
+    except (KeyError, OSError, tarfile.TarError, json.JSONDecodeError):
+        index = {}
+    manifests = index.get("manifests") if isinstance(index, dict) else None
+    if isinstance(manifests, list) and any(
+        isinstance(entry, dict) and entry.get("digest") == digest for entry in manifests
+    ):
+        return archive
+    archive.unlink(missing_ok=True)
+    return None
+
+
+def import_image_archive(node: str, image: str, archive: Path) -> None:
+    """Import a saved archive into a node under its locked digest name.
+
+    Kind mounts ``/tmp`` as tmpfs and ``docker cp`` writes beneath that mount,
+    so the archive goes to ``/var/tmp`` on the node's persistent ``/var`` volume.
+    """
+
+    repository, _digest = _image_repository_and_digest(image)
+    node_archive = f"/var/tmp/labweaver-{archive.name}"
+    run(["docker", "cp", str(archive), f"{node}:{node_archive}"])
+    try:
+        run(["docker", "exec", node, "ctr", "-n", "k8s.io", "images", "import",
+             "--base-name", repository, "--digests", node_archive])
+    finally:
+        run(["docker", "exec", node, "rm", "-f", node_archive], check=False)
+    run(["docker", "exec", node, "crictl", "inspecti", image], capture=True)
 
 
 def kind_nodes() -> list[str]:
@@ -1746,43 +1893,71 @@ def _sandbox_runtime_lock() -> dict[str, str]:
     return resolved
 
 
-def _sha512_digest(path: Path) -> str:
+def _sha512_digest(path: Path, label: str) -> str:
     digest = hashlib.sha512()
     try:
         with path.open("rb") as handle:
             for block in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(block)
     except OSError as error:
-        fail(f"cannot read the cached gVisor release: {type(error).__name__}")
+        fail(f"cannot read the cached {label}: {type(error).__name__}")
     return digest.hexdigest()
+
+
+def _locked_download(url: str, destination: Path, sha512: str, label: str) -> Path:
+    """Return ``destination`` verified against ``sha512``, downloading it once."""
+
+    if not destination.is_file():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        partial = destination.with_name(destination.name + ".part")
+        try:
+            request = Request(url, headers={"User-Agent": "LabWeaver-local-dev/1"})
+            with urlopen(request, timeout=300) as response, partial.open("wb") as handle:
+                shutil.copyfileobj(response, handle, 1024 * 1024)
+        except (OSError, HTTPError, URLError, TimeoutError) as error:
+            partial.unlink(missing_ok=True)
+            fail(f"cannot download the locked {label}: {type(error).__name__}")
+        if _sha512_digest(partial, label) != sha512:
+            partial.unlink(missing_ok=True)
+            fail(f"downloaded {label} does not match the locked sha512")
+        partial.replace(destination)
+    if _sha512_digest(destination, label) != sha512:
+        fail(f"cached {label} does not match the locked sha512")
+    return destination
 
 
 def _sandbox_runsc_archive(lock: dict[str, str]) -> Path:
     """Return the sha512-verified gVisor release archive, downloading it once."""
 
-    archive = SANDBOX_RUNSC_ARCHIVE
-    if not archive.is_file():
-        archive.parent.mkdir(parents=True, exist_ok=True)
-        partial = archive.with_name(archive.name + ".part")
-        try:
-            request = Request(
-                lock["linux_amd64_url"],
-                headers={"User-Agent": "LabWeaver-local-dev/1"},
-            )
-            with urlopen(request, timeout=300) as response, partial.open("wb") as handle:
-                shutil.copyfileobj(response, handle, 1024 * 1024)
-        except (OSError, HTTPError, URLError, TimeoutError) as error:
-            partial.unlink(missing_ok=True)
-            fail(
-                f"cannot download the locked gVisor {lock['version']}: {type(error).__name__}"
-            )
-        if _sha512_digest(partial) != lock["linux_amd64_sha512"]:
-            partial.unlink(missing_ok=True)
-            fail("downloaded gVisor release does not match the locked sha512")
-        partial.replace(archive)
-    if _sha512_digest(archive) != lock["linux_amd64_sha512"]:
-        fail("cached gVisor release does not match the locked sha512")
-    return archive
+    return _locked_download(lock["linux_amd64_url"], SANDBOX_RUNSC_ARCHIVE,
+                            lock["linux_amd64_sha512"], f"gVisor {lock['version']}")
+
+
+def claude_code_package() -> str:
+    """Return the build-context path of the pinned Claude Code package.
+
+    Uses the same gitignored location and lock pin as ``cargo xtask`` platform
+    image builds; ``Containerfile.rust`` re-verifies the checksum.
+    """
+
+    relative = f"containers/claude-code-linux-x64-{CLAUDE_CODE_VERSION}.tgz"
+    _locked_download(
+        "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/"
+        f"claude-code-linux-x64-{CLAUDE_CODE_VERSION}.tgz",
+        ROOT / relative, CLAUDE_CODE_LINUX_X64_SHA512, f"Claude Code {CLAUDE_CODE_VERSION}")
+    return relative
+
+
+def claude_code_build_args(*, external_fixtures: bool) -> list[str]:
+    """Return the pinned Claude Code build args; real-model targets also get the package."""
+
+    args = ["--build-arg", f"CLAUDE_CODE_VERSION={CLAUDE_CODE_VERSION}",
+            "--build-arg", f"CLAUDE_CODE_LINUX_X64_SHA512={CLAUDE_CODE_LINUX_X64_SHA512}"]
+    if not external_fixtures:
+        args += ["--build-arg", f"CLAUDE_CODE_PACKAGE_PATH={claude_code_package()}"]
+    return args
+
+
 
 
 def _extract_sandbox_runsc(archive: Path) -> dict[str, Path]:
@@ -2856,8 +3031,7 @@ def build_images(*, external_fixtures: bool) -> dict[str, str]:
              "--build-arg",f"SOURCE_COMMIT={commit}","--build-arg",f"SOURCE_DATE_EPOCH={epoch}",
              "--tag",tag,"--file","containers/Containerfile.rust","."]
         if key == "agent_service":
-            build_args[6:6] = ["--build-arg", f"CLAUDE_CODE_VERSION={CLAUDE_CODE_VERSION}",
-                               "--build-arg", f"CLAUDE_CODE_LINUX_X64_SHA512={CLAUDE_CODE_LINUX_X64_SHA512}"]
+            build_args[6:6] = claude_code_build_args(external_fixtures=external_fixtures)
         run(build_args)
         run(["docker","push",tag])
         ref = run(["docker","inspect","--format","{{index .RepoDigests 0}}",tag],capture=True).stdout.strip()
@@ -2879,8 +3053,7 @@ def build_images(*, external_fixtures: bool) -> dict[str, str]:
     sandbox_target = "authoring-sandbox-fixture" if external_fixtures else "authoring-sandbox"
     sandbox_tag = f"{root}/authoring-sandbox:{commit}"
     run(["docker", "buildx", "build", "--load", "--target", sandbox_target,
-         "--build-arg", f"CLAUDE_CODE_VERSION={CLAUDE_CODE_VERSION}",
-         "--build-arg", f"CLAUDE_CODE_LINUX_X64_SHA512={CLAUDE_CODE_LINUX_X64_SHA512}",
+         *claude_code_build_args(external_fixtures=external_fixtures),
          "--tag", sandbox_tag, "--file", "containers/Containerfile.rust", "."])
     run(["docker", "push", sandbox_tag])
     ref = run(["docker", "inspect", "--format", "{{index .RepoDigests 0}}",
@@ -3744,7 +3917,7 @@ def up(
         foundation=work/"foundation"; foundation.mkdir()
         author_foundation(foundation)
         registry_ip = create_cluster(kubeconfig, expose_registry=external_fixtures)
-        preload_foundation_images()
+        preload_images(FOUNDATION_IMAGES)
         configure_local_portal_dns(kubeconfig)
         info=json.loads(STATE_FILE.read_text()); info["phase"]="foundation"; write(STATE_FILE,json.dumps(info,indent=2)+"\n")
         start_foundation(kubeconfig,foundation,work,registry_ip)
@@ -3753,6 +3926,7 @@ def up(
             fail("required executable is unavailable: kubectl")
         apply_migrations(kubeconfig,work)
         if not external_fixtures:
+            preload_images(local_dev_build.real_build_images())
             real_build_provider = local_dev_build.bootstrap_real_build_provider(
                 kubeconfig,
                 work,

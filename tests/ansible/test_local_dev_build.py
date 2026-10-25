@@ -62,6 +62,40 @@ class LocalDevBuildTests(unittest.TestCase):
             "256Mi",
         )
 
+    def test_real_build_images_match_the_deployed_harbor_tags_and_buildkit(self) -> None:
+        lock = LOCAL_BUILD._locked_versions()
+        values = LOCAL_BUILD._harbor_values(
+            lock,
+            {"admin": "admin-secret", "database": "database-secret", "redis": "redis-secret"},
+        )
+        rendered = {
+            "nginx": values["nginx"],
+            "portal": values["portal"],
+            "core": values["core"],
+            "jobservice": values["jobservice"],
+            "registry": values["registry"]["registry"],
+            "registryctl": values["registry"]["controller"],
+            "trivy": values["trivy"],
+            "database": values["database"]["internal"],
+            "redis": values["redis"]["internal"],
+        }
+        self.assertFalse(values.get("metrics", {}).get("enabled", False))
+        expected = {
+            f"{LOCAL_BUILD.HARBOR_IMAGE_REPOSITORIES[name]}:{component['image']['tag']}"
+            for name, component in rendered.items()
+        }
+        expected.add(lock["buildkit_image"])
+        self.assertEqual(set(LOCAL_BUILD.real_build_images()), expected)
+
+    def test_real_build_images_reject_a_lock_with_unknown_harbor_component(self) -> None:
+        lock = dict(LOCAL_BUILD._locked_versions())
+        images = dict(lock["harbor_images"])
+        images["unexpected"] = images.pop("exporter")
+        lock["harbor_images"] = images
+        with patch.object(LOCAL_BUILD, "_locked_versions", return_value=lock):
+            with self.assertRaisesRegex(LOCAL_BUILD.LocalBuildProviderError, "LW_LOCAL_BUILD_LOCK_INVALID"):
+                LOCAL_BUILD.real_build_images()
+
     def test_harbor_namespace_quota_is_bounded_for_local_storage(self) -> None:
         quota = LOCAL_BUILD._render_harbor_quota()
         self.assertEqual(quota["metadata"]["namespace"], "harbor")
