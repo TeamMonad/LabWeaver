@@ -61,6 +61,22 @@ HARBOR_CHART_BASE_URL = "https://helm.goharbor.io"
 HARBOR_HOST = "harbor.lab.lan"
 HARBOR_NAMESPACE = "harbor"
 HARBOR_PROJECT = "labweaver-system"
+# Default image repositories of the locked Harbor chart. The rendered values
+# only pin ``tag``, so each Pod references ``<repository>:<app>@<digest>``.
+# The exporter is pinned but only deployed when chart metrics are enabled,
+# which the local provider leaves off, so it is not preloaded.
+HARBOR_IMAGE_REPOSITORIES = {
+    "nginx": "docker.io/goharbor/nginx-photon",
+    "portal": "docker.io/goharbor/harbor-portal",
+    "core": "docker.io/goharbor/harbor-core",
+    "jobservice": "docker.io/goharbor/harbor-jobservice",
+    "registry": "docker.io/goharbor/registry-photon",
+    "registryctl": "docker.io/goharbor/harbor-registryctl",
+    "trivy": "docker.io/goharbor/trivy-adapter-photon",
+    "database": "docker.io/goharbor/harbor-db",
+    "redis": "docker.io/goharbor/redis-photon",
+}
+HARBOR_UNDEPLOYED_COMPONENTS = frozenset({"exporter"})
 BUILDKIT_NAMESPACE = "labweaver-build"
 BUILDKIT_ADDRESS = "tcp://buildkit.labweaver-build.svc:1234"
 PROJECT_QUOTA_BYTES = 4 * 1024 * 1024 * 1024
@@ -147,6 +163,20 @@ def _locked_versions() -> dict[str, Any]:
         "harbor_app": str(harbor.get("app", "")),
         "buildkit_image": buildkit,
     }
+
+
+def real_build_images() -> tuple[str, ...]:
+    """Return the exact Harbor and BuildKit references the real provider deploys."""
+
+    lock = _locked_versions()
+    images = lock["harbor_images"]
+    if set(images) != set(HARBOR_IMAGE_REPOSITORIES) | HARBOR_UNDEPLOYED_COMPONENTS:
+        raise LocalBuildProviderError("LW_LOCAL_BUILD_LOCK_INVALID", "harbor image components")
+    harbor = tuple(
+        f"{HARBOR_IMAGE_REPOSITORIES[name]}:{lock['harbor_app']}@{images[name]}"
+        for name in sorted(HARBOR_IMAGE_REPOSITORIES)
+    )
+    return harbor + (lock["buildkit_image"],)
 
 
 def _sha256(path: Path) -> str:

@@ -251,7 +251,7 @@ class LocalDevBundleTests(unittest.TestCase):
         )
         self.assertEqual(
             [observer["providerBinding"] for observer in rendered["gpuObservers"]],
-            ["container-primary-v1", "kubernetes-work-local-hostpath"],
+            ["kubernetes-work-local-hostpath"],
         )
         for observer in rendered["gpuObservers"]:
             self.assertEqual(observer["apiServer"], "https://kubernetes.default.svc:443")
@@ -263,18 +263,53 @@ class LocalDevBundleTests(unittest.TestCase):
                 observer["clusterCaFile"],
                 "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
             )
-        classes = {seed["class"]: seed for seed in rendered["gpuCatalogSeed"]}
+        # Resource rejects a second active class on one allocation pool at startup
+        # (GpuCatalogPoolCollision/GpuCatalogModeCollision); the rendered seed must not add one.
+        pools = [seed["allocationBinding"] for seed in rendered["gpuCatalogSeed"]]
+        self.assertEqual(len(pools), len(set(pools)))
         self.assertEqual(
-            classes["nvidia-cuda"]["allocationBinding"], "nvidia.com/gpu"
+            rendered["gpuCatalogSeed"],
+            [
+                {
+                    "class": "nvidia-cuda",
+                    "mode": "exclusive",
+                    # Resource resolves the allocation for the binding the Work environment runs under.
+                    "providerBinding": "kubernetes-work-local-hostpath",
+                    "capacityUnits": 1,
+                    "allocationBinding": "nvidia.com/gpu",
+                }
+            ],
         )
-        self.assertEqual(classes["nvidia-cuda"]["providerBinding"], "container-primary-v1")
-        self.assertEqual(classes["nvidia-cuda-local"]["allocationBinding"], "nvidia.com/gpu")
-        # Resource resolves the allocation for the binding the Work environment runs under.
+
+    def test_local_gpu_capacity_configuration_retargets_only_the_local_pool(self) -> None:
+        example = json.loads(
+            (ROOT / "deploy/config/resource-capacity.json.example").read_text(encoding="utf-8")
+        )
+        vgpu = {
+            "class": "nvidia-vgpu",
+            "mode": "vgpu",
+            "providerBinding": "kubevirt-primary-v1",
+            "capacityUnits": 2,
+            "allocationBinding": "nvidia.com/GRID_A100-4C",
+        }
+        example["gpuCatalogSeed"].append(dict(vgpu))
+        rendered = json.loads(
+            local_dev.local_gpu_capacity_configuration(
+                json.dumps(example), "kubernetes-work-local-hostpath"
+            )
+        )
+        seeds = rendered["gpuCatalogSeed"]
         self.assertEqual(
-            classes["nvidia-cuda-local"]["providerBinding"], "kubernetes-work-local-hostpath"
+            [seed["class"] for seed in seeds if seed["providerBinding"] == "kubernetes-work-local-hostpath"],
+            ["nvidia-cuda"],
         )
-        self.assertEqual(classes["nvidia-cuda-local"]["mode"], "exclusive")
-        self.assertEqual(classes["nvidia-cuda-local"]["capacityUnits"], 1)
+        self.assertIn(vgpu, seeds)
+        pools = [seed["allocationBinding"] for seed in seeds]
+        self.assertEqual(len(pools), len(set(pools)))
+        self.assertEqual(
+            [observer["providerBinding"] for observer in rendered["gpuObservers"]],
+            ["kubernetes-work-local-hostpath", "kubevirt-primary-v1"],
+        )
 
     def test_local_gpu_capacity_configuration_rejects_reviewed_configuration_drift(self) -> None:
         example = json.loads(
@@ -306,15 +341,28 @@ class LocalDevBundleTests(unittest.TestCase):
                     }
                 ],
             },
-            "local": {
+            "shared-pool": {
+                **example,
+                "gpuCatalogSeed": [
+                    *example["gpuCatalogSeed"],
+                    {
+                        "class": "nvidia-cuda-shared",
+                        "mode": "time-sliced",
+                        "providerBinding": "container-primary-v1",
+                        "capacityUnits": 4,
+                        "allocationBinding": "nvidia.com/gpu",
+                    },
+                ],
+            },
+            "no-local-pool": {
                 **example,
                 "gpuCatalogSeed": [
                     {
-                        "class": "nvidia-cuda-local",
-                        "mode": "exclusive",
-                        "providerBinding": "gpu-primary-v1",
-                        "capacityUnits": 1,
-                        "allocationBinding": "nvidia.com/gpu",
+                        "class": "nvidia-vgpu",
+                        "mode": "vgpu",
+                        "providerBinding": "kubevirt-primary-v1",
+                        "capacityUnits": 2,
+                        "allocationBinding": "nvidia.com/GRID_A100-4C",
                     }
                 ],
             },
@@ -517,35 +565,72 @@ class LocalDevBundleTests(unittest.TestCase):
                 capture=True,
             )
 
-    def test_preload_foundation_images_pulls_digests_in_each_kind_node(self) -> None:
+    def _preload(self, host_index: dict[str, str]) -> list[list[str]]:
+        """Run preload with host images keyed by locked reference to their saved index digest."""
+
         commands: list[list[str]] = []
 
         def capture_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             commands.append(argv)
             if argv[:4] == ["kind", "get", "nodes", "--name"]:
                 return subprocess.CompletedProcess(argv, 0, stdout="labweaver-local-test-control-plane\n")
+            if argv[:3] == ["docker", "image", "inspect"]:
+                return subprocess.CompletedProcess(argv, 0 if argv[3] in host_index else 1)
+            if argv[:2] == ["docker", "save"]:
+                index = json.dumps({"manifests": [{"digest": host_index[argv[2]]}]}).encode()
+                with tarfile.open(argv[4], "w") as bundle:
+                    entry = tarfile.TarInfo("index.json")
+                    entry.size = len(index)
+                    bundle.addfile(entry, io.BytesIO(index))
             return subprocess.CompletedProcess(argv, 0)
 
-        with patch.object(local_dev, "run", side_effect=capture_run), patch.object(
-            local_dev, "CLUSTER", "labweaver-local-test"
+        with tempfile.TemporaryDirectory() as state, patch.object(
+            local_dev, "run", side_effect=capture_run
+        ), patch.object(local_dev, "CLUSTER", "labweaver-local-test"), patch.object(
+            local_dev, "STATE_DIR", Path(state)
         ):
-            local_dev.preload_foundation_images()
+            local_dev.preload_images(local_dev.FOUNDATION_IMAGES)
+            self.assertEqual(list((Path(state) / "images").glob("*")), [])
+        return commands
 
-        expected_images = [
-            local_dev.POSTGRES_IMAGE,
-            local_dev.NATS_IMAGE,
-            local_dev.MINIO_IMAGE,
-            local_dev.KEYCLOAK_IMAGE,
-            local_dev.NATS_BOX_IMAGE,
-        ]
+    def test_preload_imports_host_image_whose_archive_carries_locked_digest(self) -> None:
+        node = "labweaver-local-test-control-plane"
+        digest = local_dev.MINIO_IMAGE.partition("@")[2]
+        commands = self._preload({local_dev.MINIO_IMAGE: digest})
+
+        node_archive = f"/var/tmp/labweaver-{digest.removeprefix('sha256:')}.tar"
+        minio = [command for command in commands if local_dev.MINIO_IMAGE in command or node_archive in " ".join(command)]
+        self.assertEqual(minio[0][:3], ["docker", "image", "inspect"])
+        self.assertEqual(minio[1][:3], ["docker", "save", local_dev.MINIO_IMAGE])
+        self.assertEqual(minio[2][:2], ["docker", "cp"])
+        self.assertEqual(minio[2][3], f"{node}:{node_archive}")
         self.assertEqual(
-            commands,
-            [["kind", "get", "nodes", "--name", "labweaver-local-test"]]
-            + [
-                ["docker", "exec", "labweaver-local-test-control-plane", "crictl", "pull", image]
-                for image in expected_images
+            minio[3:],
+            [
+                ["docker", "exec", node, "ctr", "-n", "k8s.io", "images", "import",
+                 "--base-name", "quay.io/minio/minio", "--digests", node_archive],
+                ["docker", "exec", node, "rm", "-f", node_archive],
+                ["docker", "exec", node, "crictl", "inspecti", local_dev.MINIO_IMAGE],
             ],
         )
+        self.assertNotIn(["docker", "exec", node, "crictl", "pull", local_dev.MINIO_IMAGE], commands)
+
+    def test_preload_pulls_when_host_image_is_missing_or_archive_digest_differs(self) -> None:
+        node = "labweaver-local-test-control-plane"
+        commands = self._preload({local_dev.MINIO_IMAGE: "sha256:" + "0" * 64})
+
+        pulled = [command[5] for command in commands if command[:5] == ["docker", "exec", node, "crictl", "pull"]]
+        self.assertEqual(
+            pulled,
+            [
+                local_dev.POSTGRES_IMAGE,
+                local_dev.NATS_IMAGE,
+                local_dev.MINIO_IMAGE,
+                local_dev.KEYCLOAK_IMAGE,
+                local_dev.NATS_BOX_IMAGE,
+            ],
+        )
+        self.assertFalse(any("import" in command for command in commands))
 
     def test_kindnet_resources_use_owned_kubeconfig_and_preserve_daemonset_fields(self) -> None:
         calls: list[tuple[Path, list[str]]] = []
@@ -1682,9 +1767,13 @@ class LocalDevBundleTests(unittest.TestCase):
                 )
             return local_dev.subprocess.CompletedProcess(argv, 0, stdout="")
 
+        package = "containers/claude-code-linux-x64-pinned.tgz"
         for fixture, target in ((False, "agent-runtime"), (True, "agent-runtime-fixture")):
             captured.clear()
-            with patch.object(local_dev, "run", side_effect=fake_run):
+            with (
+                patch.object(local_dev, "run", side_effect=fake_run),
+                patch.object(local_dev, "claude_code_package", return_value=package) as package_mock,
+            ):
                 local_dev.build_images(external_fixtures=fixture)
             agent_build = next(
                 command
@@ -1692,13 +1781,21 @@ class LocalDevBundleTests(unittest.TestCase):
                 if "--build-arg" in command
                 and "SERVICE=agent-service" in command
             )
+            sandbox_build = next(
+                command for command in captured if "authoring-sandbox" in " ".join(command)
+                and "--target" in command
+            )
             self.assertIn("--target", agent_build)
             self.assertEqual(agent_build[agent_build.index("--target") + 1], target)
-            self.assertIn(f"CLAUDE_CODE_VERSION={local_dev.CLAUDE_CODE_VERSION}", agent_build)
-            self.assertIn(
-                f"CLAUDE_CODE_LINUX_X64_SHA512={local_dev.CLAUDE_CODE_LINUX_X64_SHA512}",
-                agent_build,
-            )
+            for build in (agent_build, sandbox_build):
+                self.assertIn(f"CLAUDE_CODE_VERSION={local_dev.CLAUDE_CODE_VERSION}", build)
+                self.assertIn(
+                    f"CLAUDE_CODE_LINUX_X64_SHA512={local_dev.CLAUDE_CODE_LINUX_X64_SHA512}",
+                    build,
+                )
+                # The real-model targets COPY the vendored package; fixture targets never fetch it.
+                self.assertEqual(f"CLAUDE_CODE_PACKAGE_PATH={package}" in build, not fixture)
+            self.assertEqual(package_mock.called, not fixture)
 
     def test_evaluation_runner_image_build_uses_combined_runtime_target(self) -> None:
         captured: list[list[str]] = []
@@ -1717,7 +1814,10 @@ class LocalDevBundleTests(unittest.TestCase):
                 )
             return local_dev.subprocess.CompletedProcess(argv, 0, stdout="")
 
-        with patch.object(local_dev, "run", side_effect=fake_run):
+        with (
+            patch.object(local_dev, "run", side_effect=fake_run),
+            patch.object(local_dev, "claude_code_package", return_value="containers/pinned.tgz"),
+        ):
             images = local_dev.build_images(external_fixtures=False)
 
         self.assertRegex(images["evaluation_runner"], r"evaluation-runner@sha256:[0-9a-f]{64}$")
@@ -1728,6 +1828,9 @@ class LocalDevBundleTests(unittest.TestCase):
             and "containers/Containerfile.ansible-probe" in command
         )
         self.assertEqual(build[build.index("--target") + 1], "evaluation-runtime")
+        probe_lock = yaml.safe_load((ROOT / "deploy" / "versions.lock.yml").read_text())["ansible_probe"]
+        self.assertIn(f"ANSIBLE_CORE_VERSION={probe_lock['ansible_core']}", build)
+        self.assertIn(f"ANSIBLE_POSIX_VERSION={probe_lock['ansible_posix']}", build)
 
     def test_work_runtime_fixture_build_uses_seed_runtime_target(self) -> None:
         captured: list[list[str]] = []
@@ -2446,6 +2549,78 @@ class LocalDevBundleTests(unittest.TestCase):
             (nats_client / "nats.creds").write_bytes(credentials)
             (nats_client / "nats-client.crt").write_bytes(b"nats-certificate")
             (nats_client / "nats-client.key").write_bytes(b"nats-key")
+
+
+class KindCreateEnvironmentTests(unittest.TestCase):
+    _PROXY_NAMES = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy")
+
+    def _environment(self, **values: str) -> dict[str, str]:
+        base = {key: value for key, value in os.environ.items() if key not in self._PROXY_NAMES}
+        with patch.dict(os.environ, {**base, **values}, clear=True):
+            return local_dev.kind_create_environment("labweaver-local-registry-abc")
+
+    def test_proxied_nodes_bypass_the_proxy_for_the_local_registry(self) -> None:
+        environment = self._environment(HTTPS_PROXY="http://proxy:3128", NO_PROXY="localhost, 10.0.0.0/8")
+        self.assertEqual(environment["HTTPS_PROXY"], "http://proxy:3128")
+        self.assertEqual(environment["NO_PROXY"], "localhost,10.0.0.0/8,labweaver-local-registry-abc")
+        self.assertEqual(environment["no_proxy"], environment["NO_PROXY"])
+
+    def test_lowercase_only_exclusions_survive_into_both_spellings(self) -> None:
+        environment = self._environment(
+            https_proxy="http://proxy:3128", no_proxy="mirror.internal,.svc"
+        )
+        expected = "mirror.internal,.svc,labweaver-local-registry-abc"
+        self.assertEqual(environment["NO_PROXY"], expected)
+        self.assertEqual(environment["no_proxy"], expected)
+
+    def test_registry_is_not_duplicated_when_already_bypassed(self) -> None:
+        environment = self._environment(
+            http_proxy="http://proxy:3128", NO_PROXY="labweaver-local-registry-abc"
+        )
+        self.assertEqual(environment["NO_PROXY"], "labweaver-local-registry-abc")
+
+    def test_unproxied_environment_is_left_unchanged(self) -> None:
+        environment = self._environment()
+        self.assertNotIn("NO_PROXY", environment)
+        self.assertNotIn("no_proxy", environment)
+
+
+class DockerHubMirrorTests(unittest.TestCase):
+    def _mirrors(self, stdout: str) -> list[str]:
+        result = subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
+        with patch.object(local_dev, "run", return_value=result):
+            return local_dev.host_docker_registry_mirrors()
+
+    def test_host_mirrors_are_tried_in_order_before_docker_hub(self) -> None:
+        mirrors = self._mirrors('["https://mirror-a.example/", "http://mirror-b.example:5000"]\n')
+        self.assertEqual(mirrors, ["https://mirror-a.example", "http://mirror-b.example:5000"])
+        rendered = local_dev.docker_hub_hosts_toml(mirrors)
+        assert rendered is not None
+        self.assertTrue(rendered.startswith('server = "https://registry-1.docker.io"'))
+        self.assertLess(rendered.index('[host."https://mirror-a.example"]'),
+                        rendered.index('[host."http://mirror-b.example:5000"]'))
+
+    def test_no_host_mirror_leaves_node_defaults(self) -> None:
+        self.assertEqual(self._mirrors("null\n"), [])
+        self.assertIsNone(local_dev.docker_hub_hosts_toml([]))
+
+    def test_non_http_mirror_fails_closed(self) -> None:
+        with self.assertRaises(local_dev.LocalDevError):
+            self._mirrors('["ftp://mirror.example"]')
+
+    def test_credential_bearing_mirror_fails_without_disclosing_it(self) -> None:
+        for mirror in (
+            "https://user:secret@mirror.example",
+            "https://user@mirror.example",
+            "https://mirror.example/?token=topsecret",
+            "https://mirror.example:notaport",
+        ):
+            with self.subTest(mirror=mirror):
+                with self.assertRaises(local_dev.LocalDevError) as raised:
+                    self._mirrors(json.dumps([mirror]))
+                message = str(raised.exception)
+                for fragment in ("user", "secret", "topsecret", "notaport"):
+                    self.assertNotIn(fragment, message)
 
 
 if __name__ == "__main__":
