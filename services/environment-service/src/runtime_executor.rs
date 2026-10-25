@@ -1373,7 +1373,7 @@ impl KubernetesContainerExecutor {
         self.observe_kubevirt_running_gated(fence, plan)
             .await
             .map_err(|(failure, gate)| {
-                log_kubevirt_readiness_failure(fence, started, failure, gate, true);
+                log_kubevirt_readiness_failure(fence, started, &failure, gate, true);
                 failure
             })
     }
@@ -1497,7 +1497,7 @@ impl KubernetesContainerExecutor {
                     let retry = failure.code == ProviderFailureCode::Unavailable
                         && timestamp()?.get() < fence.deadline_at.get();
                     if previous_gate != Some(gate) || !retry {
-                        log_kubevirt_readiness_failure(fence, started, failure, gate, !retry);
+                        log_kubevirt_readiness_failure(fence, started, &failure, gate, !retry);
                         previous_gate = Some(gate);
                     }
                     if !retry {
@@ -2604,7 +2604,7 @@ fn cdi_import_failure(error: &CdiImportError) -> ProviderFailure {
 fn log_kubevirt_readiness_failure(
     fence: &KubeVirtBackendFence,
     started: std::time::Instant,
-    failure: ProviderFailure,
+    failure: &ProviderFailure,
     gate: &'static str,
     terminal: bool,
 ) {

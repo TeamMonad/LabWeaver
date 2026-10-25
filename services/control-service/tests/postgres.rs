@@ -412,9 +412,29 @@ async fn project_policy_updates_require_current_revision_and_replay_idempotently
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn candidate_decision_route_kind_is_bound_before_approval()
 -> Result<(), Box<dyn std::error::Error>> {
+    Box::pin(candidate_publication_fixture(None)).await
+}
+
+#[tokio::test]
+async fn container_executor_transport_persists_original_admission_diagnostics()
+-> Result<(), Box<dyn std::error::Error>> {
+    use runtime_authorization_cases::ExecutorFailure;
+    for fault in [
+        ExecutorFailure::Lease,
+        ExecutorFailure::Funding,
+        ExecutorFailure::ResourceUnavailable,
+    ] {
+        Box::pin(candidate_publication_fixture(Some(fault))).await?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+async fn candidate_publication_fixture(
+    executor_failure: Option<runtime_authorization_cases::ExecutorFailure>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let container = Postgres::default().with_tag("17.5-alpine").start().await?;
     let url = format!(
         "postgres://postgres:postgres@127.0.0.1:{}/postgres",
@@ -788,7 +808,7 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
     } = &mut supply_chain.artifact
     {
         *build_request_id = build_event.data.request.id;
-        *repository = build_event.data.request.output_repository.clone();
+        repository.clone_from(&build_event.data.request.output_repository);
     }
     assert!(matches!(
         service
@@ -862,9 +882,13 @@ async fn candidate_decision_route_kind_is_bound_before_approval()
             &environment_candidate,
             &release,
             UtcTimestamp::from_utc(time::OffsetDateTime::now_utc().replace_microsecond(0)?)?,
+            executor_failure,
         ),
     )
     .await?;
+    if executor_failure.is_some() {
+        return Ok(());
+    }
     assert!(matches!(
         service
             .environment_publication_admission(
@@ -1360,13 +1384,39 @@ enum PublicationCase {
 #[tokio::test]
 async fn authoring_approval_is_atomic_idempotent_and_publication_gated()
 -> Result<(), Box<dyn std::error::Error>> {
-    Box::pin(authoring_publication_fixture(PublicationCase::Publication)).await
+    Box::pin(authoring_publication_fixture(
+        PublicationCase::Publication,
+        None,
+    ))
+    .await
+}
+
+#[tokio::test]
+async fn vm_executor_transport_persists_original_admission_diagnostics()
+-> Result<(), Box<dyn std::error::Error>> {
+    use runtime_authorization_cases::ExecutorFailure;
+    for fault in [
+        ExecutorFailure::Lease,
+        ExecutorFailure::Funding,
+        ExecutorFailure::ResourceUnavailable,
+    ] {
+        Box::pin(authoring_publication_fixture(
+            PublicationCase::Publication,
+            Some(fault),
+        ))
+        .await?;
+    }
+    Ok(())
 }
 
 #[tokio::test]
 async fn rubric_rules_require_current_instructor_and_exact_content_and_revoke()
 -> Result<(), Box<dyn std::error::Error>> {
-    Box::pin(authoring_publication_fixture(PublicationCase::RubricRules)).await
+    Box::pin(authoring_publication_fixture(
+        PublicationCase::RubricRules,
+        None,
+    ))
+    .await
 }
 
 #[tokio::test]
@@ -1374,6 +1424,7 @@ async fn frozen_advisory_steps_with_identical_include_bind_their_current_step()
 -> Result<(), Box<dyn std::error::Error>> {
     Box::pin(authoring_publication_fixture(
         PublicationCase::FrozenSharedInputs,
+        None,
     ))
     .await
 }
@@ -1381,6 +1432,7 @@ async fn frozen_advisory_steps_with_identical_include_bind_their_current_step()
 #[allow(clippy::too_many_lines)]
 async fn authoring_publication_fixture(
     case: PublicationCase,
+    executor_failure: Option<runtime_authorization_cases::ExecutorFailure>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let container = Postgres::default().with_tag("17.5-alpine").start().await?;
     let url = format!(
@@ -1660,9 +1712,13 @@ async fn authoring_publication_fixture(
             &environment,
             &environment_release,
             now,
+            executor_failure,
         ),
     )
     .await?;
+    if executor_failure.is_some() {
+        return Ok(());
+    }
     let ready_query = AuthoringPublicationAdmissionQuery {
         evaluation_release_id: evaluation_release.id,
         ..admission_query

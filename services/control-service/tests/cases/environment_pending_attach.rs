@@ -8,7 +8,7 @@ use axum::{
 use contracts::events::{CloudEvent, EVENT_CONTRACTS, ReleasePublished, SPEC_VERSION, subjects};
 use contracts::http::CreateEnvironmentRequest;
 use contracts::resource::{ResourceApproval, ResourceTarget};
-use contracts::{ActorId, EventId, Revision, Sequence};
+use contracts::{ActorId, EventId, Revision, Sequence, UtcTimestamp};
 use environment_service::{
     EnvironmentApiState, EnvironmentRuntimeAdmission, FreezeBindingConfiguration,
     FreezeBindingService, NatsAccessRevoker, NatsResourceLeaseVerifier, PgEnvironmentStore,
@@ -166,13 +166,20 @@ pub(crate) async fn assert_before_activation(
         );
         assert_eq!(counts(pool).await?, before);
     }
+    // An expired approval must still satisfy valid_until > created_at. Wall-clock minus one
+    // second can precede creation when this fixture runs quickly.
+    let mut expired = approval.clone();
+    expired.valid_until =
+        UtcTimestamp::from_utc(approval.created_at.get() + time::Duration::milliseconds(1))?;
+    assert!(expired.valid_until < resource.current_time().await?);
     for revoked in [true, false] {
         if revoked {
             sqlx::query("UPDATE resource.resource_approvals SET revoked_at=clock_timestamp() WHERE approval_id=$1")
                 .bind(approval.id.as_uuid()).execute(pool).await?;
         } else {
-            sqlx::query("UPDATE resource.resource_approvals SET valid_until=clock_timestamp()-interval '1 second' WHERE approval_id=$1")
-                .bind(approval.id.as_uuid()).execute(pool).await?;
+            sqlx::query("UPDATE resource.resource_approvals SET valid_until=$2,contract=$3 WHERE approval_id=$1")
+                .bind(approval.id.as_uuid()).bind(expired.valid_until.get())
+                .bind(serde_json::to_value(&expired)?).execute(pool).await?;
         }
         let response = send(
             &router,
@@ -184,8 +191,9 @@ pub(crate) async fn assert_before_activation(
         assert_eq!(response.0, StatusCode::CONFLICT);
         assert_eq!(response.1["diagnosticCode"], "LW_RUNTIME_LEASE_NOT_ACTIVE");
         assert_eq!(counts(pool).await?, before);
-        sqlx::query("UPDATE resource.resource_approvals SET revoked_at=NULL,valid_until=$2 WHERE approval_id=$1")
-            .bind(approval.id.as_uuid()).bind(approval.valid_until.get()).execute(pool).await?;
+        sqlx::query("UPDATE resource.resource_approvals SET revoked_at=NULL,valid_until=$2,contract=$3 WHERE approval_id=$1")
+            .bind(approval.id.as_uuid()).bind(approval.valid_until.get())
+            .bind(serde_json::to_value(approval)?).execute(pool).await?;
     }
     // The parent activates this exact request/lease, then retries funded-browser-create
     // through the same persistent ledger and proves a single Environment and hold.

@@ -53,8 +53,8 @@ pub enum ReconcileAction {
     Cleanup,
 }
 
-/// Payload-free Provider failure safe to persist and expose in diagnostics.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// Structured Provider failure safe to persist and expose; raw Provider messages are excluded.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProviderFailure {
     pub code: ProviderFailureCode,
     pub retryable: bool,
@@ -62,13 +62,13 @@ pub struct ProviderFailure {
 
 impl ProviderFailure {
     #[must_use]
-    pub const fn diagnostic_code(self) -> &'static str {
+    pub fn diagnostic_code(&self) -> &str {
         self.code.diagnostic_code()
     }
 }
 
 /// Closed Provider failure family; raw Provider messages are never persisted.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderFailureCode {
     Unavailable,
@@ -78,11 +78,12 @@ pub enum ProviderFailureCode {
     CleanupFailed,
     Timeout,
     Cancelled,
+    RuntimeAdmission(contracts::DiagnosticCode),
 }
 
 impl ProviderFailureCode {
     #[must_use]
-    pub const fn diagnostic_code(self) -> &'static str {
+    pub fn diagnostic_code(&self) -> &str {
         match self {
             Self::Unavailable => "LW_ENVIRONMENT_PROVIDER_UNAVAILABLE",
             Self::Transient => "LW_ENVIRONMENT_PROVIDER_TRANSIENT",
@@ -91,6 +92,7 @@ impl ProviderFailureCode {
             Self::CleanupFailed => "LW_ENVIRONMENT_PROVIDER_CLEANUP_FAILED",
             Self::Timeout => "LW_ENVIRONMENT_PROVIDER_TIMEOUT",
             Self::Cancelled => "LW_ENVIRONMENT_PROVIDER_CANCELLED",
+            Self::RuntimeAdmission(code) => code.as_str(),
         }
     }
 }

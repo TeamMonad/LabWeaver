@@ -18,6 +18,7 @@ pub(super) async fn assert_original_lease_chain(
     store: &PgResourceStore,
     approval: &ResourceApproval,
     allocation: &PendingAllocation,
+    executor_failure: Option<super::ExecutorFailure>,
 ) -> TestResult<ResourceRequest> {
     assert!(matches!(
         current_environment_authorization(pool, approval.request_id, None).await,
@@ -197,7 +198,7 @@ pub(super) async fn assert_original_lease_chain(
     let journey_pool = pool.clone();
     let journey_store = store.clone();
     tokio::spawn(async move {
-        super::funded_handoff::exercise(&journey_pool, &journey_store, &result)
+        super::funded_handoff::exercise(&journey_pool, &journey_store, &result, executor_failure)
             .await
             .map_err(|error| error.to_string())
     })

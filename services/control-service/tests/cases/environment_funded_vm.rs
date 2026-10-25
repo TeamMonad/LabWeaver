@@ -119,6 +119,26 @@ pub(super) fn register(
     calls: Arc<AtomicUsize>,
     reject_next_restart: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
+    register_backend(
+        registry,
+        pool,
+        projection,
+        Arc::new(Cluster {
+            store: environment_service::PgEnvironmentStore::new(pool.clone()),
+            calls,
+            vm: uuid::Uuid::new_v4(),
+            disk: uuid::Uuid::new_v4(),
+            reject_next_restart,
+        }),
+    )
+}
+
+pub(super) fn register_backend<B: environment_service::KubeVirtProviderBackend + 'static>(
+    registry: &mut environment_service::ProviderRegistry,
+    pool: &PgPool,
+    projection: &contracts::events::ReleasePublished,
+    backend: Arc<B>,
+) -> Result<()> {
     let contracts::authoring::EnvironmentRuntimeSpec::VirtualMachine {
         provider_binding,
         base_disk,
@@ -175,13 +195,7 @@ pub(super) fn register(
     )?;
     registry.register(Arc::new(environment_service::KubeVirtProvider::new(
         provider_binding.clone(),
-        Arc::new(Cluster {
-            store: environment_service::PgEnvironmentStore::new(pool.clone()),
-            calls,
-            vm: uuid::Uuid::new_v4(),
-            disk: uuid::Uuid::new_v4(),
-            reject_next_restart,
-        }),
+        backend,
         Arc::new(environment_service::PgReleaseProjectionStore::new(
             pool.clone(),
         )),

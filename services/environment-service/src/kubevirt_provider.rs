@@ -599,8 +599,7 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
         plan: &KubeVirtResourcePlan,
     ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure> {
         running_response(
-            &self
-                .request(fence, KubeVirtExecutorRequest::Apply { plan: plan.clone() })
+            self.request(fence, KubeVirtExecutorRequest::Apply { plan: plan.clone() })
                 .await?,
             plan,
         )
@@ -612,12 +611,11 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
         plan: &KubeVirtResourcePlan,
     ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure> {
         running_response(
-            &self
-                .request(
-                    fence,
-                    KubeVirtExecutorRequest::Observe { plan: plan.clone() },
-                )
-                .await?,
+            self.request(
+                fence,
+                KubeVirtExecutorRequest::Observe { plan: plan.clone() },
+            )
+            .await?,
             plan,
         )
     }
@@ -628,8 +626,7 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
         plan: &KubeVirtResourcePlan,
     ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure> {
         running_response(
-            &self
-                .request(fence, KubeVirtExecutorRequest::Start { plan: plan.clone() })
+            self.request(fence, KubeVirtExecutorRequest::Start { plan: plan.clone() })
                 .await?,
             plan,
         )
@@ -660,12 +657,11 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
         plan: &KubeVirtResourcePlan,
     ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure> {
         running_response(
-            &self
-                .request(
-                    fence,
-                    KubeVirtExecutorRequest::Restart { plan: plan.clone() },
-                )
-                .await?,
+            self.request(
+                fence,
+                KubeVirtExecutorRequest::Restart { plan: plan.clone() },
+            )
+            .await?,
             plan,
         )
     }
@@ -699,16 +695,16 @@ impl KubeVirtProviderBackend for NatsKubeVirtProviderBackend {
 }
 
 fn running_response(
-    response: &KubeVirtExecutorResponse,
+    response: KubeVirtExecutorResponse,
     plan: &KubeVirtResourcePlan,
 ) -> Result<ProviderOutcome<KubeVirtRunningObservation>, ProviderFailure> {
     match response {
         KubeVirtExecutorResponse::Running {
             plan_sha256,
             observation,
-        } if *plan_sha256 == plan.plan_sha256 => Ok(ProviderOutcome::Completed(*observation)),
+        } if plan_sha256 == plan.plan_sha256 => Ok(ProviderOutcome::Completed(observation)),
         KubeVirtExecutorResponse::Pending => Ok(ProviderOutcome::Pending),
-        KubeVirtExecutorResponse::Failed { failure } => Err(*failure),
+        KubeVirtExecutorResponse::Failed { failure } => Err(failure),
         _ => Err(invalid_observation()),
     }
 }
@@ -1297,17 +1293,12 @@ impl<B: KubeVirtExecutorBackend> FencedKubeVirtExecutor<B> {
         envelope: &KubeVirtExecutorRequestEnvelope,
     ) -> Result<KubeVirtExecutorResponse, KubeVirtExecutorFenceError> {
         let runtime_gate = if match &envelope.request {
-            KubeVirtExecutorRequest::Apply { plan }
-            | KubeVirtExecutorRequest::Start { plan }
-            | KubeVirtExecutorRequest::Restart { plan } => !plan.resources.is_empty(),
-            _ => false,
-        } && matches!(
-            envelope.fence.action,
-            ReconcileAction::Provision
-                | ReconcileAction::Start
-                | ReconcileAction::Restart
-                | ReconcileAction::Reset
-        ) {
+            KubeVirtExecutorRequest::Apply { plan } => !plan.resources.is_empty(),
+            KubeVirtExecutorRequest::Start { .. } | KubeVirtExecutorRequest::Restart { .. } => true,
+            KubeVirtExecutorRequest::Observe { .. }
+            | KubeVirtExecutorRequest::Stop { .. }
+            | KubeVirtExecutorRequest::DeleteNamespace { .. } => false,
+        } {
             crate::runtime_admission::executor_authorization(
                 self.runtime_admission.as_ref(),
                 self.store.pool.clone(),
@@ -1611,12 +1602,9 @@ fn validate_kubevirt_executor_request(
     Ok(())
 }
 
-const fn kubevirt_executor_failure(error: &KubeVirtExecutorFenceError) -> ProviderFailure {
+fn kubevirt_executor_failure(error: &KubeVirtExecutorFenceError) -> ProviderFailure {
     match error {
-        KubeVirtExecutorFenceError::RuntimeAdmission(error) => ProviderFailure {
-            code: ProviderFailureCode::Rejected,
-            retryable: error.retryable(),
-        },
+        KubeVirtExecutorFenceError::RuntimeAdmission(error) => error.provider_failure(),
         KubeVirtExecutorFenceError::InProgress
         | KubeVirtExecutorFenceError::Database(_)
         | KubeVirtExecutorFenceError::Transport => unavailable(),
