@@ -54,7 +54,16 @@ pub(super) async fn exercise(
             .bind(serde_json::to_value(&denied)?)
             .execute(pool).await?;
         for &action in actions(instance.runtime_kind) {
-            let result = execute(pool, admission, instance, action, deadline, calls.clone(), true).await;
+            let result = execute(
+                pool,
+                admission,
+                instance,
+                action,
+                deadline,
+                calls.clone(),
+                true,
+            )
+            .await;
             if !matches!(&result, Err(error) if error.to_string().contains("LW_RUNTIME_LEASE_NOT_ACTIVE"))
             {
                 unexpected.push(format!(
@@ -77,7 +86,16 @@ pub(super) async fn exercise(
         "denied leases must cause zero Kubernetes effects"
     );
     for (index, &action) in actions(instance.runtime_kind).iter().enumerate() {
-        execute(pool, admission, instance, action, deadline, calls.clone(), false).await?;
+        execute(
+            pool,
+            admission,
+            instance,
+            action,
+            deadline,
+            calls.clone(),
+            false,
+        )
+        .await?;
         assert_eq!(
             calls.load(Ordering::SeqCst),
             index + 1,
@@ -113,14 +131,19 @@ async fn execute(
         PgEnvironmentStore::new(pool.clone()).current_time().await?,
     );
     if instance.runtime_kind == RuntimeKind::Container {
-        let mut envelope = super::physical_envelope(pool, instance, 1, false, deadline).await?;
+        // These grant probes precede the outer step-1 replay/tombstone probe. Full plans must
+        // not rely on different database clock ticks to distinguish the two effect identities.
+        let mut envelope = super::physical_envelope(pool, instance, 0, false, deadline).await?;
         let ContainerExecutorRequest::Apply { mut plan } = envelope.request else {
             return Err("apply fixture".into());
         };
         if sparse_attack {
             // Malformed sparse requests must not bypass the fresh grant gate. Legitimate writes
             // below always carry the complete trusted plan; there is no sparse-write exception.
-            plan.resources.retain(|resource| matches!(action, ReconcileAction::Provision | ReconcileAction::Reset) && resource.kind == "Service");
+            plan.resources.retain(|resource| {
+                matches!(action, ReconcileAction::Provision | ReconcileAction::Reset)
+                    && resource.kind == "Service"
+            });
         }
         envelope.request = match action {
             ReconcileAction::Provision | ReconcileAction::Reset => {
@@ -136,7 +159,7 @@ async fn execute(
         envelope.fence.action = action;
         envelope.fence.request_id = Sha256Digest::of_canonical(&serde_json::json!({
             "protocolVersion": envelope.fence.protocol_version, "environmentId": instance.id,
-            "operationId": instance.operation.id, "providerStep": 1, "operationGeneration": instance.generation,
+            "operationId": instance.operation.id, "providerStep": envelope.fence.provider_step, "operationGeneration": instance.generation,
             "attempt": 1, "action": action, "deadlineAt": deadline, "request": envelope.request,
         }))?;
         let response = FencedContainerExecutor::new(

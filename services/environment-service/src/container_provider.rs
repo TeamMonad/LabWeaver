@@ -989,8 +989,13 @@ async fn validate_container_execution_plan(
         )
         .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
     let received_sha256 = container_plan_sha256(
-        plan.environment_id, &resolved.projection.release, &plan.image, &plan.resources, plan.namespace_uid,
-    ).map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+        plan.environment_id,
+        &resolved.projection.release,
+        &plan.image,
+        &plan.resources,
+        plan.namespace_uid,
+    )
+    .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
     if received_sha256 != plan.plan_sha256 || received_sha256 != expected.plan_sha256 {
         return Err(ContainerExecutorFenceError::IdentityMismatch);
     }
@@ -1594,7 +1599,13 @@ impl ContainerProviderConfiguration {
                 }
             }
         }
-        let plan_sha256 = container_plan_sha256(instance.id, &projection.release, &image, &documents, placement.namespace_uid)?;
+        let plan_sha256 = container_plan_sha256(
+            instance.id,
+            &projection.release,
+            &image,
+            &documents,
+            placement.namespace_uid,
+        )?;
         Ok(ContainerResourcePlan {
             environment_id: instance.id,
             project_id: instance.project_id,

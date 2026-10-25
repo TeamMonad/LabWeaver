@@ -345,12 +345,17 @@ struct TamperingContainerTransport {
 
 impl TamperingContainerTransport {
     // Independently reproduce the protocol digest before forging a new claim for a cropped plan.
-    fn content_digest(&self, plan: &environment_service::ContainerResourcePlan) -> Result<persistence_sqlx::Sha256Digest> {
-        Ok(persistence_sqlx::Sha256Digest::of_canonical(&serde_json::json!({
-            "environmentId":plan.environment_id, "releaseId":self.release_id,
-            "releaseVersion":self.release_version, "image":plan.image,
-            "resources":plan.resources, "namespaceUid":plan.namespace_uid,
-        }))?)
+    fn content_digest(
+        &self,
+        plan: &environment_service::ContainerResourcePlan,
+    ) -> Result<persistence_sqlx::Sha256Digest> {
+        Ok(persistence_sqlx::Sha256Digest::of_canonical(
+            &serde_json::json!({
+                "environmentId":plan.environment_id, "releaseId":self.release_id,
+                "releaseVersion":self.release_version, "image":plan.image,
+                "resources":plan.resources, "namespaceUid":plan.namespace_uid,
+            }),
+        )?)
     }
 }
 
@@ -358,7 +363,9 @@ impl Tamper {
     fn apply(self, plan: &mut environment_service::ContainerResourcePlan) -> Result {
         use serde_json::json;
         let omitted_kind = match self {
-            Self::MissingNetworkPolicy | Self::RehashedMissingNetworkPolicy => Some("NetworkPolicy"),
+            Self::MissingNetworkPolicy | Self::RehashedMissingNetworkPolicy => {
+                Some("NetworkPolicy")
+            }
             Self::MissingResourceQuota => Some("ResourceQuota"),
             Self::MissingLimitRange => Some("LimitRange"),
             _ => None,
@@ -366,7 +373,10 @@ impl Tamper {
         if let Some(kind) = omitted_kind {
             let count = plan.resources.len();
             plan.resources.retain(|resource| resource.kind != kind);
-            assert!(plan.resources.len() < count, "the attack must actually omit {kind}");
+            assert!(
+                plan.resources.len() < count,
+                "the attack must actually omit {kind}"
+            );
             return Ok(());
         }
         if self == Self::NamespacePsa {
@@ -429,10 +439,16 @@ impl Tamper {
                 pod["ephemeralContainers"] = json!([{"name":"extra-debug","image":pod["containers"][0]["image"],"targetContainerName":"runtime","command":["/bin/sh"]}]);
             }
             Self::InitPrivilegeEscalation => {
-                pod["initContainers"][0]["securityContext"]["allowPrivilegeEscalation"] = json!(true);
+                pod["initContainers"][0]["securityContext"]["allowPrivilegeEscalation"] =
+                    json!(true);
             }
-            Self::NamespacePsa | Self::MissingNetworkPolicy | Self::RehashedMissingNetworkPolicy
-            | Self::MissingResourceQuota | Self::MissingLimitRange => return Err("object-level attack must be handled first".into()),
+            Self::NamespacePsa
+            | Self::MissingNetworkPolicy
+            | Self::RehashedMissingNetworkPolicy
+            | Self::MissingResourceQuota
+            | Self::MissingLimitRange => {
+                return Err("object-level attack must be handled first".into());
+            }
         }
         Ok(())
     }
@@ -449,10 +465,16 @@ impl environment_service::ContainerProviderBackend for TamperingContainerTranspo
         environment_service::ProviderFailure,
     > {
         if let Some(tampering) = self.tampering {
-            let original_digest = self.content_digest(plan).map_err(|_| environment_service::ProviderFailure {
-                code: environment_service::ProviderFailureCode::Rejected, retryable: false,
-            })?;
-            assert_eq!(original_digest, plan.plan_sha256, "the fixture digest must reproduce the trusted complete plan");
+            let original_digest =
+                self.content_digest(plan)
+                    .map_err(|_| environment_service::ProviderFailure {
+                        code: environment_service::ProviderFailureCode::Rejected,
+                        retryable: false,
+                    })?;
+            assert_eq!(
+                original_digest, plan.plan_sha256,
+                "the fixture digest must reproduce the trusted complete plan"
+            );
             let mut changed = plan.clone();
             tampering
                 .apply(&mut changed)
@@ -461,8 +483,11 @@ impl environment_service::ContainerProviderBackend for TamperingContainerTranspo
                     retryable: false,
                 })?;
             if tampering == Tamper::RehashedMissingNetworkPolicy {
-                changed.plan_sha256 = self.content_digest(&changed).map_err(|_| environment_service::ProviderFailure {
-                    code: environment_service::ProviderFailureCode::Rejected, retryable: false,
+                changed.plan_sha256 = self.content_digest(&changed).map_err(|_| {
+                    environment_service::ProviderFailure {
+                        code: environment_service::ProviderFailureCode::Rejected,
+                        retryable: false,
+                    }
                 })?;
                 assert_ne!(changed.plan_sha256, plan.plan_sha256);
             }
