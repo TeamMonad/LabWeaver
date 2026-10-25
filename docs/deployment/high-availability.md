@@ -105,7 +105,7 @@ Resource 在批准、Task claim、新 capacity shell 前读取 CephCluster；Env
 
 这个健康门不替代 Ceph 写入层安全：现有 I/O 的 quorum/满盘拒写由 Ceph 的 pool 最小副本与 full 阈值执行。Kubernetes 状态不是线性一致的物理存储探测，观测到分区存在至多一个采样/新鲜度窗口；不能由一次 `HEALTH_OK` 宣称未来写入绝对成功。已有授权也不能绕过存储的实际拒写。
 
-**身份链的 HA 边界：** `identity_foundation` 创建独立 `identity-postgres` CNPG Cluster（三实例、host 必须反亲和、required synchronous/quorum、PDB）及独立 ObjectStore/ScheduledBackup。Keycloak 至少两个副本并跨 host 调度；角色先等待身份 Cluster Ready，再启动 Keycloak。每次 Pod 启动的 init container 通过应用口令和 `verify-full` TLS 执行实际 `SELECT 1`；Keycloak JDBC 同样校验证书并连接 CNPG 管理的 `identity-postgres-rw`，不再访问旧 `identity-postgres` Service。CNPG operator 及 Barman 插件必须先由 platform foundation 安装；身份 namespace 的网络策略允许复制、operator、API、DNS 和指定独立备份 HTTPS 出口。此配置不等于真实节点故障、登录全链或站点恢复验收已经完成；#205 仍保持 Open。
+**身份链的 HA 边界：** `identity_foundation` 创建独立 `identity-postgres` CNPG Cluster（三实例、host 必须反亲和、required synchronous/quorum、PDB）及独立 ObjectStore/ScheduledBackup。Keycloak 固定两个副本并跨 host 调度，入口只接受整数 `identity_keycloak_replicas=2`；维护期间更新要求仍有至少两台可调度 host，不支持三副本仅剩两台 host 时继续更新，具体核对和维护前缩容步骤见[部署手册](runbook.md#keycloak-副本与节点维护)。角色先等待身份 Cluster Ready，再启动 Keycloak。每次 Pod 启动的 init container 通过应用口令和 `verify-full` TLS 执行实际 `SELECT 1`；Keycloak JDBC 同样校验证书并连接 CNPG 管理的 `identity-postgres-rw`，不再访问旧 `identity-postgres` Service。CNPG operator 及 Barman 插件必须先由 platform foundation 安装；身份 namespace 的网络策略允许复制、operator、API、DNS 和指定独立备份 HTTPS 出口。此配置不等于真实节点故障、登录全链或站点恢复验收已经完成；#205 仍保持 Open。
 
 ## 站点灾难目标与独立备份
 

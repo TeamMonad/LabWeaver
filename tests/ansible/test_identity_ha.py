@@ -94,9 +94,9 @@ class IdentityHATests(unittest.TestCase):
         self.assertIn({"matchLabels": {"k8s:io.kubernetes.pod.namespace": "cnpg-system"}}, policy["ingress"][0]["fromEndpoints"])
 
     def test_rollout_frees_a_host_without_exhausting_available_replicas(self):
-        # Three occupied hosts, and two occupied hosts during single-node
-        # maintenance, must both have room for a replacement without a surge.
-        for replicas, available_hosts in ((3, 3), (2, 2)):
+        # The supported two replicas can update on three hosts normally, or
+        # on the two remaining schedulable hosts during single-node maintenance.
+        for replicas, available_hosts in ((2, 3), (2, 2)):
             with self.subTest(replicas=replicas, available_hosts=available_hosts):
                 objects = render("workloads.yml.j2", dict(self.context, identity_keycloak_replicas=replicas))
                 deployment = next(item["spec"] for item in objects if item["kind"] == "Deployment")
@@ -106,6 +106,30 @@ class IdentityHATests(unittest.TestCase):
                 self.assertGreaterEqual(survivors, 1)
                 pdb = next(item["spec"] for item in objects if item["kind"] == "PodDisruptionBudget")
                 self.assertGreaterEqual(survivors, pdb["minAvailable"])
+
+    def test_three_desired_replicas_with_two_schedulable_hosts_are_rejected(self):
+        tasks = yaml.safe_load((ROLE / "tasks/main.yml").read_text())
+        validation = next(task for task in tasks if "ansible.builtin.assert" in task)
+        for replicas, available_hosts in ((3, 2), (3, 3), (1, 2), (4, 3), (True, 2), ("2", 2), (2, 2)):
+            with self.subTest(replicas=replicas, available_hosts=available_hosts), tempfile.TemporaryDirectory() as directory:
+                # Execute the full production input assertion. The key regression
+                # retains desired=3 with only two schedulable hosts; it must fail
+                # before any Deployment change rather than silently become (2,2).
+                context = dict(self.context, identity_foundation_enabled=True, identity_run_id="infra-regression",
+                               identity_secret_locator="/private/identity.yaml", identity_secret_locator_sha256="sha256:" + "a" * 64,
+                               identity_keycloak_replicas=replicas)
+                path = Path(directory) / "replicas.yml"
+                path.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": context,
+                    "tasks": [validation, {"ansible.builtin.debug": {"msg": "DEPLOYMENT_CHANGE_REACHED"}}]}]))
+                result = subprocess.run(["ansible-playbook", "-i", "localhost,", "-c", "local", str(path)], capture_output=True, text=True, timeout=60)
+                output = result.stdout + result.stderr
+                if type(replicas) is int and replicas == 2:
+                    self.assertEqual(result.returncode, 0, output)
+                    self.assertIn("DEPLOYMENT_CHANGE_REACHED", output)
+                else:
+                    self.assertNotEqual(result.returncode, 0, output)
+                    self.assertIn("IDENTITY_CONFIGURATION_INVALID", output)
+                    self.assertNotIn("DEPLOYMENT_CHANGE_REACHED", output)
 
     def test_legacy_database_objects_reject_before_any_database_or_keycloak_change(self):
         tasks = yaml.safe_load((ROLE / "tasks/main.yml").read_text())
