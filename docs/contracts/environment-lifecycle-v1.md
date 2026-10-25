@@ -57,18 +57,33 @@ owner 与执行器在新计算效果前再次核对。只持有旧 Environment �
 资源、网络、安全、provider、端口和入口变化仍以 `LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL` 拒绝。
 VM 总是返回 HTTP 422 `LW_WORK_TEMPLATE_UPGRADE_UNSUPPORTED_FOR_VM` 和中文原因，不隐式重建。
 
-当前采用 C 阶段规则：绑定了原 lease 的 Work（目前所有合法 Work）即使完全兼容，也返回 HTTP 409
-`LW_WORK_TEMPLATE_UPGRADE_UNAVAILABLE`。拒绝发生在原 lease 验证、Access 撤权和 store 接受事务之前；
-不改 `releaseId/releaseVersion`、运行实例或工作目录，不新增 operation/Outbox，不调用 Provider。
-同 key 或新 key 重试仍拒绝，不以受理一个后台必然失败的 Restart 代替同步拒绝。
+兼容的 Container Work 升级恢复为 HTTP 202，沿原 durable Restart 执行。入口在 Access 撤权前
+读取 Resource 的 fresh 授权和资金覆盖；Resource 从 Control 发布事实验证目标已发布、未撤回、
+与原批准同族，且权限投影相等。权限投影共用 `EnvironmentSpec::permission_projection()`，包括
+class、全部 resources/network/security/entries，以及 Container provider 和 service port；
+build context、镜像内容、终端程序、名称和材料保留期限不是新增权限。VM 不开放此升级路径。
+资源规格的任何变化（包括降低）仍需新申请，不会静默降配。
 
-替代做法是按新模板新建 Work，自行备份和迁移所需数据；检查完成后再释放旧 Work。
-这不是自动转移原 lease 或磁盘，新 Work 仍走自己的正式准入与计费。
+升级不修改原批准和 request target，不新增 request、approval、claim、lease、reservation 或 hold。
+后台 Restart 和 executor 每次新计算前重新核对原资金覆盖与目标 release 的权限投影。
+原批准保留原 release/content SHA 的审计身份，不能驱动更宽的新配置。
+同一 Idempotency-Key（包括并发和响应丢失重放）只受理一次 operation。
+`operation.templateUpgrade` 保存 source/target release 和 `dataPolicy=preserve_workspace`；
+operation 状态可查询。失败不会伪装成功，`/workspace` 的原 PVC 保留；
+重放原升级请求返回原 operation，显式 recover/retry 沿现有生命周期恢复已确认的目标。
+容器临时根文件系统和进程内存不保留；升级不追加资金预占，实际用量仍由原 lease 计量。
 
-兼容升级复用原 lease 的恢复工作见 [#288](https://github.com/TeamMonad/LabWeaver/issues/288)（A'）。
-现有 store 接受实现、历史 `templateUpgrade` 操作 DTO 和 timeout/cancel 的保盘语义保留，
-但不作为当前公开入口支持升级的承诺。绕过入口写入升级 intent 仍会被 fresh 的精确配置 binding 拒绝，
-旧 release 的运行授权不能驱动新 release。
+旧批准缺少 `permissionProjectionSha256` 时返回
+`409/LW_RUNTIME_AUTHORIZATION_REAPPROVAL_REQUIRED`，中文提示重新提交资源申请。
+不回填或覆盖历史批准，不新增历史投影表；旧批准不能执行升级、Restart 或其他新计算。
+停止/清理不被此检查阻塞。v1 清空重建仅可在维护者另行授权的切换窗口执行，
+代码不依赖清空已经发生，本变更不执行数据清空。
+
+Access 撤权仍走生产 `NatsAccessRevoker`，双方使用 contracts 中共享的
+`AccessRevocationRequest/Response` 与受限 reason 枚举；回复的版本、environment ID/revision
+必须精确匹配。撤权响应错误或超时不会受理升级，不写目标版本或 operation，
+用户查询仍得到原状态，可使用同一幂等键重试；资金 hold 不变。
+
 
 ## 状态、访问和回收
 
@@ -111,8 +126,9 @@ deadline. There is no second grant or runtime approval table.
 
 Work and funded Experiment use the original Resource handoff, Environment target and lease IDs. Before provision/start/restart/reset,
 including retry/recovery that creates compute, Environment reads the authority
-again. Request, owner/project/course, release, canonical spec, provider and original
-Environment target must agree. Native executor admission also checks the exact
+again. Request, owner/project/course, provider and original Environment target must
+agree. Experiment and VM retain exact release/content identity; compatible Container
+Work uses the same-family permission projection described above. Native executor admission checks the exact
 runtime kind, operation and generation before a new effect. Existing baseline security
 projection remains unchanged. Stop and cleanup do not require a new runtime grant.
 

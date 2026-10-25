@@ -365,6 +365,15 @@ pub struct EnvironmentTemplateRelease {
 }
 
 impl EnvironmentTemplateRelease {
+    /// Canonical family identity from the Control-owned immutable publication.
+    #[must_use]
+    pub fn template_family_id(&self) -> Option<String> {
+        self.manual_approval
+            .as_ref()
+            .map(|manual| manual.template_family_id.clone())
+            .or_else(|| self.candidate_id.map(|id| format!("candidate-{id}")))
+    }
+
     /// Validates exact approval and runtime artifact binding.
     pub fn validate(&self) -> Result<(), SupplyChainError> {
         if self.version == 0 || self.runtime_kind != self.artifact.runtime_kind() {

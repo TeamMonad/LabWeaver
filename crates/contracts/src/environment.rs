@@ -469,13 +469,26 @@ impl EnvironmentRuntimeAuthorizationResolution {
             || self.authorization.project_id != request.project_id
             || self.authorization.course_id != request.course_id
             || self.owner_actor_id != request.owner_actor_id
-            || self.authorization.configuration.configuration_sha256
-                != expected_configuration_sha256
+            || self
+                .authorization
+                .configuration
+                .permission_projection_sha256
+                .is_none()
+            || (spec.class == EnvironmentClass::Work
+                && self
+                    .authorization
+                    .configuration
+                    .permission_projection_sha256
+                    .as_deref()
+                    != Some(expected_configuration_sha256))
+            || (spec.class != EnvironmentClass::Work
+                && self.authorization.configuration.configuration_sha256
+                    != expected_configuration_sha256)
             || request
                 .environment_id
                 .is_some_and(|expected| expected != environment_id)
-            || release_id != request.release_id
-            || release_version != request.release_version
+            || (spec.class != EnvironmentClass::Work
+                && (release_id != request.release_id || release_version != request.release_version))
             || self.authorization.permissions.capabilities != declared.capabilities
             || self.authorization.permissions.privileged != declared.privileged
             || self.valid_until > self.lease_authorization.expires_at

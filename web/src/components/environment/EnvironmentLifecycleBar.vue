@@ -93,7 +93,7 @@
         @retry="retryLifecycle"
       />
       <RouterLink
-        v-if="lifecycleDiagnostic.code === 'LW_RUNTIME_LEASE_NOT_ACTIVE' && env.instance.kind === 'success' && env.instance.data.class === 'work'"
+        v-if="requiresNewResourceRequest(lifecycleDiagnostic.code) && env.instance.kind === 'success' && env.instance.data.class === 'work'"
         class="outlined-button small lease-request-link"
         data-testid="lease-new-request-link"
         :to="{ path: '/researcher/resources', query: { projectId: env.instance.data.projectId, releaseId: env.instance.data.releaseId, releaseVersion: String(env.instance.data.releaseVersion) } }"
@@ -133,6 +133,7 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import GcpActionBar from '@/components/common/GcpActionBar.vue'
 import { useEnvironmentEntryContext } from '@/composables/useEnvironmentEntry'
 import { failedCleanup, lifecycleConfirmationText } from '@/utils/environmentLifecycle'
+import { requiresNewResourceRequest } from '@/types/async'
 
 /** 生命周期操作栏：启动、停止、重启、重试和删除，以及停止/重启/删除确认。 */
 const {

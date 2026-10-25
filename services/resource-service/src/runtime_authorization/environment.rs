@@ -136,6 +136,9 @@ async fn load_environment_authorization(
         .as_ref()
         .ok_or(RuntimeAuthorizationError::ApprovalRequired)?;
     let applied_configuration = validated_policy(&mut tx, &request, binding).await?;
+    if let Some(input) = input {
+        validate_release(&mut tx, &request, binding, input).await?;
+    }
     let result = CurrentEnvironmentAuthorization {
         binding: binding.clone(),
         lease: authorization,
@@ -169,11 +172,43 @@ fn verify_input(
         || input
             .environment_id
             .is_some_and(|expected| expected != environment_id)
-        || input.release_id != release_id
-        || input.release_version != release_version
+        || input.release_version == 0
+        || (input.environment_id.is_none()
+            && (input.release_id != release_id || input.release_version != release_version))
     {
         return Err(RuntimeAuthorizationError::ConfigurationMismatch.into());
     }
+    Ok(())
+}
+
+async fn validate_release(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    request: &ResourceRequest,
+    binding: &RuntimeAuthorizationBinding,
+    input: &ResolveEnvironmentRuntimeAuthorizationRequest,
+) -> Result<(), RuntimeBindingError> {
+    if input.release_id == binding.configuration.release_id
+        && input.release_version == binding.configuration.release_version
+    {
+        return Ok(());
+    }
+    let mut target = request.clone();
+    let ResourceTarget::Environment { environment_id, .. } = request.target else {
+        return Err(RuntimeAuthorizationError::TargetNotEnvironment.into());
+    };
+    target.target = ResourceTarget::Environment {
+        environment_id,
+        release_id: input.release_id,
+        release_version: input.release_version,
+    };
+    let (identity, spec, _) = super::current_inputs(tx, &target).await?;
+    if spec.class != contracts::authoring::EnvironmentClass::Work
+        || spec.runtime.kind() != contracts::authoring::RuntimeKind::Container
+        || input.release_version <= binding.configuration.release_version
+    {
+        return Err(RuntimeAuthorizationError::ConfigurationMismatch.into());
+    }
+    binding.configuration.validate_compatible(&identity)?;
     Ok(())
 }
 

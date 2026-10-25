@@ -30,6 +30,11 @@ pub struct RuntimeConfigurationIdentity {
     pub release_id: ReleaseId,
     pub release_version: u64,
     pub configuration_sha256: String,
+    /// Absent only on pre-cutover approvals; never authorizes a new compute effect.
+    #[serde(default)]
+    pub permission_projection_sha256: Option<String>,
+    #[serde(default)]
+    pub template_family_id: Option<String>,
     pub authoring_approval_id: Option<ApprovalId>,
     pub teacher_scope: Option<CourseTeacherApprovalScope>,
 }
@@ -71,6 +76,8 @@ pub enum RuntimeAuthorizationError {
     PolicyNotVerified,
     #[error("LW_RUNTIME_POLICY_CHANGED")]
     PolicyChanged,
+    #[error("LW_RUNTIME_AUTHORIZATION_REAPPROVAL_REQUIRED")]
+    ReapprovalRequired,
     #[error("LW_RUNTIME_CONFIGURATION_BINDING_MISMATCH")]
     ConfigurationMismatch,
     #[error("LW_RUNTIME_TEACHER_APPROVAL_REQUIRED")]
@@ -168,6 +175,49 @@ pub fn select_preauthorization(
         })
 }
 
+/// Borrowed, exhaustive permission projection shared by upgrade and fresh admission.
+#[derive(Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimePermissionProjection<'a> {
+    pub class: crate::authoring::EnvironmentClass,
+    pub resources: &'a crate::authoring::ResourceRequirements,
+    pub network: &'a crate::authoring::NetworkPolicySpec,
+    pub security: &'a EnvironmentSecuritySpec,
+    pub entries: &'a [crate::authoring::EnvironmentEntrySpec],
+    pub runtime: RuntimePermissionProjectionKind<'a>,
+}
+
+#[derive(Serialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RuntimePermissionProjectionKind<'a> {
+    Container {
+        provider_binding: &'a str,
+        service_port: u16,
+    },
+    VirtualMachine {
+        runtime: &'a crate::authoring::EnvironmentRuntimeSpec,
+    },
+}
+
+impl RuntimeConfigurationIdentity {
+    /// Release/content provenance stays immutable; only equal permissions may reuse its grant.
+    pub fn validate_compatible(&self, current: &Self) -> Result<(), RuntimeAuthorizationError> {
+        let projection = self
+            .permission_projection_sha256
+            .as_ref()
+            .ok_or(RuntimeAuthorizationError::ReapprovalRequired)?;
+        if current.permission_projection_sha256.as_ref() != Some(projection)
+            || self.template_family_id.is_none()
+            || self.template_family_id != current.template_family_id
+            || self.authoring_project_id != current.authoring_project_id
+            || self.course_id != current.course_id
+            || self.teacher_scope != current.teacher_scope
+        {
+            return Err(RuntimeAuthorizationError::ConfigurationMismatch);
+        }
+        Ok(())
+    }
+}
 impl RuntimeAuthorizationBinding {
     /// Checks a stored approval against current server-owned configuration and applied policy facts.
     pub fn validate_current(
@@ -176,6 +226,9 @@ impl RuntimeAuthorizationBinding {
         configuration: &RuntimeConfigurationIdentity,
         status: &PlatformConfigurationStatus,
     ) -> Result<(), RuntimeAuthorizationError> {
+        if self.configuration.permission_projection_sha256.is_none() {
+            return Err(RuntimeAuthorizationError::ReapprovalRequired);
+        }
         check_policy_use(status, RuntimePolicyUse::Admission)?;
         if !matches!(request.target, ResourceTarget::Environment { .. }) {
             return Err(RuntimeAuthorizationError::TargetNotEnvironment);
@@ -243,6 +296,65 @@ mod tests {
             Err(RuntimeAuthorizationError::OutsidePlatformRange)
         );
         assert!(select_preauthorization(&policy, payer, Some(course), &excess).is_none());
+    }
+
+    #[test]
+    fn compatible_projection_preserves_scope_and_rejects_legacy_approval()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let original = RuntimeConfigurationIdentity {
+            authoring_project_id: ProjectId::new(),
+            course_id: None,
+            release_id: ReleaseId::new(),
+            release_version: 1,
+            configuration_sha256: "a".repeat(64),
+            permission_projection_sha256: Some("b".repeat(64)),
+            template_family_id: Some("same-family".into()),
+            authoring_approval_id: None,
+            teacher_scope: None,
+        };
+        let mut current = original.clone();
+        current.release_id = ReleaseId::new();
+        current.release_version = 2;
+        current.configuration_sha256 = "c".repeat(64);
+        assert!(original.validate_compatible(&current).is_ok());
+        for changed in [
+            RuntimeConfigurationIdentity {
+                permission_projection_sha256: Some("d".repeat(64)),
+                ..current.clone()
+            },
+            RuntimeConfigurationIdentity {
+                template_family_id: Some("foreign".into()),
+                ..current.clone()
+            },
+            RuntimeConfigurationIdentity {
+                authoring_project_id: ProjectId::new(),
+                ..current.clone()
+            },
+            RuntimeConfigurationIdentity {
+                teacher_scope: Some(CourseTeacherApprovalScope {
+                    actor_id: ActorId::new(),
+                    course_id: CourseId::new(),
+                    membership_revision: Revision::new(1)?,
+                }),
+                ..current.clone()
+            },
+        ] {
+            assert_eq!(
+                original.validate_compatible(&changed),
+                Err(RuntimeAuthorizationError::ConfigurationMismatch)
+            );
+        }
+        let mut legacy_json = serde_json::to_value(&original)?;
+        legacy_json
+            .as_object_mut()
+            .ok_or("identity")?
+            .remove("permissionProjectionSha256");
+        let legacy: RuntimeConfigurationIdentity = serde_json::from_value(legacy_json)?;
+        assert_eq!(
+            legacy.validate_compatible(&current),
+            Err(RuntimeAuthorizationError::ReapprovalRequired)
+        );
+        Ok(())
     }
 
     #[test]

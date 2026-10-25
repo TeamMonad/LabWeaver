@@ -947,8 +947,19 @@ async fn candidate_publication_fixture(
             project_owner,
         )
         .await?;
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].withdrawal, Some(withdrawal));
+    // The funded Work journey also publishes real upgrade targets in this course.
+    assert_eq!(
+        listed
+            .iter()
+            .filter(|view| view.release.id == release.id)
+            .count(),
+        1
+    );
+    let original = listed
+        .iter()
+        .find(|view| view.release.id == release.id)
+        .ok_or("original release missing")?;
+    assert_eq!(original.withdrawal, Some(withdrawal));
     for subject in [
         contracts::events::subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED,
         contracts::events::subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN,

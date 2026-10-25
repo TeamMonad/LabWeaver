@@ -175,13 +175,46 @@ pub(super) async fn exercise(
     ))
     .await?;
     let mut subscription = nats.subscribe("funded-lease-verify").await?;
-    let mut access_requests = nats.subscribe("unused-access-revoke").await?;
+    let mut access_requests = nats
+        .subscribe(contracts::access::ACCESS_REVOCATION_SUBJECT)
+        .await?;
     let revocations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_revocations = Arc::clone(&revocations);
+    let revocation_mode = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let observed_mode = Arc::clone(&revocation_mode);
+    let revoked_environment = handoff.environment_id;
+    let access_responder = nats.clone();
     let access_probe = tokio::spawn(async move {
-        while access_requests.next().await.is_some() {
+        while let Some(message) = access_requests.next().await {
+            use contracts::access::{
+                ACCESS_REVOCATION_SUBJECT, AccessRevocationReason, AccessRevocationRequest,
+                AccessRevocationResponse,
+            };
+            assert_eq!(message.subject.as_str(), ACCESS_REVOCATION_SUBJECT);
+            let input: AccessRevocationRequest = contracts::parse_strict_json(&message.payload)?;
+            assert_eq!(input.version, 1);
+            assert_eq!(input.environment_id, revoked_environment);
+            assert_eq!(input.reason, AccessRevocationReason::EnvironmentRestarted);
             observed_revocations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let reply = message.reply.ok_or("Access reply missing")?;
+            let mode = observed_mode.load(std::sync::atomic::Ordering::SeqCst);
+            if mode == 2 {
+                continue;
+            }
+            let response = AccessRevocationResponse {
+                version: 1,
+                environment_id: if mode == 1 {
+                    contracts::EnvironmentId::new()
+                } else {
+                    input.environment_id
+                },
+                environment_revision: input.environment_revision,
+                access_revocation_revision: input.environment_revision,
+            };
+            let payload = serde_json::to_vec(&response)?;
+            access_responder.publish(reply, payload.into()).await?;
         }
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
     nats.flush().await?;
     let responder = nats.clone();
@@ -220,7 +253,7 @@ pub(super) async fn exercise(
             store.clone(),
             releases,
             environment_service::NatsAccessRevoker::new(
-                "unused-access-revoke".into(),
+                contracts::access::ACCESS_REVOCATION_SUBJECT.into(),
                 nats.clone(),
                 Duration::from_secs(2),
             )?,
@@ -474,6 +507,7 @@ pub(super) async fn exercise(
         usage_identity: authority.usage_identity.clone(),
         revocations,
         executor_failure,
+        revocation_mode,
     };
     Box::pin(exercise_execution(
         pool, resource, &store, &admission, &instance, &grant, &http,
@@ -745,6 +779,7 @@ struct LifecycleHttp {
     usage_identity: auth::ServiceIdentity,
     revocations: Arc<std::sync::atomic::AtomicUsize>,
     executor_failure: Option<super::ExecutorFailure>,
+    revocation_mode: Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl LifecycleHttp {
@@ -853,6 +888,7 @@ async fn exercise_execution(
     let calls = Arc::new(AtomicUsize::new(0));
     let reject_next_restart = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut registry = environment_service::ProviderRegistry::default();
+    let mut container_provider = None;
     let projections = PgReleaseProjectionStore::new(pool.clone());
     let resolved = projections
         .resolve(instance.release_id, instance.release_version)
@@ -901,7 +937,9 @@ async fn exercise_execution(
             &resolved,
             environment_service::ReconcileAction::Validate,
         )?;
-        registry.register(Arc::new(provider))?;
+        let provider = Arc::new(provider);
+        container_provider = Some(provider.clone());
+        registry.register(provider)?;
     } else {
         vm_boundary::register(
             &mut registry,
@@ -1115,10 +1153,20 @@ async fn exercise_execution(
     if container {
         let restarted = if instance.class == contracts::authoring::EnvironmentClass::Work {
             Box::pin(upgrade_guards::exercise(
-                pool, store, admission, &worker, &restarted, http, &calls,
+                pool,
+                store,
+                admission,
+                &worker,
+                &restarted,
+                http,
+                &calls,
+                &reject_next_restart,
+                container_provider.as_deref().ok_or("container provider")?,
             ))
             .await
-            .map_err(|error| std::io::Error::other(format!("C-stage upgrade admission: {error}")))?
+            .map_err(|error| {
+                std::io::Error::other(format!("compatible upgrade admission: {error}"))
+            })?
         } else {
             restarted
         };

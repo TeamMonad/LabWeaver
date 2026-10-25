@@ -97,7 +97,7 @@
                       severity="error"
                     />
                     <RouterLink
-                      v-if="retryDiagnostic.code === 'LW_RUNTIME_LEASE_NOT_ACTIVE' && data.class === 'work'"
+                      v-if="requiresNewResourceRequest(retryDiagnostic.code) && data.class === 'work'"
                       class="outlined-button small"
                       data-testid="retry-lease-new-request-link"
                       :to="{ path: '/researcher/resources', query: { projectId: data.projectId, releaseId: data.releaseId, releaseVersion: String(data.releaseVersion) } }"
@@ -138,6 +138,7 @@ import { useEnvironmentEntryContext } from '@/composables/useEnvironmentEntry'
 import { formatTimestamp } from '@/utils/format'
 import { environmentOperationKindLabel, environmentOperationStateLabel } from '@/utils/stateLabels'
 import { operationStatusDescription } from '@/utils/environmentLifecycle'
+import { requiresNewResourceRequest } from '@/types/async'
 
 /** 异步操作与诊断：当前操作、取消、失败说明和操作时间线。 */
 defineProps<{ data: EnvironmentInstanceSchema }>()

@@ -80,6 +80,18 @@ Control 在现有完整 `AuthoringApproval` 中保存实际课程教师及其成
 
 Resource 在现有 `ResourceApproval` 内保存 `runtimeAuthorization`。它绑定请求 ID、代次、付款项目、实际课程、目标 release、配置身份、运行权限及已验证 applied 的 revision 和哈希。审批事务在写入 claim、lease 和 Outbox 前重新检查。幂等摘要包含这份绑定。商业审批没有该字段时不授予运行权限。
 
+兼容 Container Work 模板升级使用批准内的 `configuration.permissionProjectionSha256` 和
+`templateFamilyId`：Control 是发布、撤回和模板族的事实来源，Resource 重新计算目标的
+`EnvironmentSpec::permission_projection()`，要求资源、网络、安全、入口、provider 和端口全部相等，
+并保持原 teacher_scope、permissions、平台策略 revision/SHA 与 request/claim/lease 身份。
+release ID/version 和完整配置 SHA 保留为原批准审计身份，不再单独阻止同族兼容 Work 升级。
+Experiment 与 VM 仍要求原精确 release；资源/权限变化不能借旧批准执行。
+
+cutover 不改历史批准：缺少投影的旧批准读取为旧格式，但在任何新的授权检查中 fail-closed，
+返回 `LW_RUNTIME_AUTHORIZATION_REAPPROVAL_REQUIRED` 和重新提交资源申请的中文原因。
+不新增历史投影表或回填迁移；v1 可在另行授权的维护窗口清空重建，普通启动不能清空。
+
+
 项目预授权只匹配相同项目。课程预授权只适用于该课程已获完整教师批准的 Experiment。付款项目仍检查请求者的当前项目动作，课程仍检查当前成员。无关课程、任务或他人的 Work 不能借用这份批准。平台允许清单始终是上限，教师批准不能扩大它。
 
 当前 `EnvironmentSpec` 只声明 NonRootRequired 和禁止提权。运行授权因此只包含空 capabilities 和非特权基线；不会把预授权清单的最大权限复制给实例。#207 扩展同一安全声明并接入执行消费者后，需更新本模块的穷尽投影。额外 capabilities、privileged 执行和超范围审批尚不能据此开放。

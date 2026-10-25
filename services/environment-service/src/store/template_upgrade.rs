@@ -8,7 +8,7 @@ use contracts::events::{ReleasePublished, subjects};
 use contracts::http::{
     EnvironmentOperationAccepted, IdempotencyKey, UpgradeEnvironmentTemplateRequest,
 };
-use contracts::{ActorId, CandidateId, EnvironmentId, OperationId, Revision};
+use contracts::{ActorId, EnvironmentId, OperationId, Revision};
 use persistence_sqlx::{Domain, IdempotencyDecision, IdempotencyStore, Sha256Digest};
 use sqlx::{Postgres, Row, Transaction};
 
@@ -36,8 +36,6 @@ pub enum TemplateUpgradeError {
     TargetNotNewer,
     #[error("LW_WORK_TEMPLATE_UPGRADE_REQUIRES_RESOURCE_APPROVAL")]
     RequiresResourceApproval,
-    #[error("LW_WORK_TEMPLATE_UPGRADE_UNAVAILABLE")]
-    UpgradeUnavailable,
     #[error("LW_WORK_TEMPLATE_UPGRADE_RELEASE_UNAVAILABLE")]
     ReleaseUnavailable,
 }
@@ -58,9 +56,6 @@ impl TemplateUpgradeError {
             Self::TargetNotNewer => "请选择比当前固定版本更新的已发布模板。",
             Self::RequiresResourceApproval => {
                 "新模板改变了资源、网络、安全策略或连接入口；现有资源授权不覆盖这些变化，请重新申请资源。原 Work 与数据未更改。"
-            }
-            Self::UpgradeUnavailable => {
-                "本版本暂不支持在原资金租约上升级 Work 模板。请新建 Work 并自行迁移数据，确认迁移完成后再释放旧 Work。原 Work 的模板、工作目录和运行实例未更改。"
             }
             Self::ReleaseUnavailable => {
                 "模板不存在、已撤回或版本身份不匹配，不能升级。原 Work 与数据未更改。"
@@ -102,27 +97,8 @@ fn validate_intent(
 }
 
 fn same_family(source: &ReleasePublished, target: &ReleasePublished) -> bool {
-    match (
-        &source.release.manual_approval,
-        &target.release.manual_approval,
-    ) {
-        (Some(source), Some(target)) => source.template_family_id == target.template_family_id,
-        (None, None) => {
-            source.release.candidate_id.is_some()
-                && source.release.candidate_id == target.release.candidate_id
-        }
-        (Some(manual), None) | (None, Some(manual)) => {
-            let candidate = if source.release.manual_approval.is_none() {
-                source.release.candidate_id
-            } else {
-                target.release.candidate_id
-            };
-            manual
-                .template_family_id
-                .strip_prefix("candidate-")
-                .is_some_and(|id| id.parse::<CandidateId>().ok() == candidate)
-        }
-    }
+    matches!((source.release.template_family_id(), target.release.template_family_id()),
+        (Some(source), Some(target)) if source == target)
 }
 
 fn validate_compatibility(
@@ -145,32 +121,16 @@ fn validate_compatibility(
     if !same_family(source, target) {
         return Err(TemplateUpgradeError::FamilyMismatch);
     }
-    let old = &source.environment_spec;
-    let new = &target.environment_spec;
-    let (
-        EnvironmentRuntimeSpec::Container {
-            provider_binding: old_provider,
-            service_port: old_port,
-            ..
-        },
-        EnvironmentRuntimeSpec::Container {
-            provider_binding: new_provider,
-            service_port: new_port,
-            ..
-        },
-    ) = (&old.runtime, &new.runtime)
+    let EnvironmentRuntimeSpec::Container {
+        provider_binding, ..
+    } = &target.environment_spec.runtime
     else {
         return Err(TemplateUpgradeError::ScopeDenied);
     };
-    // Resource's original approval remains immutable. An upgrade cannot mint extra resource or
-    // network/security rights, change PVC bindings, or leave stale non-Deployment objects behind.
-    if old.resources != new.resources
-        || old.network != new.network
-        || old.security != new.security
-        || old.entries != new.entries
-        || old_provider != new_provider
-        || old_port != new_port
-        || new_provider != &instance.provider_binding
+    // The same exhaustive projection is hashed by Resource at approval and every fresh check.
+    if source.environment_spec.permission_projection()
+        != target.environment_spec.permission_projection()
+        || provider_binding != &instance.provider_binding
     {
         return Err(TemplateUpgradeError::RequiresResourceApproval);
     }
