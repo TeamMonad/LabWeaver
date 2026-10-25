@@ -129,7 +129,7 @@ WAL、base backup 的 ObjectStore、插件和 ScheduledBackup 已渲染到独立
 
    旧 NATS StatefulSet 的 `podManagementPolicy=OrderedReady` 也不能原地修改为 Parallel，会明确触发 `PLATFORM_FOUNDATION_HA_NATS_CUTOVER_REQUIRED_RETAIN_PVCS`。在同一获准窗口完成 StatefulSet 切换并保留原 PVC；角色不自动删除 stream 或卷。单节点开发保持原 OrderedReady，不受 HA 调度策略变更影响。
 
-   身份入口同样拒绝已有 `StatefulSet/identity-postgres` 或旧 `Service/identity-postgres`，返回 `IDENTITY_CNPG_CUTOVER_REQUIRED_NO_AUTOMATIC_DATA_DELETION`。在单独授权的身份数据切换窗口先保全已有账号/realm 数据，再处理旧对象并创建新 CNPG；角色不会删除 StatefulSet、PVC、旧 Service 或复制旧 PGDATA，也不会保留旧名称别名。未完成数据切换时不要执行新身份全量 reconcile，不能把空库初始化当作迁移。先执行 platform foundation（CNPG/Barman/Ceph），再执行 identity foundation，最后部署依赖身份的应用。
+   身份入口同样拒绝已有 `StatefulSet/identity-postgres` 或旧 `Service/identity-postgres`，返回 `IDENTITY_CNPG_CUTOVER_REQUIRED_NO_AUTOMATIC_DATA_DELETION`。仅在另行授权的**空数据切换窗口**执行[身份库切换步骤](runbook.md#身份库空数据切换仅限另行授权窗口)：停止 Keycloak 写入、保全对象及旧 PVC、删除旧 StatefulSet/Service、重建凭据 Secret，再初始化新 CNPG；按该节验证或回退。`initdb` 创建新库，不迁移旧账号/realm；保留 PVC 不会自动导入身份数据。角色本身不删除旧对象或复制 PGDATA。先执行 platform foundation（CNPG/Barman/Ceph），再执行 identity foundation，最后部署依赖身份的应用。
 4. 部署后核对三个 Ceph mon、pool size/min_size/host、CNPG 三实例与同步/quorum、NATS 三成员及每条 stream 副本。读探针或 manifests 渲染不能代替写入后故障恢复。
 5. 在独立 `labweaver-ha-*` Kind 中可以检查 CNPG/JetStream 调度与协议，不能以同一宿主的三容器证明物理三节点容灾。不要操作 `labweaver-local-*`。Ceph 需要真实块设备，本机没有为此授权的裸盘时不安装 Rook、不伪造 OSD。
 6. 在后续授权窗口记录实际确认写入、单节点故障、quorum 丢失、分区、接近满/满盘、旧节点 fencing、独立备份恢复、实际 RPO/RTO。未完成前 #205 的硬件故障和恢复验收保持未完成。

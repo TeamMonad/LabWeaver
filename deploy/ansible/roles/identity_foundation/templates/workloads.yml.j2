@@ -17,7 +17,7 @@ kind: Deployment
 metadata: {name: {{ identity_name }}, namespace: {{ identity_namespace }}}
 spec:
   replicas: {{ identity_keycloak_replicas }}
-  strategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 0, maxSurge: 1}}
+  strategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 1, maxSurge: 0}}
   selector: {matchLabels: {app.kubernetes.io/name: {{ identity_name }}}}
   template:
     metadata: {labels: {app.kubernetes.io/name: {{ identity_name }}, app.kubernetes.io/part-of: labweaver-identity}}
@@ -75,7 +75,10 @@ spec:
             - {name: database-ca, mountPath: /etc/identity-postgres-ca, readOnly: true}
       volumes:
         - {name: realm, configMap: {name: identity-realm-bootstrap}}
-        - {name: database-ca, secret: {secretName: identity-postgres-ca}}
+        - name: database-ca
+          secret:
+            secretName: identity-postgres-ca
+            items: [{key: ca.crt, path: ca.crt}]
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
