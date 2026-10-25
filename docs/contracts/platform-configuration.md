@@ -76,6 +76,11 @@ JSON 使用 `application/json`。高级 YAML 使用 `application/yaml`。两个�
 
 配置解析验证声明、支持范围和 scope，不证明节点已经专用或 VM guest 可用。当前普通 Container 消费者会重新核对原对象授权、同一 verified applied 版本及资金租约后投影实际 UID/capabilities；保存 desired 本身不会放宽 namespace 标签。运行时仅调整 Environment 自己创建的 Namespace 的 PSA，既有 Namespace 策略不覆盖。专用执行位置声明仍不是 privileged/DinD 的执行实现；VM guest 特权位置、不支持的能力与未授权组合继续拒绝。仅有 namespace 也不构成宿主执行隔离边界。
 
+实例的 `allowPrivilegeEscalation=true` 不属于普通运行支持范围，不能因默认 UID 为 root 或 scope 预授权而
+放开。缺省/false/null 只对应规范化 false；唯一 Rust spec 语义校验负责拒绝 true，Provider 不做静默降权。
+执行器还使用同一可信 spec、receipt 和部署配置重建完整 Pod/Deployment/Namespace 对象集合逐一比较，
+而非只相信请求中的安全上下文或 PSA 标签；平台配置和权限回执都不授予任意对象补丁能力。
+
 `runtimePolicy` 与 `builderPolicy` 独立。更改特权运行或 runtime capabilities 不会增加 builder capabilities、提权或 entitlements。`impact` 比较 desired 与最后验证的 applied，分别提示运行、构建和生命周期设置变化。它不提供虚构的受影响资源数量。
 
 ## 应用与失败恢复

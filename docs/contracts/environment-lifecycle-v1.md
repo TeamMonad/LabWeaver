@@ -120,7 +120,7 @@ Access 的 `0008_funded_experiment_console_fence.sql` 将控制台能力的租�
 | `runAsUser` | `null` 消费同一已验证平台版本的 `defaultContainerUid`；平台默认值为 `0`。显式 `0` 表示容器 root，`1..4294967294` 原样使用；保留 UID `4294967295` 被拒绝。 |
 | `privileged` | 默认 `false`；当前 `true` 明确拒绝。root 不等于 privileged，也不开放 DinD。 |
 | `capabilities` | 默认空集合；始终 `drop: [ALL]`，只把本版本实际声明且获准的能力加入 `add`。平台允许清单是上限，不是自动授予实例的最大权限。 |
-| `allowPrivilegeEscalation` | 默认 `false`，与 UID、capabilities 和 rootfs 独立声明并按原规格投影。 |
+| `allowPrivilegeEscalation` | 仅支持 `false` 或 `null`；缺省及 `null` 归一化为 `false`。`true` 在唯一 Rust spec 语义校验中拒绝，Provider 不能静默改为 false 执行。root、capabilities 和 rootfs 声明均不能绕过此限制。 |
 | `readOnlyRootFilesystem` | 默认 `false`，允许容器系统目录临时可写；显式 `true` 投影为只读 rootfs，不等于整个 Work 磁盘只读保留。 |
 | `seccomp` | 默认且当前仅支持 `runtime_default`；`unconfined` 被拒绝。 |
 
@@ -140,6 +140,17 @@ Environment 自己创建的运行 Namespace 使用 PSA `enforce=baseline`（能�
 获准集合。这个 PSA 标签不是特权执行授权，不改变平台、Evaluation 或 builder 所在空间，也不给用户
 或运行 Pod Kubernetes API 权限。运行 ServiceAccount 不自动挂载 token，不增补 RBAC；宿主 namespace、
 hostPath、平台凭据和额外设备不会因 root/capabilities 自动开放。既有 namespace 模式不改管理员的 PSA。
+
+在会产生计算的命令执行前，持久 executor 不只比较 `securityContext`，也不信任调用方重算的计划摘要。
+它用可信不可变 spec/release、同一 verified receipt 和部署配置调用现有唯一投影，重建当前动作应有的
+完整对象集合，再按对象身份逐一精确比较。Pod/Deployment 的命令和参数、环境、工作目录、安全上下文、
+init/sidecar、ServiceAccount 与 token 挂载、卷及挂载、宿主 namespace/网络设置，以及 Namespace PSA
+等都属于这份完整安全面；未声明字段、额外对象、缺少对象或任何漂移都会在 Kubernetes 副作用前拒绝。
+只读观察、纯停止/回收仍沿其各自协议与 fence，不因此取得新运行权限。
+
+`allowPrivilegeEscalation=true` 的拒绝由 Rust spec 语义校验这一真源完成；显式 `false` 和输入 `null`
+得到同一规范化 false 投影。Provider/Executor 不能把不支持的 true 静默钳制为 false，也不能通过相同
+securityContext 放行带有 hostPath、额外 init container、宿主 namespace 或更宽 PSA 的其他对象字段。
 
 普通容器 rootfs 的安装和系统修改仍是临时层，`/workspace` 持久盘与其分开；需要保存软件环境时走
 现有模板/镜像构建流程，不把停止后保盘理解为保留系统层。权限声明也不会增加 builder 的 capabilities、

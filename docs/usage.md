@@ -133,8 +133,10 @@ VM Work 不支持原地模板升级：服务端返回 `LW_WORK_TEMPLATE_UPGRADE_
 - 普通容器仍为 `privileged=false`，默认不添加 capabilities，先丢弃全部能力，再只加入本次声明且获准的
   集合。`NET_ADMIN` 等能力必须在平台可执行清单和允许范围内，并通过相应对象/课程或项目授权；
   `ALL`、未知能力及 `SYS_ADMIN`、`BPF` 等广泛内核能力不能用来绕过拒绝。
-- `allowPrivilegeEscalation` 默认关闭；`readOnlyRootFilesystem` 默认关闭，因此普通容器系统目录可以临时
-  写入。二者与 UID 分开表达，不会因为使用 root 自动打开提权。seccomp 保持 `runtime_default`，不支持关闭。
+- `allowPrivilegeEscalation` 只接受 `false` 或 `null`（缺省或 `null` 统一按 `false`）；普通切片在 Rust
+  配置语义校验中明确拒绝 `true`，不会由 Provider 静默改成 `false` 后执行。使用 root 也不例外。
+  `readOnlyRootFilesystem` 默认关闭，因此普通容器系统目录可以临时写入；它与 UID 分开表达。
+  seccomp 保持 `runtime_default`，不支持关闭。
 - 容器系统层的安装和改动不等于持久化工作文件。`/workspace` 仍是独立工作盘；需要保留软件环境时，
   使用已有的模板/镜像构建流程。停止保盘不代表保存临时系统层，也不提供七天回收站或导入导出。
 
@@ -143,6 +145,11 @@ VM Work 不支持原地模板升级：服务端返回 `LW_WORK_TEMPLATE_UPGRADE_
 `privileged=true`，也不给工作负载 Kubernetes API 权限；平台服务、Evaluation 和 builder 不随之提权。
 使用管理员预置运行空间时，平台不会修改其安全策略；不符合该空间准入的配置会失败，请联系管理员核对，
 不要自行放宽整个集群或添加宿主挂载。实际能力还受镜像、安全模块和运行集群约束，字段存在不是实机验收。
+
+执行器会从可信模板规格、同版本运行授权回执和部署配置重建该动作应有的完整对象，并逐对象比较，
+包括 Pod/Deployment 的命令、环境、卷挂载、安全设置和 Namespace PSA；请求自报的 `securityContext`
+或摘要不能单独授权执行。对象缺失、多出或被改宽会在 Kubernetes 写入前拒绝。若旧配置声明了
+`allowPrivilegeEscalation=true`，应修正为支持的配置并重新走原版本/权限流程；平台不改写旧声明来降权运行。
 
 创建、启动、重启、重置及会产生计算的恢复都会重新核对原运行权限和资金覆盖。管理员保存 desired 后，必须按正常流程
 验证 applied 版本才会用于新运行授权；旧批准不会悄悄取得新默认 UID 或更大的能力范围。权限失败时先查看

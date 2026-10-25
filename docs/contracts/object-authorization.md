@@ -96,6 +96,11 @@ cutover 不改历史批准：缺少投影的旧批准读取为旧格式，但在
 
 `EnvironmentSpec.security` 分别声明 `runAsUser`、`privileged`、`capabilities`、`allowPrivilegeEscalation`、`readOnlyRootFilesystem` 和 `seccomp`。运行权限从本版本实际声明的 capabilities 与非特权模式穷尽投影，不能把平台允许清单或 scope 预授权的最大能力复制给实例；完整规格的 canonical 身份同时约束 UID、rootfs、提权和 seccomp。`runAsUser=null` 只消费同一 verified applied receipt 的 `defaultContainerUid`，不得拼接另一版本默认值。当前普通容器支持 root 和获准的有限 capabilities，但仍拒绝 privileged、unconfined seccomp 与更广内核权限；VM 不因此取得容器权限。声明增加、版本变化或平台换版都须重新经过原授权判定，不自动扩大旧批准。
 
+普通切片的 `allowPrivilegeEscalation` 只接受 `false`/`null`，缺省和 null 均规范为 false；true 由唯一
+Rust spec 语义校验拒绝，而不是由 Provider 降权执行。消费授权时，executor 从可信 spec/release、同版本
+receipt 与部署配置重新生成该动作的完整预期对象并逐对象比较，包括完整 Pod/Deployment 安全面与
+Namespace PSA；请求自带摘要或单个 securityContext 相等都不能代替完整计划一致性。
+
 `GET /api/v1/resource-requests/{requestId}/runtime-authorization` 通过现有 Access 服务鉴权及用户范围返回当前有效绑定，使用 `Cache-Control: no-store`。它重新读取当前请求、未过期的原 ResourceApproval、当前成员、Control 配置和已验证策略。请求换代、配置换版、发布撤回或范围失效会拒绝读取。已验证 applied 版本变更使旧绑定返回 `LW_RUNTIME_POLICY_CHANGED`，需要按新版本重新判定。desired 草稿不使旧绑定失效。响应不能替代 #207 在实际创建和实例换代时的检查。
 
 未验证策略或授权输入不可用返回 503。无实际教师批准、成员范围不符或超出平台允许范围返回 403。旧绑定或配置不匹配返回 409。停止与恢复仍检查对象动作；恢复过程若创建新实例，#207 必须重新检查新准入。

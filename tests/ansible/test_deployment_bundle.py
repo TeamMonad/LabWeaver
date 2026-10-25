@@ -499,6 +499,33 @@ class DeploymentBundleTests(unittest.TestCase):
                     bundle.load_bundle(self.root)
 
     def test_runtime_policy_is_preserved_without_platform_pod_or_rbac_escalation(self) -> None:
+        helm = shutil.which("helm")
+        self.assertIsNotNone(helm, "The pinned Helm renderer is required for runtime isolation tests.")
+
+        def render_objects(loaded: Path) -> list[dict]:
+            rendered = subprocess.run(
+                [helm, "template", "labweaver", str(bundle.WORKLOADS_FILE.parent),
+                 "--namespace", "labweaver-system", "--values", str(loaded / "helm-values.yaml")],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(rendered.returncode, 0, rendered.stderr)
+            return [item for item in yaml.safe_load_all(rendered.stdout) if item]
+
+        recipient = self.key()
+        baseline_archive = self.directory / "baseline-runtime-policy.age"
+        bundle.seal_bundle(self.root, baseline_archive, [recipient], self.runtime)
+        with bundle.opened_bundle(baseline_archive, self.identity, self.runtime) as (_, loaded, _):
+            baseline_objects = render_objects(loaded)
+        self.clean_runtime()
+        baseline_deployments = {
+            item["metadata"]["name"]: item for item in baseline_objects if item["kind"] == "Deployment"
+        }
+        security_kinds = {"Namespace", "ServiceAccount", "Role", "ClusterRole", "RoleBinding", "ClusterRoleBinding"}
+        baseline_security = {
+            (item["kind"], item["metadata"].get("namespace"), item["metadata"]["name"]): item
+            for item in baseline_objects if item["kind"] in security_kinds
+        }
         self.configuration["runtimePolicy"].update(
             defaultContainerUid=1000,
             allowedCapabilities=["NET_ADMIN", "NET_RAW"],
@@ -509,24 +536,35 @@ class DeploymentBundleTests(unittest.TestCase):
             }],
         )
         self.save_version()
-        bundle.seal_bundle(self.root, self.archive, [self.key()], self.runtime)
+        bundle.seal_bundle(self.root, self.archive, [recipient], self.runtime)
         with bundle.opened_bundle(self.archive, self.identity, self.runtime) as (_, loaded, _):
             values = yaml.safe_load((loaded / "helm-values.yaml").read_bytes())
             self.assertEqual(values["platformConfigurationPolicy"]["runtimePolicy"], self.configuration["runtimePolicy"])
             self.assertEqual(values["platformConfigurationPolicy"]["builderPolicy"], self.configuration["builderPolicy"])
-            helm = shutil.which("helm")
-            self.assertIsNotNone(helm, "The pinned Helm renderer is required for runtime isolation tests.")
-            rendered = subprocess.run(
-                [helm, "template", "labweaver", str(bundle.WORKLOADS_FILE.parent),
-                 "--namespace", "labweaver-system", "--values", str(loaded / "helm-values.yaml")],
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(rendered.returncode, 0, rendered.stderr)
-            objects = [item for item in yaml.safe_load_all(rendered.stdout) if item]
+            objects = render_objects(loaded)
+            security_objects = [item for item in objects if item["kind"] in security_kinds]
+            actual_security = {
+                (item["kind"], item["metadata"].get("namespace"), item["metadata"]["name"]): item
+                for item in security_objects
+            }
+            self.assertEqual(len(actual_security), len(security_objects), "duplicate security object identity")
+            self.assertEqual(actual_security, baseline_security)
             deployments = {item["metadata"]["name"]: item for item in objects if item["kind"] == "Deployment"}
+            self.assertEqual(set(deployments), set(baseline_deployments))
             for name in ("build-executor", "environment-service", "container-executor", "kubevirt-executor"):
                 with self.subTest(workload=name):
+                    self.assertEqual(deployments[name]["metadata"], baseline_deployments[name]["metadata"])
+                    actual_spec = copy.deepcopy(deployments[name]["spec"])
+                    baseline_spec = copy.deepcopy(baseline_deployments[name]["spec"])
+                    annotations = actual_spec["template"]["metadata"]["annotations"]
+                    self.assertEqual(annotations["labweaver.io/platform-policy-sha256"], self.version["configurationSha256"])
+                    self.assertEqual(annotations["labweaver.io/configuration-bundle-sha256"], values["deploymentIdentity"]["configurationBundleSha256"])
+                    # Only the two authenticated policy/source digests change. Compare the entire
+                    # Deployment/Pod spec, not a hand-picked securityContext or hostPath subset.
+                    for spec in (actual_spec, baseline_spec):
+                        for key in ("labweaver.io/platform-policy-sha256", "labweaver.io/configuration-bundle-sha256"):
+                            spec["template"]["metadata"]["annotations"].pop(key)
+                    self.assertEqual(actual_spec, baseline_spec)
                     pod = deployments[name]["spec"]["template"]["spec"]
                     security = pod["containers"][0]["securityContext"]
                     self.assertTrue(pod["securityContext"]["runAsNonRoot"])
