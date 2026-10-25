@@ -159,11 +159,11 @@ describe('BFF browser session', () => {
   })
 })
 
-function sessionOf(actorId: string) {
+function sessionOf(actorId: string, expiresAt = '2099-01-01T00:00:00.000Z') {
   return new Response(JSON.stringify({
-    actor: { actorId, roles: ['student'], expiresAt: '2099-01-01T00:00:00.000Z' },
+    actor: { actorId, roles: ['student'], expiresAt },
     authorizationRevision: 1,
-    expiresAt: '2099-01-01T00:00:00.000Z',
+    expiresAt,
     scopes: [{ kind: 'global' }],
   }), { status: 200, headers: { 'content-type': 'application/json' } })
 }
@@ -203,6 +203,27 @@ describe('BFF session epoch (#198)', () => {
     // First sign-in, same actor again, temporarily unknown, same actor, actor B, signed out.
     expect(epochs).toEqual([0, 0, 0, 0, 1, 2])
     expect(auth.user.value).toBeNull()
+  })
+
+  it('ends the epoch when the session expires and starts another once it is valid again', async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(sessionOf(actorA))
+      .mockResolvedValueOnce(sessionOf(actorA, '2000-01-01T00:00:00.000Z'))
+      .mockResolvedValueOnce(sessionOf(actorA))
+    vi.stubGlobal('fetch', fetch)
+    const { useAuth } = await import('@/composables/useAuth')
+    const { sessionEpoch, sessionActor } = await import('@/api/session')
+    const auth = useAuth()
+    const epochs: number[] = []
+    for (let read = 0; read < 3; read += 1) {
+      await auth.loadUser()
+      epochs.push(sessionEpoch.value)
+    }
+
+    // Signed in, expired (same actor), valid again.
+    expect(epochs).toEqual([0, 1, 2])
+    expect(auth.isAuthenticated.value).toBe(true)
+    expect(sessionActor()).toBe(actorA)
   })
 
   it('does not let a session read that started earlier overwrite the newer actor', async () => {

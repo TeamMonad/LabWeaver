@@ -45,6 +45,14 @@ watch(() => actorIdFromProfile(user.value?.profile), (actorId, previous) => {
   recordSessionActor(actorId)
 }, { flush: 'sync' })
 
+// An expired session has ended even though its actor is unchanged: end the
+// epoch so nothing read under it decides a page, and start a new one when a
+// valid session is read again. Unlike a sign-out, the actor's unconfirmed
+// commands are kept, so the same actor can resume them after signing in again.
+watch(() => user.value?.expired === true, (expired) => {
+  recordSessionActor(expired ? null : actorIdFromProfile(user.value?.profile))
+}, { flush: 'sync' })
+
 /** The session is known to have ended: the server said so or the user signed out. */
 function confirmSignedOut() {
   user.value = null

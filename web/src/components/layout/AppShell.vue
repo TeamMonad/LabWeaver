@@ -26,6 +26,21 @@
         <span>正在确认项目…</span>
       </div>
       <section
+        v-else-if="context.state.value.kind === 'signed-out'"
+        class="project-context-error"
+        aria-labelledby="project-context-signed-out-title"
+        data-testid="project-context-signed-out"
+      >
+        <h1 id="project-context-signed-out-title">需要重新登录</h1>
+        <p>登录已失效，或暂时无法确认当前登录账号。为避免显示或操作其他账号的数据，本页暂不打开。</p>
+        <div>
+          <button type="button" class="filled-button" @click="auth.login()">
+            <SvgIcon name="login" size="sm" aria-hidden="true" />
+            <span>重新登录</span>
+          </button>
+        </div>
+      </section>
+      <section
         v-else-if="context.state.value.kind === 'list-error'"
         class="project-context-error"
         aria-labelledby="project-context-error-title"
@@ -60,6 +75,8 @@ import TopAppBar from './TopAppBar.vue'
 import NavigationDrawer from './NavigationDrawer.vue'
 import ProjectContextRecovery from './ProjectContextRecovery.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
+import SvgIcon from '@/components/common/SvgIcon.vue'
+import { useAuth } from '@/composables/useAuth'
 import { useProjectContextSync } from '@/composables/useProjectContext'
 import { sessionEpoch } from '@/api/session'
 import { useThemeStore } from '@/stores/theme'
@@ -70,6 +87,7 @@ const appMain = ref<HTMLElement | null>(null)
 const drawerOpen = ref(false)
 const drawerRail = ref(false)
 const context = useProjectContextSync()
+const auth = useAuth()
 const viewKey = computed(() => {
   const state = context.state.value
   return `${sessionEpoch.value}:${state.kind === 'ready' ? `project:${state.project.id}` : 'global'}`
