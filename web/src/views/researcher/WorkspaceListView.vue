@@ -374,6 +374,7 @@ import { useProjectWorkEnvironments } from '@/composables/useProjectWorkEnvironm
 import { useProjectResources } from '@/composables/useProjectResources'
 import { useAuth } from '@/composables/useAuth'
 import { useProjectAvailableActions } from '@/composables/useProjectAvailableActions'
+import { projectSwitchLocation } from '@/composables/useProjectContext'
 import { useOrganizationDirectoryUsers, useProjectMemberships, useProjects } from '@/composables/useProjects'
 import type { OrganizationUser, ProjectMembershipSchema, ProjectSchema } from '@/generated/contracts'
 import { formatTimestamp } from '@/utils/format'
@@ -496,18 +497,20 @@ watch(
   { immediate: true },
 )
 
+// Another project became current (this list, the top-bar selector or a new
+// project): the address follows it without the previous project's object ids.
 watch(
   () => projects.selectedProjectId,
   (projectId) => {
     if (!projectId || routeProjectInvalid.value || route.query.projectId === projectId) return
-    void router.replace({ query: { ...route.query, projectId } })
+    void router.replace(projectSwitchLocation(route.path, route.query, projectId))
   },
 )
 
 function selectProject(projectId: string) {
   projects.select(projectId)
   if (route.query.projectId !== projectId) {
-    void router.replace({ query: { ...route.query, projectId } })
+    void router.replace(projectSwitchLocation(route.path, route.query, projectId))
   }
 }
 
