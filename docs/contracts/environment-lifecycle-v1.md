@@ -152,6 +152,13 @@ init/sidecar、ServiceAccount 与 token 挂载、卷及挂载、宿主 namespace
 得到同一规范化 false 投影。Provider/Executor 不能把不支持的 true 静默钳制为 false，也不能通过相同
 securityContext 放行带有 hostPath、额外 init container、宿主 namespace 或更宽 PSA 的其他对象字段。
 
+Provider 与 container executor 共用 `ContainerProviderConfiguration.project_plan`，不另建一份权限表或简化
+投影。Helm 仅为 container-executor 添加 `container-projection` 只读卷，来源是 environment-service 已有
+ConfigMap 的 `providers.json`；目录挂载为 `/etc/labweaver/container-projection`，只投影该 key。
+模板独占 `LABWEAVER_ENVIRONMENT_PROVIDER_BINDINGS_PATH=/etc/labweaver/container-projection/providers.json`，
+拒绝 workload env/secretEnv 覆盖（即使 env 重复填写相同路径也不接受）。该文件提供同一部署输入，
+不是第二份 profile、策略或授权，不能替代原 spec、receipt、资金覆盖与 Kubernetes 对象归属检查。
+
 普通容器 rootfs 的安装和系统修改仍是临时层，`/workspace` 持久盘与其分开；需要保存软件环境时走
 现有模板/镜像构建流程，不把停止后保盘理解为保留系统层。权限声明也不会增加 builder 的 capabilities、
 提权或 entitlements。

@@ -875,6 +875,66 @@ class DeploymentBundleTests(unittest.TestCase):
                 self.assertIn(dependency, executor_secret)
         self.clean_runtime()
 
+    def test_container_projection_mount_reuses_owner_providers_and_rejects_overrides(self) -> None:
+        variable = "LABWEAVER_ENVIRONMENT_PROVIDER_BINDINGS_PATH"
+        projection_file = "/etc/labweaver/container-projection/providers.json"
+        helm = shutil.which("helm")
+        self.assertIsNotNone(helm, "The pinned Helm renderer is required for shared projection tests.")
+        bundle.seal_bundle(self.root, self.archive, [self.key()], self.runtime)
+        with bundle.opened_bundle(self.archive, self.identity, self.runtime) as (_, loaded, _):
+            values_path = loaded / "helm-values.yaml"
+            values = yaml.safe_load(values_path.read_bytes())
+            command = [
+                helm, "template", "labweaver", str(bundle.WORKLOADS_FILE.parent),
+                "--namespace", "labweaver-system", "--values", str(values_path),
+            ]
+            rendered = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(rendered.returncode, 0, rendered.stderr)
+            objects = [item for item in yaml.safe_load_all(rendered.stdout) if item]
+            deployments = {item["metadata"]["name"]: item for item in objects if item["kind"] == "Deployment"}
+            owner_pod = deployments["environment-service"]["spec"]["template"]["spec"]
+            owner_config = next(volume for volume in owner_pod["volumes"] if volume["name"] == "config")["configMap"]["name"]
+            executor_pod = deployments["container-executor"]["spec"]["template"]["spec"]
+            executor = executor_pod["containers"][0]
+            controlled_env = [entry for entry in executor["env"] if entry["name"] == variable]
+            self.assertEqual(controlled_env, [{"name": variable, "value": projection_file}])
+            mount = next(item for item in executor["volumeMounts"] if item["name"] == "container-projection")
+            self.assertEqual(mount, {
+                "name": "container-projection",
+                "mountPath": "/etc/labweaver/container-projection",
+                "readOnly": True,
+            })
+            volume = next(item for item in executor_pod["volumes"] if item["name"] == "container-projection")
+            self.assertEqual(volume["configMap"], {
+                "name": owner_config,
+                "items": [{"key": "providers.json", "path": "providers.json"}],
+            })
+            application = [item for item in yaml.safe_load_all((loaded / "application.yaml").read_bytes()) if item]
+            source = next(item for item in application if item["kind"] == "ConfigMap" and item["metadata"]["name"] == owner_config)
+            provider_ref = self.model["application"]["configMaps"][owner_config]["providers.json"]
+            self.assertEqual(source["data"]["providers.json"].encode(), (self.root / provider_ref).read_bytes())
+            mounted_by = {
+                name for name, deployment in deployments.items()
+                if any(item["name"] == "container-projection"
+                       for container in deployment["spec"]["template"]["spec"]["containers"]
+                       for item in container.get("volumeMounts", []))
+            }
+            self.assertEqual(mounted_by, {"container-executor"})
+            for field, value in (
+                ("env", projection_file),
+                ("env", "/tmp/foreign-providers.json"),
+                ("secretEnv", {"secret": "foreign-providers", "key": "providers.json"}),
+            ):
+                with self.subTest(field=field, value=value):
+                    overridden = copy.deepcopy(values)
+                    overridden["workloadInputs"]["container-executor"][field][variable] = value
+                    override_path = loaded / "projection-override.yaml"
+                    write(override_path, yaml.safe_dump(overridden, sort_keys=False).encode())
+                    rejected = subprocess.run(command[:-1] + [str(override_path)], capture_output=True, text=True)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertIn(variable, rejected.stderr)
+        self.clean_runtime()
+
     def test_encrypted_bundle_owns_optional_container_placement_for_owner_and_executor(self) -> None:
         profile_ref = "config/runtime/container-placement/profile.json"
         profile = (REPOSITORY / "deploy/config/container-placement.json.example").read_bytes()
