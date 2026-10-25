@@ -243,7 +243,11 @@ async fn real_access_notification_read_is_csrf_protected_and_idempotent()
             request
         };
         let response = request.send().await?;
-        assert_eq!(response.status(), StatusCode::FORBIDDEN, "Origin: {origin:?}");
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "Origin: {origin:?}"
+        );
         let count: Value = browser
             .get(&count_url)
             .send()
