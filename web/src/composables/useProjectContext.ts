@@ -98,6 +98,12 @@ export function useProjectContext() {
     }
     const listed = items.find((project) => project.id === requested)
     if (listed) return { kind: 'ready', project: listed }
+    // Pages after the loaded prefix are still unread: a failed page is a list
+    // error whose retry continues locating, and pages still being followed are
+    // loading; neither is a verdict on the project.
+    if (projects.locating === requested) {
+      return projects.loadMoreError ? { kind: 'list-error', diagnostic: projects.loadMoreError } : { kind: 'loading' }
+    }
     const current = probe.value
     const checked = current?.projectId === requested && current.list === toRaw(settled) ? current.result : 'checking'
     if (checked === 'checking') {
@@ -151,6 +157,9 @@ export function useProjectContextSync() {
         if (items.some((project) => project.id === requested)) {
           listRefreshedFor = null
           if (projects.selectedProjectId !== requested) projects.select(requested)
+        } else if (projects.locating === requested) {
+          // Pages are still being followed for it (or a page failed and waits
+          // for a retry); only a listed target or the end of the list settles it.
         } else if (listRefreshedFor !== requested) {
           // The project may sit on a later page or the list may predate a
           // membership change; reload and follow the pages once before asking why.
@@ -182,7 +191,8 @@ export function useProjectContextSync() {
     { immediate: true },
   )
 
-  return { ...context, reloadProjects: () => projects.load() }
+  // After a failed locate page the retry continues from that page; otherwise reload the list.
+  return { ...context, reloadProjects: () => projects.locating && projects.loadMoreError ? projects.loadMore() : projects.load() }
 }
 
 /** Address of the same page in another project, without the previous project's object ids. */

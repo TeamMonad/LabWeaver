@@ -31,6 +31,13 @@
     </section>
 
     <DiagnosticBanner
+      v-if="locatePending && projects.loadMoreError"
+      :diagnostic="projects.loadMoreError"
+      severity="warning"
+      data-testid="policy-project-locate-error"
+      @retry="projects.loadMore()"
+    />
+    <DiagnosticBanner
       v-if="projectContextUnavailable"
       code="PROJECT_CONTEXT_UNAVAILABLE"
       message="链接中的项目不存在或你无权访问，已停止加载项目 AI 设置。请从项目与工作空间重新选择。"
@@ -209,14 +216,17 @@ const routeProjectId = computed(() => {
   const projectId = Array.isArray(value) ? value[0] : value
   return typeof projectId === 'string' && projectId.trim() ? projectId.trim() : undefined
 })
+// The linked project is still being looked for on unread pages (or a page failed and waits for a retry).
+const locatePending = computed(() => Boolean(routeProjectId.value) && projects.locating === routeProjectId.value)
 const projectContextUnavailable = computed(() => Boolean(
   routeProjectId.value
+  && !locatePending.value
   && projects.projects.kind === 'success'
   && !projectOptions.value.some((project) => project.id === routeProjectId.value),
 ))
 const selectedProjectId = computed<string | null>({
   get: () => {
-    if (projectContextUnavailable.value) return null
+    if (projectContextUnavailable.value || locatePending.value) return null
     if (routeProjectId.value) return projects.projects.kind === 'success' ? routeProjectId.value : null
     return projects.selectedProjectId
   },
@@ -417,9 +427,13 @@ watch(
     if (state.kind !== 'success') return
     // The admin route is not project-scoped, so the shell does not follow the
     // cursor for a linked project; follow it here before reporting it unavailable.
-    if (requestedProjectId && projects.hasMore && !state.data.some((project) => project.id === requestedProjectId)) {
-      void projects.locate(requestedProjectId)
-      return
+    if (requestedProjectId && !state.data.some((project) => project.id === requestedProjectId)) {
+      // A failed page keeps the target; its retry continues the same locate.
+      if (projects.locating === requestedProjectId) return
+      if (projects.hasMore) {
+        void projects.locate(requestedProjectId)
+        return
+      }
     }
     const preferred = requestedProjectId
       ? state.data.find((project) => project.id === requestedProjectId)?.id

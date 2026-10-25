@@ -44,7 +44,8 @@ async fn fixture() -> TestResult<(
         pool.clone(),
         Arc::new(FixtureObjects { fail_second: false }),
         control_config()?,
-    )?;
+    )?
+    .with_cursor_signing_keys(vec![0x71; 32], None)?;
     let now = UtcTimestamp::from_utc(
         sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
             .fetch_one(&pool)
@@ -766,7 +767,7 @@ async fn projects_cursor_survives_metadata_updates_and_rechecks_visibility() -> 
         service
             .list_projects(outsider.actor_id, false, &query)
             .await,
-        Err(ControlError::ContractInvalid)
+        Err(ControlError::CursorInvalid)
     ));
     // A visible non-owner project disappears on the next page after membership revocation.
     let shared = project(&service, &outsider, now, "shared-revocable").await?;
@@ -867,7 +868,7 @@ async fn project_members_cursor_survives_concurrent_insert_delete_and_revocation
         service
             .project_memberships(other_project, owner.actor_id, false, &query)
             .await,
-        Err(ControlError::ContractInvalid)
+        Err(ControlError::CursorInvalid)
     ));
     // The caller is a regular member; current persisted permission fences old cursors.
     let caller = new_member.actor_id;
@@ -941,7 +942,7 @@ async fn course_members_cursor_survives_concurrent_insert_delete_and_revocation(
         service
             .course_memberships(&teacher, CourseId::new(), &query)
             .await,
-        Err(ControlError::ContractInvalid)
+        Err(ControlError::CursorInvalid)
     ));
     sqlx::query("UPDATE control.course_memberships SET state='revoked',revision=revision+1 WHERE course_id=$1 AND actor_id=$2")
         .bind(course.as_uuid()).bind(teacher.actor_id.as_uuid()).execute(&pool).await?;
@@ -1097,13 +1098,13 @@ async fn invitation_cursor_case(course_scope: bool, incoming: bool) -> TestResul
             service
                 .incoming_membership_invitations(&outsider, &query)
                 .await,
-            Err(ControlError::ContractInvalid)
+            Err(ControlError::CursorInvalid)
         ));
         assert!(matches!(
             service
                 .scoped_membership_invitations(&governor, &scope, &query)
                 .await,
-            Err(ControlError::ContractInvalid)
+            Err(ControlError::CursorInvalid)
         ));
         sqlx::query("UPDATE access.actors SET disabled_at=clock_timestamp() WHERE actor_id=$1")
             .bind(recipient.actor_id.as_uuid())
@@ -1131,7 +1132,7 @@ async fn invitation_cursor_case(course_scope: bool, incoming: bool) -> TestResul
             service
                 .scoped_membership_invitations(&governor, &other_scope, &query)
                 .await,
-            Err(ControlError::ContractInvalid)
+            Err(ControlError::CursorInvalid)
         ));
         match scope {
             MembershipInvitationScope::Project { project_id, .. } => {
@@ -1167,4 +1168,192 @@ async fn course_invitations_cursor_survives_concurrent_insert_delete_and_revocat
 async fn incoming_invitations_cursor_survives_concurrent_insert_delete_and_account_disable()
 -> TestResult {
     invitation_cursor_case(false, true).await
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CursorAttackPayload {
+    version: u8,
+    key_id: String,
+    id: uuid::Uuid,
+    scope: serde_json::Value,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct CursorAttackEnvelope {
+    cursor: CursorAttackPayload,
+    signature: String,
+}
+
+fn decode_attack_cursor(value: &str) -> TestResult<CursorAttackEnvelope> {
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(value)?;
+    let cursor: CursorAttackEnvelope = serde_json::from_slice(&bytes)?;
+    assert_eq!(
+        serde_json::to_vec(&cursor)?,
+        bytes,
+        "attack keeps canonical serialization so rejection cannot rely on encoding alone"
+    );
+    Ok(cursor)
+}
+
+fn encode_attack_cursor(value: &CursorAttackEnvelope) -> TestResult<String> {
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(value)?))
+}
+
+fn assert_cursor_http_400<T>(result: Result<T, ControlError>) -> TestResult {
+    use axum::response::IntoResponse as _;
+    let error = result.err().ok_or("a forged/reused cursor must fail")?;
+    assert!(matches!(error, ControlError::CursorInvalid));
+    assert_eq!(
+        control_service::api::ApiError::from(error)
+            .into_response()
+            .status(),
+        axum::http::StatusCode::BAD_REQUEST
+    );
+    Ok(())
+}
+
+async fn signed_member_page_fixture() -> TestResult<(
+    ContainerAsync<Postgres>,
+    PgPool,
+    ControlService,
+    AuthenticatedActor,
+    ProjectId,
+    ProjectId,
+    contracts::membership_governance::ProjectMembershipPage,
+)> {
+    let (container, pool, service, now) = fixture().await?;
+    let owner = actor(&pool, "signed-page-owner", vec![PlatformRole::Student], now).await?;
+    let project_id = project(&service, &owner, now, "signed-page-project").await?;
+    let other_project = project(&service, &owner, now, "signed-page-other").await?;
+    for index in 0..3 {
+        let member = actor(
+            &pool,
+            &format!("signed-member-{index}"),
+            vec![PlatformRole::Student],
+            now,
+        )
+        .await?;
+        service
+            .add_project_membership(
+                project_id,
+                owner.actor_id,
+                false,
+                &ResolvedProjectMembershipRequest {
+                    actor_id: member.actor_id,
+                    role: PlatformRole::Student,
+                    object_role: ProjectObjectRole::Viewer,
+                    expires_at: None,
+                },
+                &IdempotencyKey::parse(&format!("signed-member-{index}"))?,
+                now,
+            )
+            .await?;
+    }
+    let first = service
+        .project_memberships(project_id, owner.actor_id, false, &page_query(None, 2))
+        .await?;
+    assert!(first.next_cursor.is_some());
+    Ok((
+        container,
+        pool,
+        service,
+        owner,
+        project_id,
+        other_project,
+        first,
+    ))
+}
+
+#[tokio::test]
+async fn signed_control_cursor_rejects_modified_boundary_with_http_400() -> TestResult {
+    let (_container, _pool, service, owner, project_id, _other, first) =
+        signed_member_page_fixture().await?;
+    let value = first.next_cursor.ok_or("cursor missing")?;
+    let mut attack = decode_attack_cursor(&value)?;
+    attack.cursor.id = uuid::Uuid::nil();
+    let query = page_query(Some(encode_attack_cursor(&attack)?), 2);
+    assert_cursor_http_400(
+        service
+            .project_memberships(project_id, owner.actor_id, false, &query)
+            .await,
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn signed_control_cursor_rejects_recomputed_public_scope_digest_with_http_400() -> TestResult
+{
+    use sha2::Digest as _;
+    let (_container, _pool, service, owner, _project_id, other, first) =
+        signed_member_page_fixture().await?;
+    let mut attack = decode_attack_cursor(first.next_cursor.as_deref().ok_or("cursor missing")?)?;
+    // Use the exact, currently authorized target scope and recompute an ordinary
+    // public SHA-256 digest. Neither the old scope-hash attack nor an unkeyed
+    // payload hash can substitute for the server's HMAC over the full payload.
+    attack.cursor.scope = serde_json::json!(("project-members", other, owner.actor_id, false));
+    attack.signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(sha2::Sha256::digest(serde_json::to_vec(&attack.cursor)?));
+    let query = page_query(Some(encode_attack_cursor(&attack)?), 2);
+    assert_cursor_http_400(
+        service
+            .project_memberships(other, owner.actor_id, false, &query)
+            .await,
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn signed_control_cursor_rejects_cross_endpoint_and_actor_with_http_400() -> TestResult {
+    let (_container, _pool, service, owner, project_id, _other, first) =
+        signed_member_page_fixture().await?;
+    let query = page_query(first.next_cursor, 2);
+    assert_cursor_http_400(service.list_projects(owner.actor_id, false, &query).await)?;
+    // The other actor is a live member with Browse: current permission is not
+    // enough to reuse a cursor issued to another actor.
+    let other_actor = first
+        .items
+        .iter()
+        .find(|member| member.actor_id != owner.actor_id)
+        .ok_or("other actor missing")?
+        .actor_id;
+    assert_cursor_http_400(
+        service
+            .project_memberships(project_id, other_actor, false, &query)
+            .await,
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn signed_control_cursor_continues_after_anchor_deletion() -> TestResult {
+    let (_container, pool, service, owner, project_id, _other, first) =
+        signed_member_page_fixture().await?;
+    let anchor = first.items.last().ok_or("anchor missing")?.actor_id;
+    sqlx::query("DELETE FROM control.project_memberships WHERE project_id=$1 AND actor_id=$2")
+        .bind(project_id.as_uuid())
+        .bind(anchor.as_uuid())
+        .execute(&pool)
+        .await?;
+    let next = service
+        .project_memberships(
+            project_id,
+            owner.actor_id,
+            false,
+            &page_query(first.next_cursor, 100),
+        )
+        .await?;
+    let expected: Vec<uuid::Uuid> = sqlx::query_scalar("SELECT actor_id FROM control.project_memberships WHERE project_id=$1 AND actor_id>$2 ORDER BY actor_id")
+        .bind(project_id.as_uuid()).bind(anchor.as_uuid()).fetch_all(&pool).await?;
+    assert!(!expected.is_empty());
+    assert_eq!(
+        next.items
+            .iter()
+            .map(|member| member.actor_id.as_uuid())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(next.next_cursor.is_none());
+    Ok(())
 }

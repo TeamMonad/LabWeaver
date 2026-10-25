@@ -346,6 +346,7 @@ impl ControlService {
         let page = ListPage::new(
             query,
             &("scoped-invitations", actor.actor_id, scope_key(scope)),
+            self.cursor_signing_keys.as_deref(),
         )?;
         let mut tx = self.pool.begin().await.map_err(db)?;
         let now = require_actor(&mut tx, actor).await?;
@@ -433,7 +434,11 @@ impl ControlService {
         actor: &AuthenticatedActor,
         query: &ControlListQuery,
     ) -> Result<MembershipInvitationPage, ControlError> {
-        let page = ListPage::new(query, &("incoming-invitations", actor.actor_id))?;
+        let page = ListPage::new(
+            query,
+            &("incoming-invitations", actor.actor_id),
+            self.cursor_signing_keys.as_deref(),
+        )?;
         let mut tx = self.pool.begin().await.map_err(db)?;
         let now = require_actor(&mut tx, actor).await?;
         let rows=sqlx::query("SELECT *,invitation_id AS cursor_id FROM control.membership_invitations WHERE recipient_actor_id=$1 AND ($3::uuid IS NULL OR invitation_id<$3) ORDER BY invitation_id DESC LIMIT $2").bind(actor.actor_id.as_uuid()).bind(i64::from(page.limit)+1).bind(page.after).fetch_all(&mut *tx).await.map_err(db)?;
@@ -655,7 +660,11 @@ impl ControlService {
         course_id: CourseId,
         query: &ControlListQuery,
     ) -> Result<CourseMembershipPage, ControlError> {
-        let page = ListPage::new(query, &("course-members", course_id, actor.actor_id))?;
+        let page = ListPage::new(
+            query,
+            &("course-members", course_id, actor.actor_id),
+            self.cursor_signing_keys.as_deref(),
+        )?;
         let mut tx = self.pool.begin().await.map_err(db)?;
         require_actor(&mut tx, actor).await?;
         if is_admin(actor) {

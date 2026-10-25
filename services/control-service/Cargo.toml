@@ -25,6 +25,7 @@ serde_yaml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+subtle.workspace = true
 sqlx.workspace = true
 telemetry = { path = "../../crates/telemetry" }
 thiserror.workspace = true

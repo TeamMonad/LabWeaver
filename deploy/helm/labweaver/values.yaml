@@ -97,6 +97,7 @@ workloads:
       LABWEAVER_SERVICE_JWKS_RETRY_SECONDS: "5"
       LABWEAVER_SERVICE_CLIENT_ID: labweaver-control
       LABWEAVER_SERVICE_CLIENT_SECRET_FILE: /etc/labweaver/secrets/service-client-secret
+      LABWEAVER_CURSOR_SIGNING_KEY_CURRENT_FILE: /etc/labweaver/secrets/cursor-signing-key-current
       LABWEAVER_SERVICE_SCOPES: agent.control.invoke,evaluation.control.invoke
       LABWEAVER_SERVICE_TOKEN_REFRESH_SKEW_SECONDS: "30"
     ports:

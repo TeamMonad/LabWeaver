@@ -13,7 +13,6 @@ import {
 import type {
   AddProjectMembershipRequestSchema,
   OrganizationUserPage,
-  ProjectPageSchema,
   ProjectMembershipSchema,
   ProjectSchema,
   UpdateProjectRequestSchema,
@@ -74,10 +73,10 @@ const selectedProjectId = ref<string | null>(persistedProjectId())
 const acting = ref<string | null>(null)
 const outcome = ref<ProjectMutationResult | null>(null)
 let loadGeneration = 0
-// A project the context asked to locate. Any reload that supersedes the
-// locating one (another component mounting, a mutation) keeps following the
-// pages for it until a load finishes.
-let locateTarget: string | null = null
+// A linked project the catalog is still following pages for. It stays wanted
+// across superseding reloads and failed pages, and is only dropped once it is
+// listed, the list ends, a listed project is selected or the session changes.
+const locatingProjectId = ref<string | null>(null)
 
 const selectedProject = computed<ProjectSchema | null>(() => {
   if (projects.value.kind !== 'success' || !selectedProjectId.value) return null
@@ -95,6 +94,59 @@ function preserveSelection(items: ProjectSchema[]) {
   }
 }
 
+/** Pages read by one load: the catalog prefix, the first unread cursor and why reading stopped early. */
+interface FollowedPages {
+  items: ProjectSchema[]
+  cursor: string | null
+  failure: DiagnosticViewModel | null
+}
+
+/**
+ * Read the page at `cursor` (the first page when null), then further pages
+ * while the current or located project is still unlisted. A failed page keeps
+ * what was read and its own cursor so a retry continues from there.
+ * Returns null when a newer reload superseded this one.
+ */
+async function followPages(generation: number, loaded: ProjectSchema[], cursor: string | null): Promise<FollowedPages | null> {
+  const targets = [selectedProjectId.value, locatingProjectId.value].filter((id): id is string => Boolean(id))
+  let items = loaded
+  let next = cursor
+  do {
+    const result = await listProjects({ query: pageQuery(next) })
+    if (generation !== loadGeneration) return null
+    if (result.error) {
+      const failure = next
+        ? diagnostic(result.error, 'PROJECT_LIST_MORE_FAILED', '加载更多项目失败')
+        : diagnostic(result.error, 'PROJECT_LIST_FAILED', '加载项目失败')
+      return { items, cursor: next, failure }
+    }
+    items = appendPage(items, result.data.items, (project) => project.id)
+    next = result.data.nextCursor ?? null
+  } while (next && targets.some((id) => !items.some((project) => project.id === id)))
+  return { items, cursor: next, failure: null }
+}
+
+function settlePages({ items, cursor, failure }: FollowedPages) {
+  loadingMoreProjects.value = false
+  if (failure && items.length === 0) {
+    // The first page failed. The locate target stays so the retry looks for it again.
+    projectsNextCursor.value = null
+    loadMoreProjectsError.value = null
+    projects.value = { kind: 'error', diagnostic: failure }
+  } else {
+    projectsNextCursor.value = cursor
+    loadMoreProjectsError.value = failure
+    // A partial catalog says nothing about the unread pages: keep the current
+    // selection and the locate target until the pages are read.
+    if (!failure) {
+      locatingProjectId.value = null
+      preserveSelection(items)
+    }
+    projects.value = items.length > 0 ? { kind: 'success', data: items } : { kind: 'empty' }
+  }
+  settledProjects.value = projects.value
+}
+
 /**
  * Reload the catalog from its first page. The current project and `wanted`
  * may sit on a later page; pages are followed until they are listed or the
@@ -102,41 +154,19 @@ function preserveSelection(items: ProjectSchema[]) {
  */
 async function loadProjects(wanted: string | null = null) {
   const generation = ++loadGeneration
-  if (wanted) locateTarget = wanted
+  if (wanted) locatingProjectId.value = wanted
   projects.value = { kind: 'loading', message: '加载项目…' }
   loadingMoreProjects.value = false
   loadMoreProjectsError.value = null
-  const targets = [selectedProjectId.value, locateTarget].filter((id): id is string => Boolean(id))
-  let items: ProjectSchema[] = []
-  let page: ProjectPageSchema = { items: [], nextCursor: null }
-  do {
-    const result = await listProjects({ query: pageQuery(page.nextCursor ?? null) })
-    if (generation !== loadGeneration) return
-    if (result.error) {
-      locateTarget = null
-      projectsNextCursor.value = null
-      projects.value = { kind: 'error', diagnostic: diagnostic(result.error, 'PROJECT_LIST_FAILED', '加载项目失败') }
-      settledProjects.value = projects.value
-      return
-    }
-    page = result.data
-    items = appendPage(items, page.items, (project) => project.id)
-  } while (page.nextCursor && targets.some((id) => !items.some((project) => project.id === id)))
-  locateTarget = null
-  const cursor = page.nextCursor ?? null
-  projectsNextCursor.value = cursor
-  if (items.length === 0) {
-    selectedProjectId.value = null
-    projects.value = { kind: 'empty' }
-    settledProjects.value = projects.value
-    return
-  }
-  preserveSelection(items)
-  projects.value = { kind: 'success', data: items }
-  settledProjects.value = projects.value
+  const followed = await followPages(generation, [], null)
+  if (followed) settlePages(followed)
 }
 
-/** Append the next server page to the loaded catalog. */
+/**
+ * Append the next server page to the loaded catalog. After a failed locate
+ * this is the retry: it continues from the failed page until the located
+ * project is listed or the list ends.
+ */
 async function loadMoreProjects() {
   const cursor = projectsNextCursor.value
   const loaded = projects.value
@@ -144,23 +174,15 @@ async function loadMoreProjects() {
   const generation = loadGeneration
   loadingMoreProjects.value = true
   loadMoreProjectsError.value = null
-  const result = await listProjects({ query: pageQuery(cursor) })
-  if (generation !== loadGeneration) return
-  loadingMoreProjects.value = false
-  if (result.error) {
-    loadMoreProjectsError.value = diagnostic(result.error, 'PROJECT_LIST_MORE_FAILED', '加载更多项目失败')
-    return
-  }
-  projectsNextCursor.value = result.data.nextCursor ?? null
-  projects.value = { kind: 'success', data: appendPage(loaded.data, result.data.items, (project) => project.id) }
-  settledProjects.value = projects.value
+  const followed = await followPages(generation, loaded.data, cursor)
+  if (followed) settlePages(followed)
 }
 
 // The previous actor's list must not decide the new actor's project context:
 // the AppShell waits for this actor's list before it renders a scoped page.
 watch(sessionEpoch, () => {
   settledProjects.value = { kind: 'idle' }
-  locateTarget = null
+  locatingProjectId.value = null
   void loadProjects()
 })
 
@@ -170,13 +192,15 @@ watch(sessionEpoch, () => {
  * when the API is unavailable.
  */
 export function useProjects() {
-  // Template handlers pass DOM events; `load` always restarts without a locate target.
+  // Template handlers pass DOM events; `load` never names a new locate target.
   async function load() {
     await loadProjects()
   }
 
   function select(projectId: string) {
     selectedProjectId.value = projectId
+    // A listed project is now the context; an earlier link no longer needs locating.
+    locatingProjectId.value = null
     if (typeof localStorage !== 'undefined') localStorage.setItem('labweaver_project_id', projectId)
     outcome.value = null
   }
@@ -268,6 +292,8 @@ export function useProjects() {
     hasMore: computed(() => projectsNextCursor.value !== null),
     loadingMore: loadingMoreProjects,
     loadMoreError: loadMoreProjectsError,
+    /** Linked project whose pages are still being followed (in flight or stopped by a failed page). */
+    locating: computed(() => locatingProjectId.value),
     selectedProjectId,
     selectedProject,
     acting,

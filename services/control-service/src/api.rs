@@ -3174,6 +3174,7 @@ impl ApiError {
 impl From<ControlError> for ApiError {
     fn from(error: ControlError) -> Self {
         let status = match error {
+            ControlError::CursorInvalid => StatusCode::BAD_REQUEST,
             ControlError::InvitationNotFound
             | ControlError::UploadNotFound
             | ControlError::CandidateNotFound
@@ -3196,6 +3197,7 @@ impl From<ControlError> for ApiError {
             | ControlError::SseCursorExpired
             | ControlError::PlatformImageUploadExpired => StatusCode::GONE,
             ControlError::TeacherApprovalDenied
+            | ControlError::ProjectGovernanceDenied
             | ControlError::InvitationDenied
             | ControlError::CourseGovernanceDenied
             | ControlError::CourseMismatch

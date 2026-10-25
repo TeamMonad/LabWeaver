@@ -45,6 +45,21 @@ existing infrastructure component.
 The checked-in `*.example` files document non-secret runtime configuration fields. They are not a
 deployable bundle and must not contain credentials.
 
+Control list cursors require `secrets/control-service-secrets/cursor-signing-key-current`,
+containing at least 32 cryptographically random bytes. The manifest requires this Secret,
+the workload mounts it read-only, and `LABWEAVER_CURSOR_SIGNING_KEY_CURRENT_FILE` names the
+mounted file. Missing, unreadable or short keys fail startup before opening external connections;
+Control has no built-in/default signing key. Local Kind rendering also generates random bytes.
+Keep the same Secret on all Control replicas and preserve it across ordinary restarts.
+
+For rotation, put the former bytes in the optional `cursor-signing-key-previous` Secret key and
+set Control `application.workloadInputs.control-service.env.LABWEAVER_CURSOR_SIGNING_KEY_PREVIOUS_FILE`
+to `/etc/labweaver/secrets/cursor-signing-key-previous` in the reviewed Bundle while installing a new
+current key. New cursors use only the current
+key; verification accepts current and explicitly mounted previous keys. Once the previous key is
+removed, its cursors return HTTP 400 and clients must reload the first page. Key files never enter
+ConfigMaps, source control or logs. Do not override the mounted key path with an inline secret.
+
 For the bounded existing-namespace Container Work profile, see
 [Environment lifecycle](../../docs/contracts/environment-lifecycle-v1.md#既有-namespace-运行落点).
 `container-placement.json.example` contains synthetic identifiers. To include this profile in

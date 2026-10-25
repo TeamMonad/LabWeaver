@@ -418,6 +418,7 @@ pub struct ControlService {
     config: ControlConfig,
     material_verification: Arc<tokio::sync::Semaphore>,
     loaded_platform_configuration: Option<Arc<platform_configuration::LoadedConfiguration>>,
+    cursor_signing_keys: Option<Arc<pagination::SigningKeys>>,
 }
 
 enum CompletionReservation {
@@ -458,7 +459,19 @@ impl ControlService {
             config,
             material_verification: Arc::new(tokio::sync::Semaphore::new(2)),
             loaded_platform_configuration: None,
+            cursor_signing_keys: None,
         })
+    }
+
+    /// Installs the mounted current and optional previous cursor signing Secrets.
+    /// List reads fail closed until keys are explicitly supplied; there is no default key.
+    pub fn with_cursor_signing_keys(
+        mut self,
+        current: Vec<u8>,
+        previous: Option<Vec<u8>>,
+    ) -> Result<Self, ControlError> {
+        self.cursor_signing_keys = Some(Arc::new(pagination::SigningKeys::new(current, previous)?));
+        Ok(self)
     }
 
     /// Attaches settings actually loaded at process startup from the private Bundle inputs.
@@ -592,7 +605,11 @@ impl ControlService {
         platform_admin: bool,
         query: &contracts::membership_governance::ControlListQuery,
     ) -> Result<contracts::membership_governance::ProjectPage, ControlError> {
-        let page = pagination::ListPage::new(query, &("projects", actor_id, platform_admin))?;
+        let page = pagination::ListPage::new(
+            query,
+            &("projects", actor_id, platform_admin),
+            self.cursor_signing_keys.as_deref(),
+        )?;
         let rows = sqlx::query(
             "SELECT p.contract,p.project_id AS cursor_id FROM control.projects p \
              WHERE ($2 OR p.owner_actor_id=$1 OR EXISTS( \
@@ -853,6 +870,7 @@ impl ControlService {
         let page = pagination::ListPage::new(
             query,
             &("project-members", project_id, actor_id, platform_admin),
+            self.cursor_signing_keys.as_deref(),
         )?;
         let mut tx = self.pool.begin().await.map_err(db)?;
         if !platform_admin
@@ -9362,6 +9380,8 @@ pub enum ControlError {
     ConfigurationInvalid,
     #[error("LW_CONTRACT_DOCUMENT_INVALID")]
     ContractInvalid,
+    #[error("LW_CONTRACT_DOCUMENT_INVALID")]
+    CursorInvalid,
     #[error("LW_IDEMPOTENCY_CONFLICT")]
     IdempotencyConflict,
     #[error("LW_OPERATION_IN_PROGRESS")]

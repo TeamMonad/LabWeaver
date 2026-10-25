@@ -126,6 +126,7 @@
       "oidc-ca.pem",
       "postgres-ca.pem",
       "service-client-secret",
+      "cursor-signing-key-current",
       "tls.crt",
       "tls.key",
       "portal-ca.pem"
@@ -197,6 +198,7 @@
     "container-placement-config": ["profile.json"]
   },
   "optionalSecrets": {
-    "agent-service-secrets": ["cursor-signing-key-previous"]
+    "agent-service-secrets": ["cursor-signing-key-previous"],
+    "control-service-secrets": ["cursor-signing-key-previous"]
   }
 }

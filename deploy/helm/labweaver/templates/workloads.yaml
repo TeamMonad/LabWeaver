@@ -179,7 +179,7 @@ spec:
             - name: LABWEAVER_EXECUTOR_CONTAINER_NAME
               value: {{ $name | quote }}
             {{- end }}
-            {{- if and (or (eq $name "agent-service") (eq $name "resource-service")) $root.Values.cursorSigningKeyPreviousFile }}
+            {{- if and (or (eq $name "control-service") (eq $name "agent-service") (eq $name "resource-service")) $root.Values.cursorSigningKeyPreviousFile }}
             - name: LABWEAVER_CURSOR_SIGNING_KEY_PREVIOUS_FILE
               value: {{ $root.Values.cursorSigningKeyPreviousFile | quote }}
             {{- end }}

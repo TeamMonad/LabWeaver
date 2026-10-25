@@ -121,6 +121,8 @@ const routeProjectId = computed(() => {
 const routeProjectUnavailable = computed(() => {
   const settled = projects.settledProjects
   if (!route?.meta.projectScoped || !routeProjectId.value) return false
+  // Unread pages may still list it (a failed page waits for its retry).
+  if (projects.locating === routeProjectId.value) return false
   if (settled.kind === 'empty') return true
   return settled.kind === 'success' && !settled.data.some((project) => project.id === routeProjectId.value)
 })
