@@ -255,6 +255,48 @@ describe('browser session changes (#198)', () => {
     expect(adapter).not.toHaveBeenCalled()
   })
 
+  it('holds a write while the identity is read and never sends it once that read finds another actor', async () => {
+    const { session, client, axios: transportAxios } = await freshTransport()
+    session.recordSessionActor('actor-a')
+    vi.spyOn(transportAxios, 'get').mockResolvedValue(csrfFor('actor-a', 'token-of-a'))
+    const api = client.createLabWeaverApiClient({ baseUrl: '/', authentication: { mode: 'bff' } })
+    const adapter = installSuccessfulAdapter(api)
+    const read = deferred()
+    session.trackIdentityRead(read.promise)
+
+    const staleForm = api.post({ url: '/api/v1/users/me/ssh-keys', body: { publicKey: 'A 的公钥' } })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(adapter).not.toHaveBeenCalled()
+
+    // The read answers: the cookie now belongs to actor B.
+    session.recordSessionActor('actor-b')
+    read.resolve()
+    const result = await staleForm
+    expect(result).toMatchObject({ diagnosticCode: 'LW_SDK_SESSION_CHANGED' })
+    expect(result.data).toBeUndefined()
+    expect(adapter).not.toHaveBeenCalled()
+  })
+
+  it('sends a held write once the identity read confirms the same actor', async () => {
+    const { session, client, axios: transportAxios } = await freshTransport()
+    session.recordSessionActor('actor-a')
+    vi.spyOn(transportAxios, 'get').mockResolvedValue(csrfFor('actor-a', 'token-of-a'))
+    const api = client.createLabWeaverApiClient({ baseUrl: '/', authentication: { mode: 'bff' } })
+    const adapter = installSuccessfulAdapter(api)
+    const read = deferred()
+    session.trackIdentityRead(read.promise)
+
+    const write = api.post({ url: '/api/v1/projects', body: { name: '项目' } })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(adapter).not.toHaveBeenCalled()
+
+    session.recordSessionActor('actor-a')
+    read.resolve()
+    expect((await write).error).toBeUndefined()
+    expect(adapter).toHaveBeenCalledOnce()
+    expect(adapter.mock.calls[0][0].headers['X-CSRF-Token']).toBe('token-of-a')
+  })
+
   it('discards a response the previous actor requested once the session epoch advances', async () => {
     const { session, client } = await freshTransport()
     const api = client.createLabWeaverApiClient({ baseUrl: '/', authentication: { mode: 'bearer', accessToken: async () => 'token' } })

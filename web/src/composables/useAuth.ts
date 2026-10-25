@@ -2,8 +2,15 @@ import { ref, computed, watch } from 'vue'
 import { UserManager, type User, WebStorageStateStore } from 'oidc-client-ts'
 import type { AuthSession, LogoutBrowserSessionResponse } from '@/generated/contracts'
 import { API_AUTH_MODE, DIRECT_OIDC_ENABLED, OIDC_CONFIG } from '@/config'
-import { recordSessionActor, registerSessionConfirmation } from '@/api/session'
-import { actorIdFromProfile } from '@/utils/navigation'
+import {
+  recordSessionActor,
+  registerSessionConfirmation,
+  resolveSessionActorDoubt,
+  sessionActorConfirming,
+  sessionActorInDoubt,
+  trackIdentityRead,
+} from '@/api/session'
+import { actorIdFromProfile, navigateTopLevel } from '@/utils/navigation'
 import { syncTrackedSubmissionOwner } from '@/utils/trackedSubmissions'
 import { syncPendingCommandOwner } from '@/utils/pendingCommands'
 
@@ -60,10 +67,6 @@ function confirmSignedOut() {
   recordSessionActor(null)
 }
 type TopLevelNavigate = (url: string) => void
-
-const navigateTopLevel: TopLevelNavigate = (url) => {
-  window.location.assign(url)
-}
 const SESSION_EXPIRED_MESSAGE = '登录已失效，请重新登录'
 
 function sessionExpiredError(diagnostic: string): Error {
@@ -110,6 +113,8 @@ function loadBffSession(): Promise<void> {
       if (latestSessionLoad !== load) return latestSessionLoad
       if (next) user.value = next
       else confirmSignedOut()
+      // The server answered who holds the session; a read that failed keeps any doubt.
+      resolveSessionActorDoubt()
     },
     (error: unknown) => {
       if (latestSessionLoad !== load) return latestSessionLoad
@@ -117,6 +122,7 @@ function loadBffSession(): Promise<void> {
     },
   )
   latestSessionLoad = load
+  trackIdentityRead(load)
   return load
 }
 
@@ -133,13 +139,14 @@ export async function getOidcAccessToken(): Promise<string | undefined> {
 }
 
 export function useAuth(navigate: TopLevelNavigate = navigateTopLevel) {
-  const isAuthenticated = computed(() => user.value?.expired === false)
+  // A session the server rejected is not trusted until an identity read answers.
+  const isAuthenticated = computed(() => user.value?.expired === false && !sessionActorInDoubt.value)
 
   async function login() {
     if (API_AUTH_MODE === 'bff') {
       const remembered = window.sessionStorage.getItem('auth-return-to')
       const returnTo = remembered || `${window.location.pathname}${window.location.search}${window.location.hash}`
-      window.location.assign(`/auth/login?return_to=${encodeURIComponent(returnTo)}`)
+      navigate(`/auth/login?return_to=${encodeURIComponent(returnTo)}`)
       return
     }
     if (!userManager) {
@@ -239,6 +246,8 @@ export function useAuth(navigate: TopLevelNavigate = navigateTopLevel) {
   return {
     user,
     isLoading,
+    /** The identity read that follows a server rejection is still in flight. */
+    isConfirming: sessionActorConfirming,
     error,
     isAuthenticated,
     login,

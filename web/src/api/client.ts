@@ -6,7 +6,7 @@ import { createClient, type Client } from '@/generated/contracts/client'
 import { client as defaultSdkClient } from '@/generated/contracts/client.gen'
 import type { ServerSentEventsOptions, ServerSentEventsResult } from '@/generated/contracts/core/serverSentEvents.gen'
 import { REQUEST_ID_HEADER, rememberHeaderRequestId } from './requestId'
-import { reportSessionRejected, sessionActor, sessionCredentialVersion, sessionEpoch, sessionEpochSignal } from './session'
+import { identityReadsSettled, reportSessionRejected, sessionActor, sessionCredentialVersion, sessionEpoch, sessionEpochSignal } from './session'
 
 export type AccessTokenProvider = () => Promise<string | undefined>
 /** A CSRF token and the actor of the BFF session that issued it. */
@@ -172,6 +172,10 @@ function attachAuthInterceptor(instance: AxiosInstance, authentication: LabWeave
         config.headers.Authorization = `Bearer ${token}`
       }
     } else if (isUnsafeMethod(config.method)) {
+      // A write waits until no identity read is in flight. If that read finds
+      // another actor, the epoch has moved and the write is refused below
+      // without being sent: it belonged to the previous actor.
+      await identityReadsSettled()
       const csrf = await csrfToken?.()
       if (!csrf) {
         throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current BFF CSRF token is required.')

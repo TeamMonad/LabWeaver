@@ -95,8 +95,10 @@ export function useProjectContext() {
 
   const state = computed<ProjectContextState>(() => {
     if (!scoped.value) return { kind: 'unscoped' }
-    // Never decide from a list read for an actor that is no longer confirmed.
-    if (!actorConfirmed.value) return auth.isLoading.value ? { kind: 'loading' } : { kind: 'signed-out' }
+    // Never decide from a list read for an actor that is no longer confirmed:
+    // the session expired, its read failed, or the server rejected it and the
+    // identity is being read again (or that read failed in transit).
+    if (!actorConfirmed.value) return auth.isLoading.value || auth.isConfirming.value ? { kind: 'loading' } : { kind: 'signed-out' }
     const settled = projects.settledProjects
     const requested = routeProjectId.value
     if (settled.kind === 'idle' || settled.kind === 'loading') return { kind: 'loading' }

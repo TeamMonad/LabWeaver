@@ -12,9 +12,11 @@ import { readonly, ref } from 'vue'
  *
  * Writes are bound to their actor by the server: a CSRF token is valid only
  * for the session that issued it, and the transport sends a write only with a
- * token issued to the actor the request started with. A CSRF or session
- * rejection retires cached tokens and reads the actor again; the rejected
- * request itself is never replayed, the user decides whether to submit again.
+ * token issued to the actor the request started with, and only once no
+ * identity read is in flight. A CSRF or session rejection puts the actor in
+ * doubt at once (pages that act for it close), retires cached tokens and reads
+ * the actor again; the rejected request itself is never replayed, the user
+ * decides whether to submit again.
  */
 const epoch = ref(0)
 let epochEnded = new AbortController()
@@ -54,6 +56,39 @@ let rejections = 0
 let confirmSession: (() => Promise<void>) | null = null
 let confirming: Promise<void> | null = null
 
+// From the moment the server rejects this tab's session or CSRF token until an
+// identity read answers, the current actor is in doubt: pages that act for it
+// stay closed. A read that fails in transit keeps the doubt. Neither the epoch
+// nor the actor's unconfirmed commands change: the read decides that.
+const actorInDoubt = ref(false)
+const confirmingActor = ref(false)
+
+/** Whether the server rejected the session and no identity read has answered since. */
+export const sessionActorInDoubt = readonly(actorInDoubt)
+/** Whether the identity read that follows a rejection is still in flight. */
+export const sessionActorConfirming = readonly(confirmingActor)
+
+/** An identity read answered (with an actor or a confirmed sign-out): the doubt is resolved. */
+export function resolveSessionActorDoubt(): void {
+  actorInDoubt.value = false
+}
+
+let identityRead: Promise<unknown> | null = null
+
+/** Records the identity read now in flight; writes wait for it before they are sent. */
+export function trackIdentityRead(read: Promise<unknown>): void {
+  identityRead = read
+  read.then(
+    () => { if (identityRead === read) identityRead = null },
+    () => { if (identityRead === read) identityRead = null },
+  )
+}
+
+/** Resolves once no identity read is in flight, whatever the reads answered. */
+export async function identityReadsSettled(): Promise<void> {
+  while (identityRead) await identityRead.catch(() => undefined)
+}
+
 /** Installs how the current actor is read again. */
 export function registerSessionConfirmation(confirm: () => Promise<void>): void {
   confirmSession = confirm
@@ -62,12 +97,17 @@ export function registerSessionConfirmation(confirm: () => Promise<void>): void 
 /** The server rejected the session or its CSRF token: cached tokens are stale and the actor is read again. */
 export function reportSessionRejected(): void {
   rejections += 1
-  if (!confirmSession || confirming) return
+  if (!confirmSession) return
+  // Synchronously, so nothing renders for the actor before the read starts.
+  actorInDoubt.value = true
+  if (confirming) return
+  confirmingActor.value = true
   confirming = confirmSession()
-    // A failed read keeps the current identity; the next rejection reads again.
+    // A failed read keeps the identity in doubt; the next rejection or read asks again.
     .catch(() => undefined)
     .finally(() => {
       confirming = null
+      confirmingActor.value = false
     })
 }
 

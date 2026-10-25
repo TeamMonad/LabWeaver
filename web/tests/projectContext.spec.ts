@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { defineComponent, h } from 'vue'
+import { defineComponent, h, nextTick } from 'vue'
 import { createMemoryHistory, createRouter, type RouteRecordRaw, type Router } from 'vue-router'
 import type * as Contracts from '@/generated/contracts'
+import type * as Navigation from '@/utils/navigation'
 // Each test re-imports the shell after vi.resetModules() so module-level
 // project state starts fresh. Loading the graph once here moves the cold
 // transform of the shell and its layout components into file collection,
@@ -12,6 +13,7 @@ import '@/components/layout/AppShell.vue'
 
 const listProjects = vi.hoisted(() => vi.fn())
 const getProject = vi.hoisted(() => vi.fn())
+const navigateTopLevel = vi.hoisted(() => vi.fn())
 
 // Partial: the shell also mounts SDK consumers outside the project context
 // (the unread notification count); they keep the real functions over the
@@ -21,16 +23,23 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
   return { ...actual, listProjects, getProject }
 })
 
+// jsdom cannot leave the page: record where a top-level navigation would go.
+vi.mock('@/utils/navigation', async (importOriginal) => {
+  const actual = await importOriginal<typeof Navigation>()
+  return { ...actual, navigateTopLevel }
+})
+
 const projectA = { id: 'project-a', name: '项目 A', state: 'active', revision: 1, ownerActorId: 'u', createdAt: '', updatedAt: '' }
 const projectB = { id: 'project-b', name: '项目 B', state: 'active', revision: 1, ownerActorId: 'u', createdAt: '', updatedAt: '' }
 
 const actorA = '01900000-0000-7000-8000-00000000000a'
+const actorB = '01900000-0000-7000-8000-00000000000b'
 const VALID_UNTIL = '2099-01-01T00:00:00.000Z'
 
-function sessionResponse(signedIn: boolean, expiresAt = VALID_UNTIL) {
+function sessionResponse(signedIn: boolean, expiresAt = VALID_UNTIL, actorId = actorA) {
   if (!signedIn) return new Response(JSON.stringify({ status: 401 }), { status: 401, headers: { 'content-type': 'application/problem+json' } })
   return new Response(JSON.stringify({
-    actor: { actorId: actorA, roles: ['teacher'], expiresAt },
+    actor: { actorId, roles: ['teacher'], expiresAt },
     authorizationRevision: 1,
     expiresAt,
     scopes: [{ kind: 'global' }],
@@ -64,7 +73,7 @@ async function mountShell(path: string, { signedIn = true, awaitList = true, rou
   vi.stubGlobal('fetch', fetch)
   const { default: AppShell } = await import('@/components/layout/AppShell.vue')
   const { useAuth } = await import('@/composables/useAuth')
-  const { sessionEpoch } = await import('@/api/session')
+  const session = await import('@/api/session')
   const { trackPendingNavigation } = await import('@/utils/pendingNavigation')
   const router = createRouter({ history: createMemoryHistory(), routes: routeTable })
   // As in the app router: installed before any guard that waits.
@@ -84,7 +93,7 @@ async function mountShell(path: string, { signedIn = true, awaitList = true, rou
   const load = useProjects().load()
   if (awaitList) await load
   await flushPromises()
-  return { wrapper, router, projects: useProjects(), auth, fetch, sessionEpoch }
+  return { wrapper, router, projects: useProjects(), auth, fetch, session, sessionEpoch: session.sessionEpoch }
 }
 
 /** The project list stays unanswered until the test answers it. */
@@ -129,6 +138,8 @@ describe('AppShell project context', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     localStorage.clear()
+    sessionStorage.clear()
+    navigateTopLevel.mockReset()
     mounts = 0
     listProjects.mockReset()
     getProject.mockReset()
@@ -160,14 +171,26 @@ describe('AppShell project context', () => {
 
   it('keeps a role-protected project page behind the sign-in gate when nobody is signed in', async () => {
     listProjects.mockResolvedValue(problem(401, 'LW_AUTH_SESSION_REJECTED'))
-    const { wrapper } = await mountShell('/researcher/environments?projectId=project-a', { signedIn: false })
+    // The address a web-history router keeps in the browser bar for this page.
+    window.history.replaceState(null, '', '/researcher/environments?projectId=project-a')
+    try {
+      const { wrapper } = await mountShell('/researcher/environments?projectId=project-a', { signedIn: false })
 
-    const gate = wrapper.get('[data-testid="project-context-signed-out"]')
-    expect(gate.text()).toContain('需要重新登录')
-    expect(gate.get('button').text()).toContain('重新登录')
-    expect(wrapper.find('.scoped-page').exists()).toBe(false)
-    expect(mounts).toBe(0)
-    expect(document.title).toBe('需要重新登录 · Work 环境 · LabWeaver')
+      const gate = wrapper.get('[data-testid="project-context-signed-out"]')
+      expect(gate.text()).toContain('需要重新登录')
+      expect(wrapper.find('.scoped-page').exists()).toBe(false)
+      expect(mounts).toBe(0)
+      expect(document.title).toBe('需要重新登录 · Work 环境 · LabWeaver')
+
+      // Signing in again goes through the BFF login and returns to this page.
+      const login = gate.get('button')
+      expect(login.text()).toContain('重新登录')
+      await login.trigger('click')
+      expect(navigateTopLevel).toHaveBeenCalledOnce()
+      expect(navigateTopLevel).toHaveBeenCalledWith(`/auth/login?return_to=${encodeURIComponent('/researcher/environments?projectId=project-a')}`)
+    } finally {
+      window.history.replaceState(null, '', '/')
+    }
   })
 
   it('closes an open project page when the actor can no longer be confirmed, even if the session epoch stays', async () => {
@@ -215,6 +238,93 @@ describe('AppShell project context', () => {
     expect(sessionEpoch.value).toBe(epoch + 2)
     expect(listProjects.mock.calls.length).toBeGreaterThan(relistCalls)
     expect(wrapper.find('.scoped-page').exists()).toBe(true)
+  })
+
+  describe('after the server rejects the session of an open project page', () => {
+    const scope = 'project-context-spec:draft'
+    const command = { fingerprint: 'draft-fingerprint', idempotencyKey: 'draft-key', data: null }
+
+    /** A rendered protected page of actor A with one unconfirmed write command of A. */
+    async function openPage() {
+      const shell = await mountShell('/researcher/environments?projectId=project-a')
+      const commands = await import('@/utils/pendingCommands')
+      commands.writePendingCommand(actorA, scope, command)
+      expect(shell.wrapper.find('.scoped-page').exists()).toBe(true)
+      expect(mounts).toBe(1)
+      return { ...shell, commands, epoch: shell.sessionEpoch.value }
+    }
+
+    it('closes the page in the same tick and keeps it closed while the identity is read again', async () => {
+      const { wrapper, auth, fetch, session } = await openPage()
+      let answerRead!: (response: Response) => void
+      fetch.mockReturnValueOnce(new Promise<Response>((resolve) => { answerRead = resolve }))
+
+      session.reportSessionRejected()
+      // Before anything renders or the read answers, the actor is no longer trusted.
+      expect(auth.isAuthenticated.value).toBe(false)
+      await nextTick()
+      expect(wrapper.find('.scoped-page').exists()).toBe(false)
+      expect(wrapper.find('.project-context-loading').exists()).toBe(true)
+      await flushPromises()
+      expect(wrapper.find('.scoped-page').exists()).toBe(false)
+
+      answerRead(sessionResponse(true))
+      await flushPromises()
+    })
+
+    it('keeps the page closed when the identity read fails in transit, without ending the epoch or the actor\'s commands', async () => {
+      const { wrapper, auth, fetch, session, commands, epoch, sessionEpoch } = await openPage()
+      fetch.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+
+      session.reportSessionRejected()
+      await flushPromises()
+
+      expect(auth.isAuthenticated.value).toBe(false)
+      expect(wrapper.find('.scoped-page').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="project-context-signed-out"]').exists()).toBe(true)
+      expect(sessionEpoch.value).toBe(epoch)
+      expect(commands.readPendingCommand(actorA, scope)).toEqual(command)
+    })
+
+    it('reopens the page when the same actor is confirmed and keeps that actor\'s commands', async () => {
+      const { wrapper, auth, session, commands, epoch, sessionEpoch } = await openPage()
+
+      session.reportSessionRejected()
+      await flushPromises()
+
+      expect(auth.isAuthenticated.value).toBe(true)
+      expect(wrapper.find('.scoped-page').exists()).toBe(true)
+      expect(mounts).toBe(2)
+      expect(sessionEpoch.value).toBe(epoch)
+      expect(commands.readPendingCommand(actorA, scope)).toEqual(command)
+    })
+
+    it.each(['the rejection read', 'a routine read'])('drops the previous actor\'s page, list and commands when %s finds another actor', async (read) => {
+      const { wrapper, auth, fetch, session, commands, epoch, sessionEpoch } = await openPage()
+      const listCalls = listProjects.mock.calls.length
+      let answerList!: (value: unknown) => void
+      listProjects.mockReturnValue(new Promise((resolve) => { answerList = resolve }))
+      fetch.mockResolvedValueOnce(sessionResponse(true, VALID_UNTIL, actorB))
+
+      if (read === 'a routine read') void auth.loadUser()
+      else session.reportSessionRejected()
+      await flushPromises()
+
+      // The epoch ends, actor A's command is gone and the list is read for actor B.
+      expect(sessionEpoch.value).toBe(epoch + 1)
+      expect(commands.readPendingCommand(actorA, scope)).toBeNull()
+      expect(commands.listPendingCommands(actorB, '')).toEqual([])
+      expect(listProjects.mock.calls.length).toBeGreaterThan(listCalls)
+      // Nothing of actor A is shown while actor B's list is read.
+      expect(wrapper.find('.scoped-page').exists()).toBe(false)
+      expect(wrapper.find('.project-context-loading').exists()).toBe(true)
+
+      answerList({ data: { items: [projectA], nextCursor: null }, error: undefined })
+      await flushPromises()
+      // Actor B gets a freshly created page.
+      expect(wrapper.find('.scoped-page').exists()).toBe(true)
+      expect(mounts).toBe(2)
+    })
   })
 
   it('scopes the home page to the current project once the actor is signed in', async () => {
