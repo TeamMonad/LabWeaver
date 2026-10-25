@@ -390,15 +390,14 @@ def local_gpu_capacity_configuration(example: str, provider_binding: str) -> str
     Two things are local to this run. First, the example ships `gpuObservers: []`
     because an observer binds deployment-specific credentials; the owned cluster
     hands Resource its own projected service account token and CA through the
-    in-cluster API endpoint, so every reviewed provider binding becomes
-    observable instead of failing closed forever. Second, Resource resolves a GPU
-    allocation for the exact provider binding that will run the workload, and the
-    local device plugin advertises the stock `nvidia.com/gpu` extended resource,
-    so a local class is seeded for this run's environment provider binding next to
-    the lock's reviewed classes: a class whose binding no node advertises stays
-    observed at zero units and refuses every request, which is the correct
-    production behaviour and useless for a local acceptance. No reviewed entry is
-    rewritten.
+    in-cluster API endpoint, so the seeded provider binding becomes observable
+    instead of failing closed forever. Second, Resource resolves a GPU allocation
+    for the exact provider binding that will run the workload, and the local
+    device plugin advertises the stock `nvidia.com/gpu` extended resource, so the
+    single reviewed class on that pool is placed on this run's environment
+    provider binding. Its class, mode, capacity and `allocationBinding` stay as
+    reviewed, and every other reviewed class is left untouched. Resource admits
+    one active class per allocation pool, so no second class is added for it.
     """
 
     configuration = json.loads(example)
@@ -408,28 +407,20 @@ def local_gpu_capacity_configuration(example: str, provider_binding: str) -> str
     if observers != []:
         fail("reviewed GPU capacity configuration must ship no observer")
     seeds = configuration.get("gpuCatalogSeed")
-    if not isinstance(seeds, list) or not seeds:
+    if not isinstance(seeds, list) or not seeds or not all(isinstance(s, dict) for s in seeds):
         fail("reviewed GPU capacity configuration must seed at least one GPU class")
-    reviewed_bindings = {
-        seed.get("providerBinding") for seed in seeds if isinstance(seed, dict)
-    }
-    if None in reviewed_bindings or not reviewed_bindings:
+    reviewed_bindings = {seed.get("providerBinding") for seed in seeds}
+    if None in reviewed_bindings:
         fail("reviewed GPU capacity configuration must name a provider binding")
-    classes = {seed.get("class") for seed in seeds if isinstance(seed, dict)}
-    local_class = "nvidia-cuda-local"
-    if local_class in classes:
-        fail("reviewed GPU capacity configuration already seeds the local class")
     if provider_binding in reviewed_bindings:
         fail("local environment provider binding is already a reviewed GPU binding")
-    seeds.append(
-        {
-            "class": local_class,
-            "mode": "exclusive",
-            "providerBinding": provider_binding,
-            "capacityUnits": 1,
-            "allocationBinding": "nvidia.com/gpu",
-        }
-    )
+    pools = [seed.get("allocationBinding") for seed in seeds]
+    if None in pools or len(set(pools)) != len(pools):
+        fail("reviewed GPU capacity configuration must seed one class per allocation binding")
+    local_pool = "nvidia.com/gpu"
+    if local_pool not in pools:
+        fail(f"reviewed GPU capacity configuration must seed the {local_pool} pool")
+    seeds[pools.index(local_pool)]["providerBinding"] = provider_binding
     # Resource records an observation per provider binding and resolves an allocation for the
     # binding the workload will actually run under, so every seeded binding needs an observer.
     configuration["gpuObservers"] = [
@@ -443,7 +434,7 @@ def local_gpu_capacity_configuration(example: str, provider_binding: str) -> str
             "maxNodes": 100,
             "maxPods": 1000,
         }
-        for binding in sorted(reviewed_bindings | {provider_binding})
+        for binding in sorted({seed["providerBinding"] for seed in seeds})
     ]
     return json.dumps(configuration, indent=2) + "\n"
 

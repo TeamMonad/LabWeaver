@@ -93,11 +93,11 @@ python tools/local_dev_e2e.py run --project teacher
 
 ### 本地 GPU 容量观察
 
-`up` 渲染的 `resource-service-config/capacity.json` 与检查入的示例不同：它给 reviewed provider binding（`gpu-primary-v1`）配一个只读观察者，使用 Resource 自己 ServiceAccount 的投影 token 与 CA、集群内 API 端点（`https://kubernetes.default.svc:443`）与 60 秒 TTL；同时追加一条本地 class `nvidia-cuda-local`（`exclusive`，`allocationBinding` 为节点实际广播的 `nvidia.com/gpu`，1 unit）。生产档不追加这条 class——它的 `allocationBinding` 必须由真实设备插件广播。
+`up` 渲染的 `resource-service-config/capacity.json` 与检查入的示例不同：示例中唯一使用 `nvidia.com/gpu`（本地设备插件实际广播的扩展资源）的 reviewed class `nvidia-cuda` 改放到本次 Work 环境的 provider binding（`kubernetes-work-local-hostpath`），class、mode、容量和 `allocationBinding` 不变，其他 reviewed class 原样保留；每个 seed 用到的 provider binding 配一个只读观察者，使用 Resource 自己 ServiceAccount 的投影 token 与 CA、集群内 API 端点（`https://kubernetes.default.svc:443`）与 60 秒 TTL。Resource 每个 `allocationBinding` 只接受一个活动 class（不同 mode 也冲突），所以本地不另加第二个 class；示例若对同一 `allocationBinding` 声明多个 class，或没有 `nvidia.com/gpu` class，`up` 直接报错。
 
 可观察的行为：
 
-- 观察值 = `min(节点 allocatable, catalog capacity_units) - 已占用`，因此本地 class 报 1 unit（策略上限），reviewed class（`nvidia-cuda-primary-v1`）报 0，因为本机没有节点广播该名字。
+- 观察值 = `min(节点 allocatable, catalog capacity_units) - 已占用`，因此 `nvidia-cuda` 在本地报 1 unit（策略上限）。
 - 无观察者或观察过期时，GPU 申请以 `GpuObservationStale` 失败关闭；节点广播名与 catalog binding 不一致时以 `GpuCapacityExhausted` 失败关闭，不会被静默授予。
 - 查询真实记录：`kubectl -n labweaver-data exec postgres-0 -- psql -U postgres -d labweaver -tAc "SELECT e.class,e.allocation_binding,o.available_units FROM resource.gpu_catalog_entries e LEFT JOIN LATERAL (SELECT * FROM resource.gpu_capacity_observations WHERE entry_id=e.entry_id ORDER BY observed_at DESC LIMIT 1) o ON true"`。
 

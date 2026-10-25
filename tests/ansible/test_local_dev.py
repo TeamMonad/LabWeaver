@@ -251,7 +251,7 @@ class LocalDevBundleTests(unittest.TestCase):
         )
         self.assertEqual(
             [observer["providerBinding"] for observer in rendered["gpuObservers"]],
-            ["container-primary-v1", "kubernetes-work-local-hostpath"],
+            ["kubernetes-work-local-hostpath"],
         )
         for observer in rendered["gpuObservers"]:
             self.assertEqual(observer["apiServer"], "https://kubernetes.default.svc:443")
@@ -263,18 +263,53 @@ class LocalDevBundleTests(unittest.TestCase):
                 observer["clusterCaFile"],
                 "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
             )
-        classes = {seed["class"]: seed for seed in rendered["gpuCatalogSeed"]}
+        # Resource rejects a second active class on one allocation pool at startup
+        # (GpuCatalogPoolCollision/GpuCatalogModeCollision); the rendered seed must not add one.
+        pools = [seed["allocationBinding"] for seed in rendered["gpuCatalogSeed"]]
+        self.assertEqual(len(pools), len(set(pools)))
         self.assertEqual(
-            classes["nvidia-cuda"]["allocationBinding"], "nvidia.com/gpu"
+            rendered["gpuCatalogSeed"],
+            [
+                {
+                    "class": "nvidia-cuda",
+                    "mode": "exclusive",
+                    # Resource resolves the allocation for the binding the Work environment runs under.
+                    "providerBinding": "kubernetes-work-local-hostpath",
+                    "capacityUnits": 1,
+                    "allocationBinding": "nvidia.com/gpu",
+                }
+            ],
         )
-        self.assertEqual(classes["nvidia-cuda"]["providerBinding"], "container-primary-v1")
-        self.assertEqual(classes["nvidia-cuda-local"]["allocationBinding"], "nvidia.com/gpu")
-        # Resource resolves the allocation for the binding the Work environment runs under.
+
+    def test_local_gpu_capacity_configuration_retargets_only_the_local_pool(self) -> None:
+        example = json.loads(
+            (ROOT / "deploy/config/resource-capacity.json.example").read_text(encoding="utf-8")
+        )
+        vgpu = {
+            "class": "nvidia-vgpu",
+            "mode": "vgpu",
+            "providerBinding": "kubevirt-primary-v1",
+            "capacityUnits": 2,
+            "allocationBinding": "nvidia.com/GRID_A100-4C",
+        }
+        example["gpuCatalogSeed"].append(dict(vgpu))
+        rendered = json.loads(
+            local_dev.local_gpu_capacity_configuration(
+                json.dumps(example), "kubernetes-work-local-hostpath"
+            )
+        )
+        seeds = rendered["gpuCatalogSeed"]
         self.assertEqual(
-            classes["nvidia-cuda-local"]["providerBinding"], "kubernetes-work-local-hostpath"
+            [seed["class"] for seed in seeds if seed["providerBinding"] == "kubernetes-work-local-hostpath"],
+            ["nvidia-cuda"],
         )
-        self.assertEqual(classes["nvidia-cuda-local"]["mode"], "exclusive")
-        self.assertEqual(classes["nvidia-cuda-local"]["capacityUnits"], 1)
+        self.assertIn(vgpu, seeds)
+        pools = [seed["allocationBinding"] for seed in seeds]
+        self.assertEqual(len(pools), len(set(pools)))
+        self.assertEqual(
+            [observer["providerBinding"] for observer in rendered["gpuObservers"]],
+            ["kubernetes-work-local-hostpath", "kubevirt-primary-v1"],
+        )
 
     def test_local_gpu_capacity_configuration_rejects_reviewed_configuration_drift(self) -> None:
         example = json.loads(
@@ -306,15 +341,28 @@ class LocalDevBundleTests(unittest.TestCase):
                     }
                 ],
             },
-            "local": {
+            "shared-pool": {
+                **example,
+                "gpuCatalogSeed": [
+                    *example["gpuCatalogSeed"],
+                    {
+                        "class": "nvidia-cuda-shared",
+                        "mode": "time-sliced",
+                        "providerBinding": "container-primary-v1",
+                        "capacityUnits": 4,
+                        "allocationBinding": "nvidia.com/gpu",
+                    },
+                ],
+            },
+            "no-local-pool": {
                 **example,
                 "gpuCatalogSeed": [
                     {
-                        "class": "nvidia-cuda-local",
-                        "mode": "exclusive",
-                        "providerBinding": "gpu-primary-v1",
-                        "capacityUnits": 1,
-                        "allocationBinding": "nvidia.com/gpu",
+                        "class": "nvidia-vgpu",
+                        "mode": "vgpu",
+                        "providerBinding": "kubevirt-primary-v1",
+                        "capacityUnits": 2,
+                        "allocationBinding": "nvidia.com/GRID_A100-4C",
                     }
                 ],
             },
