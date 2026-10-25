@@ -45,4 +45,14 @@ describe('cursor pagination response validation', () => {
     await expect(collectCursorPages(fetchPage)).rejects.toThrow('分页响应重复了续页游标')
     expect(fetchPage).toHaveBeenCalledTimes(2)
   })
+
+  it('rejects a longer cursor cycle using the same page validator', async () => {
+    const fetchPage = vi.fn()
+      .mockResolvedValueOnce(response([1], 'page-2'))
+      .mockResolvedValueOnce(response([2], 'page-3'))
+      .mockResolvedValueOnce(response([3], 'page-2'))
+
+    await expect(collectCursorPages(fetchPage)).rejects.toThrow('分页响应重复了续页游标')
+    expect(fetchPage).toHaveBeenCalledTimes(3)
+  })
 })

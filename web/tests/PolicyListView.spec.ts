@@ -179,4 +179,37 @@ describe('PolicyListView', () => {
     expect((wrapper.find('[data-testid="policy-project-select"]').element as HTMLSelectElement).value).toBe('project-later')
     expect(wrapper.text()).not.toContain('PROJECT_CONTEXT_UNAVAILABLE')
   })
+
+  it.each([false, 0, undefined, ''])('does not use a linked project from a page with invalid continuation %j', async (nextCursor) => {
+    const laterProject = { ...project, id: 'project-unvalidated', name: 'Unvalidated project' }
+    vi.mocked(listProjects).mockImplementation(async (request) => (
+      request?.query?.cursor === 'cursor-2'
+        ? { data: { items: [laterProject], nextCursor }, error: undefined }
+        : { data: { items: [project], nextCursor: 'cursor-2' }, error: undefined }
+    ) as never)
+
+    const { wrapper } = await mountView('/admin/policies?projectId=project-unvalidated')
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="policy-project-locate-error"]').exists()).toBe(true))
+    expect(wrapper.text()).toContain('加载更多项目失败')
+    expect(getProjectLlmPolicyOptions).not.toHaveBeenCalledWith({ path: { projectId: 'project-unvalidated' } })
+    expect(wrapper.find('[data-testid="policy-form"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('PROJECT_CONTEXT_UNAVAILABLE')
+  })
+
+  it('reports a repeated project cursor during linked-project lookup instead of looping', async () => {
+    vi.mocked(listProjects).mockImplementation(async (request) => (
+      request?.query?.cursor === 'cursor-2'
+        ? { data: { items: [{ ...project, id: 'project-2' }], nextCursor: 'cursor-3' }, error: undefined }
+        : request?.query?.cursor === 'cursor-3'
+          ? { data: { items: [{ ...project, id: 'project-3' }], nextCursor: 'cursor-2' }, error: undefined }
+          : { data: { items: [project], nextCursor: 'cursor-2' }, error: undefined }
+    ) as never)
+
+    const { wrapper } = await mountView('/admin/policies?projectId=project-missing')
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="policy-project-locate-error"]').exists()).toBe(true))
+    expect(wrapper.text()).toContain('加载更多项目失败')
+    expect(getProjectLlmPolicyOptions).not.toHaveBeenCalledWith({ path: { projectId: 'project-missing' } })
+    expect(listProjects).toHaveBeenLastCalledWith({ query: { limit: 50, cursor: 'cursor-3' } })
+    expect(wrapper.text()).not.toContain('PROJECT_CONTEXT_UNAVAILABLE')
+  })
 })

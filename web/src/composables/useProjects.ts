@@ -20,6 +20,7 @@ import type {
 import { sessionEpoch } from '@/api/session'
 import { extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { idempotencyKey, ifMatch } from '@/utils/format'
+import { readCursorPage } from '@/utils/cursorPagination'
 
 function diagnostic(error: unknown, fallbackCode: string, fallbackMessage: string): DiagnosticViewModel {
   const problem = extractProblemDetails(error)
@@ -73,6 +74,7 @@ const selectedProjectId = ref<string | null>(persistedProjectId())
 const acting = ref<string | null>(null)
 const outcome = ref<ProjectMutationResult | null>(null)
 let loadGeneration = 0
+let projectCursors = new Set<string>()
 // A linked project the catalog is still following pages for. It stays wanted
 // across superseding reloads and failed pages, and is only dropped once it is
 // listed, the list ends, a listed project is selected or the session changes.
@@ -111,18 +113,21 @@ async function followPages(generation: number, loaded: ProjectSchema[], cursor: 
   const targets = [selectedProjectId.value, locatingProjectId.value].filter((id): id is string => Boolean(id))
   let items = loaded
   let next = cursor
+  const seenCursors = projectCursors
   do {
-    const result = await listProjects({ query: pageQuery(next) })
-    if (generation !== loadGeneration) return null
-    if (result.error) {
+    try {
+      const page = await readCursorPage((cursor) => listProjects({ query: pageQuery(cursor ?? null) }), next ?? undefined, seenCursors)
+      if (generation !== loadGeneration) return null
+      items = appendPage(items, page.items, (project) => project.id)
+      next = page.nextCursor
+    } catch (error) {
+      if (generation !== loadGeneration) return null
       const failure = next
-        ? diagnostic(result.error, 'PROJECT_LIST_MORE_FAILED', '加载更多项目失败')
-        : diagnostic(result.error, 'PROJECT_LIST_FAILED', '加载项目失败')
+        ? diagnostic(error, 'PROJECT_LIST_MORE_FAILED', '加载更多项目失败')
+        : diagnostic(error, 'PROJECT_LIST_FAILED', '加载项目失败')
       return { items, cursor: next, failure }
     }
-    items = appendPage(items, result.data.items, (project) => project.id)
-    next = result.data.nextCursor ?? null
-  } while (next && targets.some((id) => !items.some((project) => project.id === id)))
+  } while (next !== null && targets.some((id) => !items.some((project) => project.id === id)))
   return { items, cursor: next, failure: null }
 }
 
@@ -154,6 +159,7 @@ function settlePages({ items, cursor, failure }: FollowedPages) {
  */
 async function loadProjects(wanted: string | null = null) {
   const generation = ++loadGeneration
+  projectCursors = new Set<string>()
   if (wanted) locatingProjectId.value = wanted
   projects.value = { kind: 'loading', message: '加载项目…' }
   loadingMoreProjects.value = false
@@ -318,10 +324,12 @@ export function useProjectMemberships(projectId: Ref<string | null | undefined>)
   const acting = ref<string | null>(null)
   const outcome = ref<ProjectMutationResult | null>(null)
   let loadGeneration = 0
+  let seenCursors = new Set<string>()
 
   async function load() {
     const id = projectId.value
     const generation = ++loadGeneration
+    seenCursors = new Set<string>()
     nextCursor.value = null
     loadingMore.value = false
     loadMoreError.value = null
@@ -330,14 +338,15 @@ export function useProjectMemberships(projectId: Ref<string | null | undefined>)
       return
     }
     memberships.value = { kind: 'loading', message: '加载项目成员…' }
-    const result = await listProjectMemberships({ path: { projectId: id }, query: pageQuery(null) })
-    if (generation !== loadGeneration || projectId.value !== id) return
-    if (result.error) {
-      memberships.value = { kind: 'error', diagnostic: diagnostic(result.error, 'PROJECT_MEMBERS_LIST_FAILED', '加载项目成员失败') }
-      return
+    try {
+      const page = await readCursorPage(() => listProjectMemberships({ path: { projectId: id }, query: pageQuery(null) }), undefined, seenCursors)
+      if (generation !== loadGeneration || projectId.value !== id) return
+      nextCursor.value = page.nextCursor
+      memberships.value = page.items.length > 0 ? { kind: 'success', data: page.items } : { kind: 'empty' }
+    } catch (error) {
+      if (generation !== loadGeneration || projectId.value !== id) return
+      memberships.value = { kind: 'error', diagnostic: diagnostic(error, 'PROJECT_MEMBERS_LIST_FAILED', '加载项目成员失败') }
     }
-    nextCursor.value = result.data.nextCursor ?? null
-    memberships.value = result.data.items.length > 0 ? { kind: 'success', data: result.data.items } : { kind: 'empty' }
   }
 
   async function loadMore() {
@@ -348,15 +357,17 @@ export function useProjectMemberships(projectId: Ref<string | null | undefined>)
     const generation = loadGeneration
     loadingMore.value = true
     loadMoreError.value = null
-    const result = await listProjectMemberships({ path: { projectId: id }, query: pageQuery(cursor) })
-    if (generation !== loadGeneration || projectId.value !== id) return
-    loadingMore.value = false
-    if (result.error) {
-      loadMoreError.value = diagnostic(result.error, 'PROJECT_MEMBERS_LIST_MORE_FAILED', '加载更多项目成员失败')
-      return
+    try {
+      const page = await readCursorPage(() => listProjectMemberships({ path: { projectId: id }, query: pageQuery(cursor) }), cursor, seenCursors)
+      if (generation !== loadGeneration || projectId.value !== id) return
+      loadingMore.value = false
+      nextCursor.value = page.nextCursor
+      memberships.value = { kind: 'success', data: appendPage(loaded.data, page.items, (membership) => membership.actorId) }
+    } catch (error) {
+      if (generation !== loadGeneration || projectId.value !== id) return
+      loadingMore.value = false
+      loadMoreError.value = diagnostic(error, 'PROJECT_MEMBERS_LIST_MORE_FAILED', '加载更多项目成员失败')
     }
-    nextCursor.value = result.data.nextCursor ?? null
-    memberships.value = { kind: 'success', data: appendPage(loaded.data, result.data.items, (membership) => membership.actorId) }
   }
 
   watch(projectId, (id, previousId) => {
