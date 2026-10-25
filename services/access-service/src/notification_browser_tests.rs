@@ -235,6 +235,32 @@ async fn real_access_notification_read_is_csrf_protected_and_idempotent()
         .json()
         .await?;
     let csrf = csrf["csrfToken"].as_str().ok_or("CSRF token")?;
+    for origin in [Some("https://untrusted.example.invalid"), None] {
+        let request = browser.post(&read_url).header("x-csrf-token", csrf);
+        let request = if let Some(origin) = origin {
+            request.header(header::ORIGIN, origin)
+        } else {
+            request
+        };
+        let response = request.send().await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "Origin: {origin:?}");
+        let count: Value = browser
+            .get(&count_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(count["unreadCount"], 1, "Origin: {origin:?}");
+        let page: Value = browser
+            .get(format!("{}/api/v1/notifications", fixture.base))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert!(page["items"][0]["readAt"].is_null(), "Origin: {origin:?}");
+    }
     let first: Value = browser
         .post(&read_url)
         .header(header::ORIGIN, &fixture.base)
