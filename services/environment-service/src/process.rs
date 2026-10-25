@@ -177,11 +177,7 @@ impl EnvironmentProcessRuntime {
                     )?))?;
                 }
                 "container" => {
-                    if configuration.has_kubevirt_fields()
-                        || !configuration.has_complete_container_fields()
-                    {
-                        return Err(EnvironmentProcessRuntimeError::ConfigParse);
-                    }
+                    let projection_configuration = configuration.container_configuration()?;
                     let backend = Arc::new(NatsContainerProviderBackend::new(
                         nats.clone(),
                         configuration.subject.clone(),
@@ -191,33 +187,7 @@ impl EnvironmentProcessRuntime {
                         configuration.binding.clone(),
                         backend,
                         Arc::new(release_store.clone()),
-                        ContainerProviderConfiguration::new(
-                            configuration.release_policy()?,
-                            configuration
-                                .image_repository_prefix
-                                .clone()
-                                .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                            configuration
-                                .access_namespace
-                                .clone()
-                                .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                            configuration
-                                .access_pod_label
-                                .clone()
-                                .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                            configuration
-                                .image_pull_secret_name
-                                .clone()
-                                .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                            configuration
-                                .workspace_storage_class_name
-                                .clone()
-                                .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                            configuration
-                                .workspace_access_mode
-                                .as_deref()
-                                .ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
-                        )?,
+                        projection_configuration,
                     )?
                     .with_namespace_profile(
                         crate::ContainerNamespaceProfile::from_env()
@@ -889,6 +859,21 @@ struct RuntimeVmBaseConfiguration {
 }
 
 impl ProviderBindingConfiguration {
+    fn container_configuration(&self) -> Result<ContainerProviderConfiguration, EnvironmentProcessRuntimeError> {
+        if self.has_kubevirt_fields() || !self.has_complete_container_fields() {
+            return Err(EnvironmentProcessRuntimeError::ConfigParse);
+        }
+        Ok(ContainerProviderConfiguration::new(
+            self.release_policy()?,
+            self.image_repository_prefix.clone().ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+            self.access_namespace.clone().ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+            self.access_pod_label.clone().ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+            self.image_pull_secret_name.clone().ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+            self.workspace_storage_class_name.clone().ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+            self.workspace_access_mode.as_deref().ok_or(EnvironmentProcessRuntimeError::ConfigParse)?,
+        )?)
+    }
+
     fn trust_revision(&self) -> Result<Revision, EnvironmentProcessRuntimeError> {
         Revision::new(
             self.active_trust_revision
@@ -1073,6 +1058,13 @@ impl ProviderBindingConfiguration {
             || self.active_image_policy_revision.is_some()
             || self.active_trust_revision.is_some()
     }
+}
+
+/// Loads the Container executor's projection inputs from the owner's exact deployment profile.
+pub fn container_projection_configuration_from_env() -> Result<(String, ContainerProviderConfiguration), EnvironmentProcessRuntimeError> {
+    let bindings = load_provider_bindings(&required_path(PROVIDER_BINDINGS_PATH)?)?;
+    let configuration = single_provider_configuration(&bindings, "container")?;
+    Ok((configuration.binding.clone(), configuration.container_configuration()?))
 }
 
 fn load_provider_bindings(

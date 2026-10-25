@@ -506,6 +506,7 @@ pub trait ContainerExecutorBackend: Send + Sync {
 pub struct PgContainerExecutorFenceStore {
     pool: PgPool,
     namespace_profile: crate::ContainerNamespaceProfile,
+    projection_configuration: Option<(String, ContainerProviderConfiguration)>,
 }
 
 impl PgContainerExecutorFenceStore {
@@ -514,6 +515,7 @@ impl PgContainerExecutorFenceStore {
         Self {
             pool,
             namespace_profile: crate::ContainerNamespaceProfile::Dedicated {},
+            projection_configuration: None,
         }
     }
 
@@ -521,6 +523,12 @@ impl PgContainerExecutorFenceStore {
     pub fn with_namespace_profile(mut self, profile: crate::ContainerNamespaceProfile) -> Self {
         self.namespace_profile = profile;
         self
+    }
+
+    pub fn with_projection_configuration(mut self, binding: String, configuration: ContainerProviderConfiguration) -> Result<Self, ContainerExecutorFenceError> {
+        if !valid_binding(&binding) { return Err(ContainerExecutorFenceError::ConfigurationInvalid); }
+        self.projection_configuration = Some((binding, configuration));
+        Ok(self)
     }
 
     #[allow(
@@ -630,7 +638,7 @@ impl PgContainerExecutorFenceStore {
                 return Err(ContainerExecutorFenceError::IdentityMismatch);
             }
             runtime_gate?;
-            validate_container_execution_plan(&mut transaction, envelope).await?;
+            validate_container_execution_plan(&mut transaction, envelope, self.projection_configuration.as_ref(), &self.namespace_profile).await?;
             sqlx::query(
                 "UPDATE environment.container_executor_fences SET highest_generation=$2, \
                      operation_id=$3,provider_step=$4,attempt=$5,tombstoned=$6,last_action=$7, \
@@ -650,7 +658,7 @@ impl PgContainerExecutorFenceStore {
             .await?;
         } else {
             runtime_gate?;
-            validate_container_execution_plan(&mut transaction, envelope).await?;
+            validate_container_execution_plan(&mut transaction, envelope, self.projection_configuration.as_ref(), &self.namespace_profile).await?;
             sqlx::query(
                 "INSERT INTO environment.container_executor_fences \
                  (environment_id,highest_generation,operation_id,provider_step,attempt,tombstoned, \
@@ -900,6 +908,10 @@ impl<B: ContainerExecutorBackend + 'static> NatsContainerExecutorServer<B> {
 fn container_executor_failure(error: &ContainerExecutorFenceError) -> ProviderFailure {
     match error {
         ContainerExecutorFenceError::RuntimeAdmission(error) => error.provider_failure(),
+        ContainerExecutorFenceError::IdentityMismatch => ProviderFailure {
+            code: ProviderFailureCode::RuntimeAdmission(contracts::DiagnosticCode::registered("LW_ENVIRONMENT_CONTAINER_EXECUTOR_IDENTITY_MISMATCH")),
+            retryable: false,
+        },
         ContainerExecutorFenceError::InProgress
         | ContainerExecutorFenceError::Database(_)
         | ContainerExecutorFenceError::Transport => ProviderFailure {
@@ -907,7 +919,6 @@ fn container_executor_failure(error: &ContainerExecutorFenceError) -> ProviderFa
             retryable: true,
         },
         ContainerExecutorFenceError::ConfigurationInvalid
-        | ContainerExecutorFenceError::IdentityMismatch
         | ContainerExecutorFenceError::DeadlineExceeded
         | ContainerExecutorFenceError::StaleGeneration
         | ContainerExecutorFenceError::Tombstoned => ProviderFailure {
@@ -920,21 +931,33 @@ fn container_executor_failure(error: &ContainerExecutorFenceError) -> ProviderFa
 async fn validate_container_execution_plan(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     envelope: &ContainerExecutorRequestEnvelope,
+    projection_configuration: Option<&(String, ContainerProviderConfiguration)>,
+    namespace_profile: &crate::ContainerNamespaceProfile,
 ) -> Result<(), ContainerExecutorFenceError> {
-    if !container_request_starts_compute(&envelope.request) {
+    if !container_request_starts_compute(&envelope.request)
+        && !matches!(&envelope.request, ContainerExecutorRequest::Observe { plan } if !plan.resources.is_empty())
+    {
         return Ok(());
     }
     let plan = container_executor_plan(&envelope.request);
-    let row = sqlx::query("SELECT i.contract AS instance,p.contract AS projection FROM environment.environment_instances i JOIN environment.release_projections p ON p.release_id=i.release_id WHERE i.environment_id=$1")
+    let row = sqlx::query("SELECT i.contract AS instance,p.contract AS projection,p.withdrawn_at,date_trunc('milliseconds',clock_timestamp()) AS authority_now FROM environment.environment_instances i JOIN environment.release_projections p ON p.release_id=i.release_id WHERE i.environment_id=$1")
         .bind(plan.environment_id.as_uuid()).fetch_optional(&mut **transaction).await?
         .ok_or(ContainerExecutorFenceError::IdentityMismatch)?;
     let instance: EnvironmentInstance = serde_json::from_value(row.try_get("instance")?)
         .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
     let projection: ReleasePublished = serde_json::from_value(row.try_get("projection")?)
         .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
+    let (binding, configuration) = projection_configuration.ok_or(ContainerExecutorFenceError::ConfigurationInvalid)?;
+    let resolved = ResolvedContainerRelease {
+        projection,
+        authority_now: UtcTimestamp::from_utc(row.try_get("authority_now")?).map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?,
+        withdrawn_at: row.try_get::<Option<time::OffsetDateTime>, _>("withdrawn_at")?.map(UtcTimestamp::from_utc).transpose().map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?,
+    };
+    let expected = configuration.project_plan(binding, namespace_profile, &instance, &resolved, envelope.fence.action)
+        .map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?;
     crate::runtime_admission::validate_container_runtime_plan(
         &instance,
-        &projection,
+        &expected,
         plan,
         envelope.fence.operation_generation,
     )
@@ -1156,295 +1179,14 @@ impl ContainerProviderConfiguration {
             workspace_access_mode,
         })
     }
-}
-
-/// Durable projection result for a release `CloudEvent`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReleaseProjectionDecision {
-    Applied,
-    Duplicate,
-    Stale,
-    Gap,
-}
-
-/// Environment-owned immutable release projection.
-#[derive(Clone)]
-pub struct PgReleaseProjectionStore {
-    pool: PgPool,
-}
-
-impl PgReleaseProjectionStore {
-    #[must_use]
-    pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
-    }
-
-    pub async fn accept(
-        &self,
-        consumer: &str,
-        event: &CloudEvent<ReleasePublished>,
-    ) -> Result<ReleaseProjectionDecision, ReleaseProjectionError> {
-        let contract = EVENT_CONTRACTS
-            .iter()
-            .copied()
-            .find(|contract| contract.subject == subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED)
-            .ok_or(ReleaseProjectionError::ContractInvalid)?;
-        event
-            .validate(contract)
-            .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
-        event
-            .data
-            .validate()
-            .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
-        if event.subject != subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED
-            || event.project_id != event.data.release.project_id
-            || event.course_id != event.data.release.course_id
-            || event.aggregate_sequence.0 != 1
-            || event.aggregate_revision
-                != Revision::new(event.data.release.version)
-                    .map_err(|_| ReleaseProjectionError::ContractInvalid)?
-        {
-            return Err(ReleaseProjectionError::IdentityMismatch);
-        }
-        let provider_binding = release_provider_binding(&event.data.environment_spec.runtime);
-        let payload =
-            serde_json::to_value(event).map_err(|_| ReleaseProjectionError::ContractInvalid)?;
-        let payload_sha256 = canonical_hash(&payload)?;
-        let mut transaction = self.pool.begin().await?;
-        let decision = InboxStore::accept(
-            &mut transaction,
-            Domain::Environment,
-            consumer,
-            event.id.as_uuid(),
-            event.data.release.id.as_uuid(),
-            event.aggregate_sequence.0,
-            payload_sha256,
-        )
-        .await
-        .map_err(|_| ReleaseProjectionError::PersistenceFailed)?;
-        let outcome = match decision {
-            InboxDecision::Accepted => {
-                let contract = serde_json::to_value(&event.data)
-                    .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
-                // projection_sha256 is internal persistence hash (not contract hash)
-                let projection_sha256 = canonical_hash(&event.data)?;
-                sqlx::query(
-                    "INSERT INTO environment.release_projections \
-                     (release_id,project_id,course_id,release_version,provider_binding,projection_sha256,contract,projected_event_id,aggregate_sequence) \
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,1)",
-                )
-                .bind(event.data.release.id.as_uuid())
-                .bind(event.project_id.as_uuid())
-                .bind(event.course_id.map(contracts::CourseId::as_uuid))
-                .bind(i64::try_from(event.data.release.version).map_err(|_| ReleaseProjectionError::IdentityMismatch)?)
-                .bind(provider_binding)
-                .bind(projection_sha256.to_string())
-                .bind(contract)
-                .bind(event.id.as_uuid())
-                .execute(&mut *transaction)
-                .await
-                .map_err(|error| {
-                    if is_unique_violation(&error) {
-                        ReleaseProjectionError::IdentityMismatch
-                    } else {
-                        ReleaseProjectionError::Database(error)
-                    }
-                })?;
-                ReleaseProjectionDecision::Applied
-            }
-            InboxDecision::Duplicate => ReleaseProjectionDecision::Duplicate,
-            InboxDecision::Stale => ReleaseProjectionDecision::Stale,
-            InboxDecision::Gap => {
-                transaction.rollback().await?;
-                return Ok(ReleaseProjectionDecision::Gap);
-            }
-        };
-        transaction.commit().await?;
-        Ok(outcome)
-    }
-
-    pub async fn accept_withdrawal(
-        &self,
-        consumer: &str,
-        event: &CloudEvent<ReleaseWithdrawn>,
-    ) -> Result<ReleaseProjectionDecision, ReleaseProjectionError> {
-        let contract = EVENT_CONTRACTS
-            .iter()
-            .copied()
-            .find(|contract| contract.subject == subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN)
-            .ok_or(ReleaseProjectionError::ContractInvalid)?;
-        event
-            .validate(contract)
-            .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
-        if event.subject != subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN
-            || event.aggregate_sequence.0 != 2
-            || event.aggregate_revision
-                != Revision::new(event.data.version)
-                    .map_err(|_| ReleaseProjectionError::ContractInvalid)?
-            || event.data.reason_code.trim().is_empty()
-            || event.data.withdrawn_at != event.time
-        {
-            return Err(ReleaseProjectionError::IdentityMismatch);
-        }
-        let payload =
-            serde_json::to_value(event).map_err(|_| ReleaseProjectionError::ContractInvalid)?;
-        let payload_sha256 = canonical_hash(&payload)?;
-        let mut transaction = self.pool.begin().await?;
-        let decision = InboxStore::accept(
-            &mut transaction,
-            Domain::Environment,
-            consumer,
-            event.id.as_uuid(),
-            event.data.release_id.as_uuid(),
-            event.aggregate_sequence.0,
-            payload_sha256,
-        )
-        .await
-        .map_err(|_| ReleaseProjectionError::PersistenceFailed)?;
-        let outcome = match decision {
-            InboxDecision::Accepted => {
-                let result = sqlx::query(
-                    "UPDATE environment.release_projections \
-                     SET aggregate_sequence=2,withdrawn_at=$5,withdrawal_reason_code=$6, \
-                         withdrawal_event_id=$7,updated_at=clock_timestamp() \
-                     WHERE release_id=$1 AND project_id=$2 AND course_id IS NOT DISTINCT FROM $3 AND release_version=$4 \
-                       AND aggregate_sequence=1 AND withdrawn_at IS NULL",
-                )
-                .bind(event.data.release_id.as_uuid())
-                .bind(event.project_id.as_uuid())
-                .bind(event.course_id.map(contracts::CourseId::as_uuid))
-                .bind(
-                    i64::try_from(event.data.version)
-                        .map_err(|_| ReleaseProjectionError::IdentityMismatch)?,
-                )
-                .bind(event.data.withdrawn_at.get())
-                .bind(&event.data.reason_code)
-                .bind(event.id.as_uuid())
-                .execute(&mut *transaction)
-                .await?;
-                if result.rows_affected() != 1 {
-                    transaction.rollback().await?;
-                    return Err(ReleaseProjectionError::IdentityMismatch);
-                }
-                ReleaseProjectionDecision::Applied
-            }
-            InboxDecision::Duplicate => ReleaseProjectionDecision::Duplicate,
-            InboxDecision::Stale => ReleaseProjectionDecision::Stale,
-            InboxDecision::Gap => {
-                transaction.rollback().await?;
-                return Ok(ReleaseProjectionDecision::Gap);
-            }
-        };
-        transaction.commit().await?;
-        Ok(outcome)
-    }
-}
-
-#[async_trait]
-impl ContainerReleaseResolver for PgReleaseProjectionStore {
-    async fn resolve(
-        &self,
-        release_id: ReleaseId,
-        release_version: u64,
-    ) -> Result<ResolvedContainerRelease, ReleaseProjectionError> {
-        let row = sqlx::query(
-            "SELECT release_version,contract,projection_sha256,withdrawn_at, \
-                    date_trunc('milliseconds',clock_timestamp()) AS authority_now \
-             FROM environment.release_projections \
-             WHERE release_id=$1",
-        )
-        .bind(release_id.as_uuid())
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or(ReleaseProjectionError::NotFound)?;
-        let stored_version: i64 = row.try_get("release_version")?;
-        if u64::try_from(stored_version).ok() != Some(release_version) {
-            return Err(ReleaseProjectionError::IdentityMismatch);
-        }
-        let projection: ReleasePublished = serde_json::from_value(row.try_get("contract")?)
-            .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
-        projection
-            .validate()
-            .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
-        let _stored_sha256: String = row.try_get("projection_sha256")?;
-        if projection.release.id != release_id || projection.release.version != release_version {
-            return Err(ReleaseProjectionError::IdentityMismatch);
-        }
-        let authority_now: time::OffsetDateTime = row.try_get("authority_now")?;
-        let withdrawn_at: Option<time::OffsetDateTime> = row.try_get("withdrawn_at")?;
-        Ok(ResolvedContainerRelease {
-            projection,
-            authority_now: UtcTimestamp::from_utc(authority_now)
-                .map_err(|_| ReleaseProjectionError::ContractInvalid)?,
-            withdrawn_at: withdrawn_at
-                .map(UtcTimestamp::from_utc)
-                .transpose()
-                .map_err(|_| ReleaseProjectionError::ContractInvalid)?,
-        })
-    }
-}
-
-/// Container implementation of the existing Environment Provider state machine.
-pub struct ContainerProvider<B, R> {
-    binding: String,
-    backend: Arc<B>,
-    releases: Arc<R>,
-    release_policy: ContainerReleasePolicy,
-    image_repository_prefix: String,
-    access_namespace: String,
-    access_pod_label: String,
-    image_pull_secret_name: String,
-    workspace_storage_class_name: String,
-    workspace_access_mode: ContainerWorkspaceAccessMode,
-    namespace_profile: crate::ContainerNamespaceProfile,
-}
-
-impl<B, R> ContainerProvider<B, R>
-where
-    B: ContainerProviderBackend,
-    R: ContainerReleaseResolver,
-{
-    pub fn new(
-        binding: String,
-        backend: Arc<B>,
-        releases: Arc<R>,
-        configuration: ContainerProviderConfiguration,
-    ) -> Result<Self, ReleaseProjectionError> {
-        if !valid_binding(&binding) {
-            return Err(ReleaseProjectionError::ConfigurationInvalid);
-        }
-        Ok(Self {
-            binding,
-            backend,
-            releases,
-            release_policy: configuration.release_policy,
-            image_repository_prefix: configuration.image_repository_prefix,
-            access_namespace: configuration.access_namespace,
-            access_pod_label: configuration.access_pod_label,
-            image_pull_secret_name: configuration.image_pull_secret_name,
-            workspace_storage_class_name: configuration.workspace_storage_class_name,
-            workspace_access_mode: configuration.workspace_access_mode,
-            namespace_profile: crate::ContainerNamespaceProfile::Dedicated {},
-        })
-    }
-
-    pub fn with_namespace_profile(
-        mut self,
-        profile: crate::ContainerNamespaceProfile,
-    ) -> Result<Self, ReleaseProjectionError> {
-        profile
-            .validate()
-            .map_err(|_| ReleaseProjectionError::ConfigurationInvalid)?;
-        self.namespace_profile = profile;
-        Ok(self)
-    }
-
     #[allow(
         clippy::too_many_lines,
         reason = "the complete deterministic Kubernetes security bundle is reviewed as one projection"
     )]
-    pub fn plan(
+    pub fn project_plan(
         &self,
+        binding: &str,
+        namespace_profile: &crate::ContainerNamespaceProfile,
         instance: &EnvironmentInstance,
         resolved: &ResolvedContainerRelease,
         action: ReconcileAction,
@@ -1460,8 +1202,8 @@ where
             || instance.release_version != projection.release.version
             || !crate::runtime_admission::release_project_matches(instance, projection)
             || instance.course_id != projection.release.course_id
-            || instance.provider_binding != self.binding
-            || container_provider_binding(projection)? != self.binding
+            || instance.provider_binding != binding
+            || container_provider_binding(projection)? != binding
         {
             return Err(ReleaseProjectionError::IdentityMismatch);
         }
@@ -1508,9 +1250,7 @@ where
             }
         }
         let image = format!("{repository}@{digest}");
-        let placement = self
-            .namespace_profile
-            .for_instance(instance)
+        let placement = namespace_profile.for_instance(instance)
             .map_err(|_| ReleaseProjectionError::IdentityMismatch)?;
         if placement.namespace_uid.is_some()
             && projection.environment_spec.network != NetworkPolicySpec::DenyAll
@@ -1595,7 +1335,7 @@ where
             // bindings; this provider consumes the exact binding and never infers a mode from a
             // node label or rewrites a shared resource name.
             if allocation.mode == GpuAllocationMode::VmVgpu
-                || allocation.provider_binding != self.binding
+                || allocation.provider_binding != binding
                 || !valid_extended_resource_name(&allocation.allocation_binding)
             {
                 return Err(ReleaseProjectionError::SecurityPostureInvalid);
@@ -1851,6 +1591,287 @@ where
         }
         Ok(())
     }
+}
+
+/// Durable projection result for a release `CloudEvent`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReleaseProjectionDecision {
+    Applied,
+    Duplicate,
+    Stale,
+    Gap,
+}
+
+/// Environment-owned immutable release projection.
+#[derive(Clone)]
+pub struct PgReleaseProjectionStore {
+    pool: PgPool,
+}
+
+impl PgReleaseProjectionStore {
+    #[must_use]
+    pub const fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    pub async fn accept(
+        &self,
+        consumer: &str,
+        event: &CloudEvent<ReleasePublished>,
+    ) -> Result<ReleaseProjectionDecision, ReleaseProjectionError> {
+        let contract = EVENT_CONTRACTS
+            .iter()
+            .copied()
+            .find(|contract| contract.subject == subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED)
+            .ok_or(ReleaseProjectionError::ContractInvalid)?;
+        event
+            .validate(contract)
+            .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
+        event
+            .data
+            .validate()
+            .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
+        if event.subject != subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED
+            || event.project_id != event.data.release.project_id
+            || event.course_id != event.data.release.course_id
+            || event.aggregate_sequence.0 != 1
+            || event.aggregate_revision
+                != Revision::new(event.data.release.version)
+                    .map_err(|_| ReleaseProjectionError::ContractInvalid)?
+        {
+            return Err(ReleaseProjectionError::IdentityMismatch);
+        }
+        let provider_binding = release_provider_binding(&event.data.environment_spec.runtime);
+        let payload =
+            serde_json::to_value(event).map_err(|_| ReleaseProjectionError::ContractInvalid)?;
+        let payload_sha256 = canonical_hash(&payload)?;
+        let mut transaction = self.pool.begin().await?;
+        let decision = InboxStore::accept(
+            &mut transaction,
+            Domain::Environment,
+            consumer,
+            event.id.as_uuid(),
+            event.data.release.id.as_uuid(),
+            event.aggregate_sequence.0,
+            payload_sha256,
+        )
+        .await
+        .map_err(|_| ReleaseProjectionError::PersistenceFailed)?;
+        let outcome = match decision {
+            InboxDecision::Accepted => {
+                let contract = serde_json::to_value(&event.data)
+                    .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
+                // projection_sha256 is internal persistence hash (not contract hash)
+                let projection_sha256 = canonical_hash(&event.data)?;
+                sqlx::query(
+                    "INSERT INTO environment.release_projections \
+                     (release_id,project_id,course_id,release_version,provider_binding,projection_sha256,contract,projected_event_id,aggregate_sequence) \
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,1)",
+                )
+                .bind(event.data.release.id.as_uuid())
+                .bind(event.project_id.as_uuid())
+                .bind(event.course_id.map(contracts::CourseId::as_uuid))
+                .bind(i64::try_from(event.data.release.version).map_err(|_| ReleaseProjectionError::IdentityMismatch)?)
+                .bind(provider_binding)
+                .bind(projection_sha256.to_string())
+                .bind(contract)
+                .bind(event.id.as_uuid())
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| {
+                    if is_unique_violation(&error) {
+                        ReleaseProjectionError::IdentityMismatch
+                    } else {
+                        ReleaseProjectionError::Database(error)
+                    }
+                })?;
+                ReleaseProjectionDecision::Applied
+            }
+            InboxDecision::Duplicate => ReleaseProjectionDecision::Duplicate,
+            InboxDecision::Stale => ReleaseProjectionDecision::Stale,
+            InboxDecision::Gap => {
+                transaction.rollback().await?;
+                return Ok(ReleaseProjectionDecision::Gap);
+            }
+        };
+        transaction.commit().await?;
+        Ok(outcome)
+    }
+
+    pub async fn accept_withdrawal(
+        &self,
+        consumer: &str,
+        event: &CloudEvent<ReleaseWithdrawn>,
+    ) -> Result<ReleaseProjectionDecision, ReleaseProjectionError> {
+        let contract = EVENT_CONTRACTS
+            .iter()
+            .copied()
+            .find(|contract| contract.subject == subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN)
+            .ok_or(ReleaseProjectionError::ContractInvalid)?;
+        event
+            .validate(contract)
+            .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
+        if event.subject != subjects::ENVIRONMENT_TEMPLATE_RELEASE_WITHDRAWN
+            || event.aggregate_sequence.0 != 2
+            || event.aggregate_revision
+                != Revision::new(event.data.version)
+                    .map_err(|_| ReleaseProjectionError::ContractInvalid)?
+            || event.data.reason_code.trim().is_empty()
+            || event.data.withdrawn_at != event.time
+        {
+            return Err(ReleaseProjectionError::IdentityMismatch);
+        }
+        let payload =
+            serde_json::to_value(event).map_err(|_| ReleaseProjectionError::ContractInvalid)?;
+        let payload_sha256 = canonical_hash(&payload)?;
+        let mut transaction = self.pool.begin().await?;
+        let decision = InboxStore::accept(
+            &mut transaction,
+            Domain::Environment,
+            consumer,
+            event.id.as_uuid(),
+            event.data.release_id.as_uuid(),
+            event.aggregate_sequence.0,
+            payload_sha256,
+        )
+        .await
+        .map_err(|_| ReleaseProjectionError::PersistenceFailed)?;
+        let outcome = match decision {
+            InboxDecision::Accepted => {
+                let result = sqlx::query(
+                    "UPDATE environment.release_projections \
+                     SET aggregate_sequence=2,withdrawn_at=$5,withdrawal_reason_code=$6, \
+                         withdrawal_event_id=$7,updated_at=clock_timestamp() \
+                     WHERE release_id=$1 AND project_id=$2 AND course_id IS NOT DISTINCT FROM $3 AND release_version=$4 \
+                       AND aggregate_sequence=1 AND withdrawn_at IS NULL",
+                )
+                .bind(event.data.release_id.as_uuid())
+                .bind(event.project_id.as_uuid())
+                .bind(event.course_id.map(contracts::CourseId::as_uuid))
+                .bind(
+                    i64::try_from(event.data.version)
+                        .map_err(|_| ReleaseProjectionError::IdentityMismatch)?,
+                )
+                .bind(event.data.withdrawn_at.get())
+                .bind(&event.data.reason_code)
+                .bind(event.id.as_uuid())
+                .execute(&mut *transaction)
+                .await?;
+                if result.rows_affected() != 1 {
+                    transaction.rollback().await?;
+                    return Err(ReleaseProjectionError::IdentityMismatch);
+                }
+                ReleaseProjectionDecision::Applied
+            }
+            InboxDecision::Duplicate => ReleaseProjectionDecision::Duplicate,
+            InboxDecision::Stale => ReleaseProjectionDecision::Stale,
+            InboxDecision::Gap => {
+                transaction.rollback().await?;
+                return Ok(ReleaseProjectionDecision::Gap);
+            }
+        };
+        transaction.commit().await?;
+        Ok(outcome)
+    }
+}
+
+#[async_trait]
+impl ContainerReleaseResolver for PgReleaseProjectionStore {
+    async fn resolve(
+        &self,
+        release_id: ReleaseId,
+        release_version: u64,
+    ) -> Result<ResolvedContainerRelease, ReleaseProjectionError> {
+        let row = sqlx::query(
+            "SELECT release_version,contract,projection_sha256,withdrawn_at, \
+                    date_trunc('milliseconds',clock_timestamp()) AS authority_now \
+             FROM environment.release_projections \
+             WHERE release_id=$1",
+        )
+        .bind(release_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(ReleaseProjectionError::NotFound)?;
+        let stored_version: i64 = row.try_get("release_version")?;
+        if u64::try_from(stored_version).ok() != Some(release_version) {
+            return Err(ReleaseProjectionError::IdentityMismatch);
+        }
+        let projection: ReleasePublished = serde_json::from_value(row.try_get("contract")?)
+            .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
+        projection
+            .validate()
+            .map_err(|_| ReleaseProjectionError::ContractInvalid)?;
+        let _stored_sha256: String = row.try_get("projection_sha256")?;
+        if projection.release.id != release_id || projection.release.version != release_version {
+            return Err(ReleaseProjectionError::IdentityMismatch);
+        }
+        let authority_now: time::OffsetDateTime = row.try_get("authority_now")?;
+        let withdrawn_at: Option<time::OffsetDateTime> = row.try_get("withdrawn_at")?;
+        Ok(ResolvedContainerRelease {
+            projection,
+            authority_now: UtcTimestamp::from_utc(authority_now)
+                .map_err(|_| ReleaseProjectionError::ContractInvalid)?,
+            withdrawn_at: withdrawn_at
+                .map(UtcTimestamp::from_utc)
+                .transpose()
+                .map_err(|_| ReleaseProjectionError::ContractInvalid)?,
+        })
+    }
+}
+
+/// Container implementation of the existing Environment Provider state machine.
+pub struct ContainerProvider<B, R> {
+    binding: String,
+    backend: Arc<B>,
+    releases: Arc<R>,
+    configuration: ContainerProviderConfiguration,
+    namespace_profile: crate::ContainerNamespaceProfile,
+}
+
+impl<B, R> ContainerProvider<B, R>
+where
+    B: ContainerProviderBackend,
+    R: ContainerReleaseResolver,
+{
+    pub fn new(
+        binding: String,
+        backend: Arc<B>,
+        releases: Arc<R>,
+        configuration: ContainerProviderConfiguration,
+    ) -> Result<Self, ReleaseProjectionError> {
+        if !valid_binding(&binding) {
+            return Err(ReleaseProjectionError::ConfigurationInvalid);
+        }
+        Ok(Self {
+            binding,
+            backend,
+            releases,
+            configuration,
+            namespace_profile: crate::ContainerNamespaceProfile::Dedicated {},
+        })
+    }
+
+    pub fn with_namespace_profile(
+        mut self,
+        profile: crate::ContainerNamespaceProfile,
+    ) -> Result<Self, ReleaseProjectionError> {
+        profile
+            .validate()
+            .map_err(|_| ReleaseProjectionError::ConfigurationInvalid)?;
+        self.namespace_profile = profile;
+        Ok(self)
+    }
+
+    pub fn plan(
+        &self,
+        instance: &EnvironmentInstance,
+        resolved: &ResolvedContainerRelease,
+        action: ReconcileAction,
+    ) -> Result<ContainerResourcePlan, ReleaseProjectionError> {
+        self.configuration.project_plan(&self.binding, &self.namespace_profile, instance, resolved, action)
+    }
+
+
 
     fn cleanup_plan(
         &self,

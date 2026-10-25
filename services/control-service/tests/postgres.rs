@@ -432,6 +432,18 @@ async fn container_executor_transport_persists_original_admission_diagnostics()
 }
 
 #[tokio::test]
+async fn recomputed_container_messages_cannot_expand_the_approved_security_plane()
+-> Result<(), Box<dyn std::error::Error>> {
+    use runtime_authorization_cases::{ContainerSecurityTampering as Tamper, ExecutorFailure};
+    for tamper in [Tamper::HostNetwork, Tamper::HostPid, Tamper::HostIpc, Tamper::HostPath,
+        Tamper::ExtraContainer, Tamper::ServiceAccount, Tamper::ServiceAccountToken, Tamper::PrivilegeEscalation, Tamper::NamespacePsa] {
+        let capability = (tamper != Tamper::NamespacePsa).then_some(contracts::platform_configuration::LinuxCapability::NetAdmin);
+        Box::pin(candidate_publication_fixture(Some(ExecutorFailure::Security(tamper)), capability)).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn approved_net_admin_projects_through_the_original_funded_container_journey()
 -> Result<(), Box<dyn std::error::Error>> {
     Box::pin(candidate_publication_fixture(

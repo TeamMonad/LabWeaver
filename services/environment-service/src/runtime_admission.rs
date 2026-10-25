@@ -433,7 +433,7 @@ pub(crate) fn container_security_context(
 
 pub(crate) fn validate_container_runtime_plan(
     instance: &EnvironmentInstance,
-    projection: &contracts::events::ReleasePublished,
+    expected: &crate::ContainerResourcePlan,
     plan: &crate::ContainerResourcePlan,
     generation: u64,
 ) -> Result<(), crate::ReleaseProjectionError> {
@@ -443,44 +443,22 @@ pub(crate) fn validate_container_runtime_plan(
     {
         return Err(crate::ReleaseProjectionError::IdentityMismatch);
     }
-    let expected = container_security_context(instance, projection)?;
-    let uid = expected["runAsUser"]
-        .as_u64()
-        .ok_or(crate::ReleaseProjectionError::SecurityPostureInvalid)?;
-    let mut deployments = plan
-        .resources
-        .iter()
-        .filter(|resource| resource.kind == "Deployment");
-    let Some(deployment) = deployments.next() else {
-        // A sparse plan cannot change a Pod's security context. Scale/restart still requires
-        // fresh authorization and the persisted environment/project/generation above.
-        return Ok(());
-    };
-    if deployments.next().is_some() {
-        return Err(crate::ReleaseProjectionError::ContractInvalid);
-    }
-    let pod = deployment
-        .document
-        .pointer("/spec/template/spec")
-        .ok_or(crate::ReleaseProjectionError::ContractInvalid)?;
-    if pod["securityContext"]
-        != serde_json::json!({"runAsNonRoot":uid!=0,"runAsUser":uid,"runAsGroup":uid,"fsGroup":uid,"seccompProfile":{"type":"RuntimeDefault"}})
-        || ["containers", "initContainers"].iter().any(|name| {
-            pod.get(name)
-                .and_then(serde_json::Value::as_array)
-                .is_none_or(|values| {
-                    values.is_empty()
-                        || values
-                            .iter()
-                            .any(|value| value["securityContext"] != expected)
-                })
-        })
-        || pod
-            .get("ephemeralContainers")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|values| !values.is_empty())
+    if plan.environment_id != expected.environment_id || plan.project_id != expected.project_id
+        || plan.namespace != expected.namespace || plan.namespace_uid != expected.namespace_uid
+        || plan.image != expected.image || plan.plan_sha256 != expected.plan_sha256
     {
-        return Err(crate::ReleaseProjectionError::SecurityPostureInvalid);
+        return Err(crate::ReleaseProjectionError::IdentityMismatch);
+    }
+    // Requests may contain an ordered subset for a non-Pod write. Every supplied object must
+    // exactly match the one trusted projector produced; duplicates, extra objects and any
+    // added Pod/Deployment/Namespace fields are rejected without a field blacklist.
+    let mut resources = expected.resources.iter();
+    for received in &plan.resources {
+        let expected = resources.find(|candidate| candidate.kind == received.kind
+            && candidate.name == received.name && candidate.namespace == received.namespace);
+        if expected != Some(received) {
+            return Err(crate::ReleaseProjectionError::SecurityPostureInvalid);
+        }
     }
     Ok(())
 }

@@ -724,7 +724,35 @@ impl environment_service::ContainerExecutorBackend for PhysicalClusterFixture {
         }
     }
 }
-fn physical_envelope(
+fn projection_configuration(projection: &contracts::events::ReleasePublished) -> Result<environment_service::ContainerProviderConfiguration> {
+    let (repository, _) = projection.release.artifact.container_reference().ok_or("container image")?;
+    let approval = projection.release.approval.as_ref().ok_or("generated container approval")?;
+    Ok(environment_service::ContainerProviderConfiguration::new(
+        environment_service::ContainerReleasePolicy::new(contracts::PolicyId::new(), approval.policy_revision, approval.trust_revision)?,
+        repository.rsplit_once('/').ok_or("image repository prefix")?.0.into(),
+        "synthetic-access".into(), "synthetic-access".into(), "registry-pull".into(), "synthetic-storage".into(), "ReadWriteOnce",
+    )?)
+}
+
+async fn trusted_container_plan(pool: &PgPool, instance: &contracts::environment::EnvironmentInstance) -> Result<environment_service::ContainerResourcePlan> {
+    use environment_service::ContainerReleaseResolver as _;
+    let current = PgEnvironmentStore::new(pool.clone()).load(instance.id).await?;
+    let resolved = PgReleaseProjectionStore::new(pool.clone()).resolve(current.release_id, current.release_version).await?;
+    let configuration = projection_configuration(&resolved.projection)?;
+    Ok(configuration.project_plan(&current.provider_binding, &environment_service::ContainerNamespaceProfile::Dedicated {}, &current, &resolved, environment_service::ReconcileAction::Stop)?)
+}
+
+async fn container_fence_store(pool: PgPool, instance: &contracts::environment::EnvironmentInstance) -> Result<environment_service::PgContainerExecutorFenceStore> {
+    use environment_service::ContainerReleaseResolver as _;
+    let store = environment_service::PgContainerExecutorFenceStore::new(pool.clone());
+    if instance.runtime_kind == contracts::authoring::RuntimeKind::Container {
+        let resolved = PgReleaseProjectionStore::new(pool).resolve(instance.release_id, instance.release_version).await?;
+        Ok(store.with_projection_configuration(instance.provider_binding.clone(), projection_configuration(&resolved.projection)?)?)
+    } else { Ok(store) }
+}
+
+async fn physical_envelope(
+    pool: &PgPool,
     instance: &contracts::environment::EnvironmentInstance,
     step: u32,
     cleanup: bool,
@@ -735,7 +763,9 @@ fn physical_envelope(
         ContainerResource, ContainerResourcePlan, ReconcileAction,
     };
     let namespace = format!("lw-env-{}", instance.id);
-    let plan = ContainerResourcePlan {
+    let mut plan = if instance.runtime_kind == contracts::authoring::RuntimeKind::Container {
+        trusted_container_plan(pool, instance).await?
+    } else { ContainerResourcePlan {
         environment_id: instance.id,
         project_id: instance.project_id,
         namespace: namespace.clone(),
@@ -748,7 +778,8 @@ fn physical_envelope(
             name: "workspace".into(),
             document: serde_json::json!({"kind":"PersistentVolumeClaim"}),
         }],
-    };
+    }};
+    plan.project_id = instance.project_id;
     let action = if cleanup {
         ReconcileAction::Cleanup
     } else {
@@ -899,34 +930,11 @@ async fn exercise_execution(
         .resolve(instance.release_id, instance.release_version)
         .await?;
     let projection = &resolved.projection;
-    if let contracts::supply_chain::ImageArtifact::Container { repository, .. } =
-        &projection.release.artifact
-    {
-        let prefix = repository
-            .rsplit_once('/')
-            .ok_or("image repository prefix")?
-            .0;
+    if matches!(&projection.release.artifact, contracts::supply_chain::ImageArtifact::Container { .. }) {
         assert_eq!(instance.project_id, projection.release.project_id);
         assert_eq!(instance.release_id, projection.release.id);
         assert_eq!(instance.release_version, projection.release.version);
-        let approval = projection
-            .release
-            .approval
-            .as_ref()
-            .ok_or("generated container approval")?;
-        let configuration = environment_service::ContainerProviderConfiguration::new(
-            environment_service::ContainerReleasePolicy::new(
-                contracts::PolicyId::new(),
-                approval.policy_revision,
-                approval.trust_revision,
-            )?,
-            prefix.into(),
-            "synthetic-access".into(),
-            "synthetic-access".into(),
-            "registry-pull".into(),
-            "synthetic-storage".into(),
-            "ReadWriteOnce",
-        )?;
+        let configuration = projection_configuration(projection)?;
         let provider = environment_service::ContainerProvider::new(
             instance.provider_binding.clone(),
             Arc::new(ClusterFixture {
@@ -982,6 +990,9 @@ async fn exercise_execution(
             reject_next_restart.clone(),
         )?;
     }
+    if let Some(fault @ super::ExecutorFailure::Security(_)) = http.executor_failure {
+        return Box::pin(executor_gate::exercise_transport(pool, resource, admission, instance, http, fault)).await;
+    }
     let worker = environment_service::ReconcileWorker::new(
         store.clone(),
         environment_service::Reconciler::new(registry, Duration::from_millis(100))?
@@ -1007,14 +1018,14 @@ async fn exercise_execution(
     assert_eq!(ready.lease_id, instance.lease_id);
     let physical_calls = Arc::new(AtomicUsize::new(0));
     let executor = environment_service::FencedContainerExecutor::new(
-        environment_service::PgContainerExecutorFenceStore::new(pool.clone()),
+        container_fence_store(pool.clone(), instance).await?,
         PhysicalClusterFixture(physical_calls.clone(), store.current_time().await?),
     )
     .with_runtime_admission(admission.clone());
     let deadline =
         UtcTimestamp::from_utc(store.current_time().await?.get() + time::Duration::seconds(30))?;
     let container = instance.runtime_kind == contracts::authoring::RuntimeKind::Container;
-    let first = physical_envelope(&ready, 1, false, deadline)?;
+    let first = physical_envelope(pool, &ready, 1, false, deadline).await?;
     if !container {
         assert!(
             matches!(
@@ -1042,7 +1053,7 @@ async fn exercise_execution(
         ] {
             assert!(matches!(
                 executor
-                    .execute(physical_envelope(&foreign, 1, false, deadline)?)
+                    .execute(physical_envelope(pool, &foreign, 1, false, deadline).await?)
                     .await,
                 Err(
                     environment_service::ContainerExecutorFenceError::RuntimeAdmission(
@@ -1213,7 +1224,7 @@ async fn exercise_execution(
         ));
         let deleted = store.load(instance.id).await?;
         executor
-            .execute(physical_envelope(&deleted, 1, true, deadline)?)
+            .execute(physical_envelope(pool, &deleted, 1, true, deadline).await?)
             .await?;
         assert_eq!(physical_calls.load(Ordering::SeqCst), 2);
         assert_original_release(
@@ -1246,7 +1257,7 @@ async fn exercise_execution(
     if container {
         assert!(matches!(
             executor
-                .execute(physical_envelope(&restarted, 1, false, deadline)?)
+                .execute(physical_envelope(pool, &restarted, 1, false, deadline).await?)
                 .await,
             Err(
                 environment_service::ContainerExecutorFenceError::RuntimeAdmission(
@@ -1257,7 +1268,7 @@ async fn exercise_execution(
     }
     // A restarted executor replays an already completed effect, despite loss of current funding.
     let recovered = environment_service::FencedContainerExecutor::new(
-        environment_service::PgContainerExecutorFenceStore::new(pool.clone()),
+        container_fence_store(pool.clone(), instance).await?,
         PhysicalClusterFixture(physical_calls.clone(), store.current_time().await?),
     )
     .with_runtime_admission(admission.clone());
@@ -1307,7 +1318,7 @@ async fn exercise_execution(
     if container {
         assert!(matches!(
             recovered
-                .execute(physical_envelope(&failed, 1, false, deadline)?)
+                .execute(physical_envelope(pool, &failed, 1, false, deadline).await?)
                 .await,
             Err(
                 environment_service::ContainerExecutorFenceError::RuntimeAdmission(
@@ -1327,7 +1338,7 @@ async fn exercise_execution(
     let deleted = store.load(instance.id).await?;
     if container {
         recovered
-            .execute(physical_envelope(&deleted, 1, true, deadline)?)
+            .execute(physical_envelope(pool, &deleted, 1, true, deadline).await?)
             .await?;
         assert_eq!(physical_calls.load(Ordering::SeqCst), 2);
     }

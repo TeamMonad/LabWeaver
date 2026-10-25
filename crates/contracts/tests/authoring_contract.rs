@@ -352,7 +352,6 @@ fn runtime_permission_projection_covers_every_authority_bearing_field()
         ),
         ("/security/runAsUser", json!(0)),
         ("/security/capabilities", json!(["NET_ADMIN"])),
-        ("/security/allowPrivilegeEscalation", json!(true)),
         ("/security/readOnlyRootFilesystem", json!(true)),
         ("/entries/0/name", json!("other")),
         ("/runtime/provider_binding", json!("container-other")),
@@ -457,6 +456,9 @@ fn ordinary_runtime_security_defaults_and_rejections() -> Result<(), Box<dyn std
     assert!(!baseline.security.allow_privilege_escalation);
     assert!(!baseline.security.privileged);
     assert!(baseline.security.capabilities.is_empty());
+    value["security"]["allowPrivilegeEscalation"] = json!(null);
+    let nullable: EnvironmentSpec = serde_json::from_value(value.clone())?;
+    assert!(!nullable.security.allow_privilege_escalation);
     value["security"]["capabilities"] = json!(["NET_ADMIN"]);
     value["security"]["runAsUser"] = json!(0);
     let root: EnvironmentSpec = serde_json::from_value(value.clone())?;
@@ -470,6 +472,7 @@ fn ordinary_runtime_security_defaults_and_rejections() -> Result<(), Box<dyn std
         ("capabilities", json!(["SYS_ADMIN"])),
         ("capabilities", json!(["BPF"])),
         ("privileged", json!(true)),
+        ("allowPrivilegeEscalation", json!(true)),
         ("seccomp", json!("unconfined")),
         ("runAsUser", json!(u32::MAX)),
     ] {

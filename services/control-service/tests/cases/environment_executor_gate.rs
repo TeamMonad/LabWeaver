@@ -4,12 +4,12 @@ use async_trait::async_trait;
 use contracts::{UtcTimestamp, authoring::RuntimeKind, environment::EnvironmentInstance};
 use environment_service::{
     ContainerApplyObservation, ContainerBackendFence, ContainerExecutorBackend,
-    ContainerExecutorRequest, ContainerExecutorResponse, ContainerResource,
+    ContainerExecutorRequest, ContainerExecutorResponse,
     FencedContainerExecutor, FencedKubeVirtExecutor, KUBEVIRT_BACKEND_PROTOCOL_VERSION,
     KubeVirtBackendFence, KubeVirtBaseDiskIdentity, KubeVirtExecutionInstance,
     KubeVirtExecutionPermit, KubeVirtExecutorBackend, KubeVirtExecutorRequest,
     KubeVirtExecutorRequestEnvelope, KubeVirtExecutorResponse, KubeVirtResourcePlan,
-    KubeVirtRunningObservation, PgContainerExecutorFenceStore, PgKubeVirtExecutorFenceStore,
+    KubeVirtRunningObservation, PgKubeVirtExecutorFenceStore,
     ProviderFailure, ProviderFailureCode, ReconcileAction,
 };
 use persistence_sqlx::Sha256Digest;
@@ -113,20 +113,12 @@ async fn execute(
         PgEnvironmentStore::new(pool.clone()).current_time().await?,
     );
     if instance.runtime_kind == RuntimeKind::Container {
-        let mut envelope = super::physical_envelope(instance, 1, false, deadline)?;
+        let mut envelope = super::physical_envelope(pool, instance, 1, false, deadline).await?;
         let ContainerExecutorRequest::Apply { mut plan } = envelope.request else {
             return Err("apply fixture".into());
         };
-        plan.resources.clear();
-        // Apply with no Deployment/PVC must not bypass admission either: any nonempty apply is a write.
-        if matches!(action, ReconcileAction::Provision | ReconcileAction::Reset) {
-            plan.resources.push(ContainerResource {
-                kind: "Service".into(),
-                namespace: Some(plan.namespace.clone()),
-                name: "runtime".into(),
-                document: serde_json::json!({"kind":"Service"}),
-            });
-        }
+        // Sparse writes retain the trusted projector's exact Service document and metadata.
+        plan.resources.retain(|resource| matches!(action, ReconcileAction::Provision | ReconcileAction::Reset) && resource.kind == "Service");
         envelope.request = match action {
             ReconcileAction::Provision | ReconcileAction::Reset => {
                 ContainerExecutorRequest::Apply { plan }
@@ -145,7 +137,7 @@ async fn execute(
             "attempt": 1, "action": action, "deadlineAt": deadline, "request": envelope.request,
         }))?;
         let response =
-            FencedContainerExecutor::new(PgContainerExecutorFenceStore::new(pool.clone()), backend)
+            FencedContainerExecutor::new(super::container_fence_store(pool.clone(), instance).await?, backend)
                 .with_runtime_admission(admission.clone())
                 .execute(envelope)
                 .await?;
@@ -296,7 +288,7 @@ pub(super) async fn assert_security_rejections(
     use environment_service::{ContainerExecutorFenceError, ContainerExecutorRequestEnvelope};
     let calls = Arc::new(AtomicUsize::new(0));
     let executor = FencedContainerExecutor::new(
-        PgContainerExecutorFenceStore::new(pool.clone()),
+        super::container_fence_store(pool.clone(), instance).await?,
         Cluster(
             calls.clone(),
             PgEnvironmentStore::new(pool.clone()).current_time().await?,
@@ -329,7 +321,7 @@ pub(super) async fn assert_security_rejections(
                 .ok_or("receipt")?
                 .valid_until,
         );
-        let mut fence = super::physical_envelope(instance, 1, false, deadline)?.fence;
+        let mut fence = super::physical_envelope(pool, instance, 1, false, deadline).await?.fence;
         fence.request_id = Sha256Digest::of_canonical(&serde_json::json!({
             "protocolVersion": fence.protocol_version, "environmentId": fence.environment_id,
             "operationId": fence.operation_id, "providerStep": fence.provider_step,

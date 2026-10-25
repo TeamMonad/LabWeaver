@@ -375,16 +375,14 @@ async fn ordinary_capability_publication_requires_platform_range_and_current_sco
     apply_domain_migrations(&pool, Domain::Control).await?;
     let mut fixture = ManualPublication::new(&pool, RuntimeKind::Container).await?;
     let owner = fixture.project.owner_actor_id;
-    for (index, mutate) in [(0, true), (1, false)] {
+    let security = fixture.request.manual.as_ref().ok_or("manual")?.spec.security.clone();
+    for (index, rejected) in [
+        contracts::authoring::EnvironmentSecuritySpec { privileged: true, ..security.clone() },
+        contracts::authoring::EnvironmentSecuritySpec { capabilities: std::collections::BTreeSet::from([contracts::platform_configuration::LinuxCapability::SysAdmin]), ..security.clone() },
+        contracts::authoring::EnvironmentSecuritySpec { run_as_user: Some(1000), allow_privilege_escalation: true, ..security },
+    ].into_iter().enumerate() {
         let mut invalid = fixture.request.clone();
-        let security = &mut invalid.manual.as_mut().ok_or("manual")?.spec.security;
-        if mutate {
-            security.privileged = true;
-        } else {
-            security
-                .capabilities
-                .insert(contracts::platform_configuration::LinuxCapability::SysAdmin);
-        }
+        invalid.manual.as_mut().ok_or("manual")?.spec.security = rejected;
         assert!(matches!(
             fixture
                 .publish(owner, &format!("unsupported-security-{index}"), &invalid)

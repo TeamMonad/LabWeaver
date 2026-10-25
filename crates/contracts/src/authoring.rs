@@ -531,7 +531,8 @@ pub struct EnvironmentSecuritySpec {
     pub privileged: bool,
     #[serde(default)]
     pub capabilities: BTreeSet<crate::platform_configuration::LinuxCapability>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable_privilege_escalation")]
+    #[schemars(schema_with = "no_privilege_escalation_schema")]
     pub allow_privilege_escalation: bool,
     #[serde(default)]
     pub read_only_root_filesystem: bool,
@@ -539,6 +540,14 @@ pub struct EnvironmentSecuritySpec {
     pub seccomp: RuntimeSeccompProfile,
     pub public_exposure_policy: PublicExposurePolicy,
     pub security_profile_binding: String,
+}
+
+fn nullable_privilege_escalation<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    Ok(Option::<bool>::deserialize(deserializer)?.unwrap_or(false))
+}
+
+fn no_privilege_escalation_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({"anyOf": [{"type":"boolean","const":false}, {"type":"null"}], "default":false})
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -772,6 +781,7 @@ impl EnvironmentSpec {
             ));
         }
         if self.security.privileged
+            || self.security.allow_privilege_escalation
             || self.security.seccomp != RuntimeSeccompProfile::RuntimeDefault
             || self
                 .security
@@ -780,7 +790,7 @@ impl EnvironmentSpec {
                 .any(|capability| !capability.supported_in_container())
         {
             return Err(AuthoringError::InvalidEnvironmentSpec(
-                "LW_RUNTIME_SECURITY_UNSUPPORTED: privileged, unconfined seccomp and broad kernel capabilities require an unsupported execution boundary".to_owned(),
+                "LW_RUNTIME_SECURITY_UNSUPPORTED: privilege escalation, privileged, unconfined seccomp and broad kernel capabilities are unsupported".to_owned(),
             ));
         }
         let mut entry_names = BTreeSet::new();

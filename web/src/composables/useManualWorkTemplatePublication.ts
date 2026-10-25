@@ -141,7 +141,7 @@ export function manualTemplateSpec(draft: ManualWorkTemplateDraft, image: Templa
   }
   const security = {
     runAsUser: null,
-    allowPrivilegeEscalation: false,
+    allowPrivilegeEscalation: false as const,
     readOnlyRootFilesystem: false,
     publicExposurePolicy: 'deny' as const,
     securityProfileBinding: draft.securityProfileBinding.trim(),

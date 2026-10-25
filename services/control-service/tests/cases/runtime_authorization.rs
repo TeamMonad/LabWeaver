@@ -40,6 +40,20 @@ pub(super) enum ExecutorFailure {
     Lease,
     Funding,
     ResourceUnavailable,
+    Security(ContainerSecurityTampering),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ContainerSecurityTampering {
+    HostNetwork,
+    HostPid,
+    HostIpc,
+    HostPath,
+    ExtraContainer,
+    ServiceAccount,
+    ServiceAccountToken,
+    PrivilegeEscalation,
+    NamespacePsa,
 }
 
 async fn progress(
