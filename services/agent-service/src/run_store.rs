@@ -1907,7 +1907,10 @@ impl PostgresAgentRunStore {
                 .map_err(|_| AgentRunStoreError::InvalidContract)?;
                 let created_at = persisted_timestamp(&row, "created_at")?;
                 let updated_at = persisted_timestamp(&row, "updated_at")?;
-                let created_at_key = created_at.get();
+                // Public timestamps are millisecond precision; the seek key must retain PG microseconds.
+                let created_at_key = row
+                    .try_get::<OffsetDateTime, _>("created_at")
+                    .map_err(|_| AgentRunStoreError::InvalidContract)?;
                 if row_project_id != project_id {
                     return Err(AgentRunStoreError::InvalidContract);
                 }

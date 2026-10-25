@@ -241,6 +241,16 @@ async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
         environment_service::PgReleaseProjectionStore::new(pool.clone()),
     )
     .await?;
+    let orphan_receiver = service_runtime::subscribe_shutdown();
+    let orphan_kind = match kind {
+        RuntimeKind::Container => contracts::authoring::RuntimeKind::Container,
+        RuntimeKind::KubeVirt => contracts::authoring::RuntimeKind::VirtualMachine,
+    };
+    let orphan_scan =
+        backend
+            .clone()
+            .run_orphan_reconciler(pool.clone(), orphan_kind, orphan_receiver);
+    tokio::pin!(orphan_scan);
     match kind {
         RuntimeKind::Container => {
             let terminal = terminal.ok_or(MainError::Configuration)?;
@@ -267,7 +277,8 @@ async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
                     service_runtime::run("container-executor")
                         .await
                         .map_err(MainError::Service)
-                }
+                },
+                async { orphan_scan.as_mut().await.map_err(MainError::OrphanScan) },
             )?;
         }
         RuntimeKind::KubeVirt => {
@@ -316,6 +327,7 @@ async fn run_runtime_executor(kind: RuntimeKind) -> Result<(), MainError> {
                         .await
                         .map_err(MainError::Service)
                 },
+                async { orphan_scan.as_mut().await.map_err(MainError::OrphanScan) },
             )?;
         }
     }
@@ -429,6 +441,8 @@ enum MainError {
     ResourceUsage(#[from] environment_service::ResourceUsageClientError),
     #[error("LW_ENVIRONMENT_CONFIG_INVALID")]
     Configuration,
+    #[error("environment orphan scan failed: {0:?}")]
+    OrphanScan(environment_service::ProviderFailure),
     #[error("LW_ENVIRONMENT_SCHEMA_UNAVAILABLE")]
     SchemaUnavailable,
     #[error(transparent)]

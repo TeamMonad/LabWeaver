@@ -297,3 +297,35 @@ compute/storage effect also checks the current operation and generation (and the
 Container plan's project). Existing completed responses can replay if current funds
 are unavailable; a new effect cannot begin. Cleanup keeps its existing ownership,
 UID, generation and tombstone checks and does not depend on a new credit grant.
+
+## Kubernetes orphan inventory and recovery
+
+Both runtime executors inspect one Kubernetes inventory page (at most 100 objects) every
+60 seconds and carry the apiserver continuation token to the next pass. Dedicated placement
+scans namespaces labeled `labweaver.io/managed=true`; existing-namespace container placement
+first verifies the configured namespace UID, then scans the managed runtime Deployments.
+The runtime ServiceAccount needs `list` on those already managed resource kinds. The scan
+never treats a label selector as ownership proof: it checks object UID, exact name, labels,
+project and the durable Environment aggregate before deciding what to do.
+
+The scan does not delete objects directly. A durable failed deletion with desired state
+`Deleted`, no active lifecycle operation, no endpoints and no mutable-disk preservation
+re-enters the existing revisioned `Cleanup` pipeline. Its original owner and current revision
+come from the database; the scanner does not invent a user principal, Access revocation receipt,
+compute grant or cleanup-complete receipt. Concurrent lifecycle changes invalidate admission.
+The ordinary worker and provider keep their lease, attempt, generation and UID protections.
+A namespace delete conflict may retry the same UID, but must never adopt a replacement UID.
+
+Objects with unknown, malformed or conflicting ownership stay untouched and are reported as
+unverified. Live/stopped workloads and active operations remain referenced. An object found
+after a durable `Deleted` result is reported as inconsistent; it is not automatically removed
+or used to release capacity again. Workloads with retained disks or endpoints requiring a
+real Access revocation remain diagnostic-only. Operators must resolve those inconsistencies
+through the owning lifecycle and storage procedures, not by removing arbitrary finalizers.
+
+Evaluation's existing orphan Job reconciler separately checks manager, namespace, run, step,
+attempt and checkpoint UID. A running attempt is recovered by its scheduler, not removed by
+the scan. Terminal cleanup uses the existing executor and UID/resourceVersion preconditions;
+another manager, attempt or UID is not cleanup authority. List and database failures retain
+objects for a later pass, and neither scanner fabricates Resource release or accounting.
+

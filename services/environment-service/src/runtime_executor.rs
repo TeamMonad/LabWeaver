@@ -32,6 +32,10 @@ use crate::{
     kubevirt_launcher_sizing::{LauncherQuota, cpu_matches, launcher_quota},
 };
 
+#[path = "environment_orphans.rs"]
+mod orphan_reconcile;
+pub use orphan_reconcile::EnvironmentOrphanReport;
+
 const FIELD_MANAGER: &str = "labweaver-runtime-executor";
 const CLEANUP_MEDIA_TYPE: &str = "application/vnd.labweaver.environment-cleanup+json";
 const VM_VGPU_PRIVATE_CLOUD_INIT_SECRET: &str = "vm-vgpu-cloud-init";
@@ -875,6 +879,9 @@ impl KubernetesContainerExecutor {
         kubevirt_permit: Option<&crate::KubeVirtExecutionPermit>,
     ) -> Result<(), ProviderFailure> {
         let url = self.namespaced_url(&format!("/api/v1/namespaces/{namespace}"))?;
+        // A 409 may mean replacement, not just a resourceVersion change. Never adopt a
+        // different namespace incarnation on the next retry of an older cleanup.
+        let mut admitted_uid = None;
         loop {
             if timestamp()?.get() >= deadline_at.get() {
                 return Err(unavailable());
@@ -887,6 +894,10 @@ impl KubernetesContainerExecutor {
             };
             verify_namespace_identity(&value, namespace, environment_id)?;
             let uid = pointer_uuid(&value, "/metadata/uid")?;
+            if admitted_uid.is_some_and(|admitted| admitted != uid) {
+                return Err(rejected());
+            }
+            admitted_uid = Some(uid);
             let resource_version = value
                 .pointer("/metadata/resourceVersion")
                 .and_then(Value::as_str)
@@ -4421,6 +4432,7 @@ mod tests {
     enum LifecycleDeletion {
         Finalizer,
         Immediate,
+        ReplaceNamespaceConflict,
     }
 
     struct LifecycleKubernetes {
@@ -4532,6 +4544,11 @@ mod tests {
             return StatusCode::NOT_FOUND.into_response();
         };
         if method == Method::DELETE {
+            if fixture.deletion == LifecycleDeletion::ReplaceNamespaceConflict {
+                object["metadata"]["uid"] = json!(uuid::Uuid::from_u128(999));
+                fixture.deletion = LifecycleDeletion::Immediate;
+                return StatusCode::CONFLICT.into_response();
+            }
             if body.pointer("/preconditions/uid") != object.pointer("/metadata/uid")
                 || body.pointer("/preconditions/resourceVersion")
                     != object.pointer("/metadata/resourceVersion")
@@ -5329,6 +5346,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn namespace_cleanup_never_adopts_replacement_after_delete_conflict()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let environment_id = contracts::EnvironmentId::new();
+        let project_id = contracts::ProjectId::new();
+        let namespace = format!("lw-env-{environment_id}");
+        let mut fixture = LifecycleKubernetes::owned(environment_id, project_id);
+        fixture.deletion = LifecycleDeletion::ReplaceNamespaceConflict;
+        let mock = spawn_lifecycle_kubernetes(Some(fixture)).await?;
+        let (_files, executor) = test_kubevirt_executor(&mock).await?;
+        assert!(
+            executor
+                .remove_owned_namespace(
+                    environment_id,
+                    project_id,
+                    &namespace,
+                    stop_fence(environment_id).deadline_at,
+                    None
+                )
+                .await
+                .is_err()
+        );
+        let state = mock
+            .lifecycle
+            .as_ref()
+            .ok_or("missing lifecycle fixture")?
+            .lock()
+            .await;
+        assert_eq!(
+            state
+                .objects
+                .get(&format!("/api/v1/namespaces/{namespace}"))
+                .and_then(|object| object.pointer("/metadata/uid")),
+            Some(&json!(uuid::Uuid::from_u128(999)))
+        );
+        assert_eq!(
+            mock.events
+                .lock()
+                .await
+                .iter()
+                .filter(|event| event.starts_with("DELETE"))
+                .count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn cleanup_observes_absence_and_rejects_wrong_project_or_forbidden_before_mutation()
     -> Result<(), Box<dyn std::error::Error>> {
         let environment_id = contracts::EnvironmentId::new();
@@ -5382,6 +5446,121 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn orphan_scan_recovers_only_durable_failed_deletion_and_keeps_foreign_objects()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use contracts::environment::{EnvironmentOperationKind, OperationState};
+        use testcontainers::{ImageExt, runners::AsyncRunner};
+        let postgres = testcontainers_modules::postgres::Postgres::default()
+            .with_tag("17.5-alpine")
+            .start()
+            .await?;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&format!(
+                "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+                postgres.get_host_port_ipv4(5432).await?
+            ))
+            .await?;
+        crate::test_support::apply_environment_migrations(&pool).await?;
+        let store = crate::PgEnvironmentStore::new(pool.clone());
+        let doomed = crate::test_support::requested_instance();
+        store.create("orphan-failed-delete", &doomed).await?;
+        let live = crate::test_support::requested_instance();
+        store.create("orphan-live", &live).await?;
+        let now = timestamp().map_err(|error| format!("{error:?}"))?;
+        let command = crate::LifecycleCommand {
+            environment_id: doomed.id,
+            kind: EnvironmentOperationKind::Cleanup,
+            expected_revision: doomed.revision,
+            actor_id: doomed.owner_id,
+            trace_id: "orphan-fixture".to_owned(),
+            accepted_at: now,
+            deadline_at: UtcTimestamp::from_utc(now.get() + time::Duration::minutes(10))?,
+            access_revocation_revision: None,
+            preserve_mutable_disk: false,
+            max_attempts: 3,
+            reset_target: None,
+        };
+        store
+            .accept_command("orphan-delete-intent", &command)
+            .await?;
+        let lease = store
+            .claim_due("orphan-worker", Duration::from_secs(30))
+            .await?
+            .ok_or("missing cleanup lease")?;
+        // The live create may be claimed first; keep its operation active but not due.
+        let lease = if lease.instance.id == doomed.id {
+            lease
+        } else {
+            store
+                .claim_due("orphan-worker", Duration::from_secs(30))
+                .await?
+                .ok_or("missing cleanup lease")?
+        };
+        assert_eq!(lease.instance.id, doomed.id);
+        let failed = crate::apply_provider_failure(
+            &lease.instance,
+            lease.instance.operation.id,
+            "LW_ENVIRONMENT_PROVIDER_TIMEOUT",
+        )?;
+        store.save_reconciled(&lease, &failed).await?;
+        let namespace = |id: contracts::EnvironmentId, project: contracts::ProjectId| {
+            json!({
+                "metadata":{"name":format!("lw-env-{id}"),"uid":uuid::Uuid::now_v7(),
+                    "labels":{"labweaver.io/managed":"true","labweaver.io/environment-id":id,
+                        "labweaver.io/project-id":project}}
+            })
+        };
+        let owned = namespace(doomed.id, doomed.project_id);
+        let mut unmanaged = owned.clone();
+        unmanaged["metadata"]["labels"]["labweaver.io/managed"] = json!("false");
+        let foreign = namespace(contracts::EnvironmentId::new(), doomed.project_id);
+        let wrong_project = namespace(doomed.id, contracts::ProjectId::new());
+        let mut malformed = owned.clone();
+        malformed["metadata"]["uid"] = Value::Null;
+        let mock = spawn_mock_kubernetes().await?;
+        let (_files, executor) = test_kubevirt_executor(&mock).await?;
+        mock.get_responses.lock().await.insert("/api/v1/namespaces".to_owned(), Some(json!({
+            "metadata":{"continue":"next-page"},
+            "items":[owned,namespace(live.id,live.project_id),unmanaged,foreign,wrong_project,malformed]
+        })));
+        let (report, next) = executor
+            .reconcile_orphans(&pool, contracts::authoring::RuntimeKind::Container, None)
+            .await
+            .map_err(|error| format!("scan failed: {error:?}"))?;
+        assert_eq!(next.as_deref(), Some("next-page"));
+        assert_eq!(
+            report,
+            EnvironmentOrphanReport {
+                scanned: 6,
+                referenced: 1,
+                unverified: 4,
+                inconsistent: 0,
+                recovering: 1
+            }
+        );
+        let recovered = store.load(doomed.id).await?;
+        assert_eq!(recovered.operation.kind, EnvironmentOperationKind::Cleanup);
+        assert_eq!(recovered.operation.state, OperationState::Accepted);
+        assert_eq!(recovered.generation, failed.generation + 1);
+        let (again, _) = executor
+            .reconcile_orphans(&pool, contracts::authoring::RuntimeKind::Container, None)
+            .await
+            .map_err(|error| format!("scan replay failed: {error:?}"))?;
+        assert_eq!(again.recovering, 0);
+        assert_eq!(store.load(doomed.id).await?.revision, recovered.revision);
+        assert!(
+            mock.events
+                .lock()
+                .await
+                .iter()
+                .all(|event| event.starts_with("GET"))
+        );
         Ok(())
     }
 

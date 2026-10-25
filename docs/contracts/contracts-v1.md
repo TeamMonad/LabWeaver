@@ -55,3 +55,25 @@ AgentRun 游标绑定项目和状态过滤；ResourceRequest 游标另外绑定�
 只返回当前会话 actor 自己提交的申请，管理员才可读取项目内全部申请。非法、篡改或跨范围游标返回
 `LW_AGENT_RUN_HISTORY_CURSOR_INVALID` 或 `LW_RESOURCE_REQUEST_CURSOR_INVALID`；项目权限失败仍返回
 `LW_ACCESS_DENIED`。
+
+## Access 与 Evaluation 列表续页
+
+Access 的 SSH 公钥列表和环境 AccessGrant 列表复用 `{items, nextCursor}`。
+`limit` 范围为 1–100，默认 50。把响应中的非空 `nextCursor` 原样传给下一次请求；
+`nextCursor=null` 表示本次读取没有后续记录。不要从公开的毫秒时间戳自行构造游标。
+SSH 公钥按数据库 `created_at ASC, key_id ASC` 排序；AccessGrant 按
+`created_at DESC, grant_id DESC` 排序。数据库先限制当前 actor、环境、状态与 endpoint，
+再取页，因此其他用户的记录和不匹配 endpoint 的记录不占页容量。
+游标绑定 actor 及过滤条件，不能跨用户、环境或过滤条件重用。非法游标返回
+`LW_CONTRACT_DOCUMENT_INVALID`。这两类游标不是新的授权凭据；每次查询仍应用真实会话权限。
+
+Evaluation release 列表按 `published_at DESC, release_id DESC` 排序；学生结果列表按
+不可变的 `created_at DESC, run_id DESC` 排序，而不是会随重评、清理更新的 `updated_at`。
+游标保存完整的数据库排序键和查询范围，不依赖签发游标的那条记录继续存在或仍为 active。
+原 release 被撤回后，后续页仍可继续。学生结果游标不能跨 actor 复用。
+
+这些续页是 keyset 读取，不是跨 HTTP 请求保持的数据库事务快照。并发删除的记录不再返回；
+新增记录若排在已访问边界之前，需要刷新列表才能看到。并发新增/删除不会移动既有记录的排序键，
+也不会因为删除上一页末项而重复或跳过仍符合过滤条件的记录。状态或权限改变后，每页采用当前权限，
+不承诺重放已失效的记录。Agent 历史游标同样保留 PostgreSQL 微秒精度，公开 DTO 仍使用毫秒。
+

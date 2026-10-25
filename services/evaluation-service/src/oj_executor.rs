@@ -1315,6 +1315,33 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn orphan_cleanup_rejects_foreign_manager_and_new_attempt_without_deletion()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (request, intent) = compile_request()?;
+        let job_name = attempt_job_name(request.attempt_id);
+        let path = resource_path("batch/v1", "jobs", &job_name);
+        for label in ["labweaver.io/managed-by", "labweaver.io/attempt-id"] {
+            let mut foreign = object_document(&request, &job_name, "uid-job", "jobs")?;
+            foreign["metadata"]["labels"][label] = json!(if label.ends_with("managed-by") {
+                "another-controller".to_owned()
+            } else {
+                uuid::Uuid::now_v7().to_string()
+            });
+            let fake = fake_executor(BTreeMap::from([(path.clone(), foreign.clone())])).await?;
+            let recovered = hydrated(&intent, vec![execution_ref("jobs", &job_name, "uid-job")]);
+            assert!(fake.executor.cleanup_recovery(&recovered).await.is_err());
+            assert_eq!(
+                fake.objects
+                    .lock()
+                    .map_err(|_| "fake object state poisoned")?
+                    .get(&path),
+                Some(&foreign)
+            );
+        }
+        Ok(())
+    }
+
     fn resource() -> serde_json::Value {
         json!({
             "apiVersion":"batch/v1",

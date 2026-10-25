@@ -110,7 +110,9 @@ pub use runtime::{OwnerResolverRuntime, OwnerResolverRuntimeError};
 pub use runtime_admission::{
     EnvironmentRuntimeAdmission, EnvironmentRuntimeAuthority, RuntimeAdmissionError,
 };
-pub use runtime_executor::{KubernetesContainerExecutor, RuntimeExecutorConfiguration};
+pub use runtime_executor::{
+    EnvironmentOrphanReport, KubernetesContainerExecutor, RuntimeExecutorConfiguration,
+};
 pub use store::{
     EnvironmentInventoryFilter, EnvironmentInventoryPage, EnvironmentOperationPage,
     EnvironmentStoreError, InboundCommandDecision, InboundLifecycleCommand, LeasedEnvironment,

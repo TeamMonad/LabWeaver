@@ -140,6 +140,193 @@ async fn release_and_run_are_idempotent_and_close_identity()
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn release_cursor_survives_concurrent_insert_and_withdrawal_without_cross_scope_rows()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = TestContext::start(single_score_spec()?).await?;
+    let mut releases = Vec::new();
+    for index in 0..4 {
+        let mut request = fixture.publish_request.clone();
+        request.candidate_id = CandidateId::new();
+        request.approval_id = ApprovalId::new();
+        if index == 3 {
+            request.course_id = Some(CourseId::new());
+            request.execution_binding =
+                evaluation_execution_binding(request.project_id, request.course_id);
+        }
+        let release = match fixture
+            .store
+            .publish_release(
+                &request,
+                &idempotency(&format!("paging-release-{index}"))?,
+                fixture.now().await?,
+                "trace-paging",
+            )
+            .await?
+        {
+            EvaluationReleaseReservation::Created(release)
+            | EvaluationReleaseReservation::Replayed(release) => release,
+        };
+        releases.push(release);
+    }
+    // All three visible rows share a full-precision key prefix; UUID breaks the tie.
+    sqlx::query(
+        "UPDATE evaluation.evaluation_releases SET published_at='2026-01-01T00:00:00.123456Z'",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let first = fixture
+        .store
+        .list_releases(fixture.project_id, Some(fixture.course_id), None, 1)
+        .await?;
+    let cursor = first
+        .next_cursor
+        .as_deref()
+        .ok_or("missing release cursor")?;
+    assert_eq!(first.items.len(), 1);
+    assert!(
+        fixture
+            .store
+            .list_releases(ProjectId::new(), Some(fixture.course_id), Some(cursor), 1)
+            .await
+            .is_err()
+    );
+    assert!(
+        fixture
+            .store
+            .list_releases(fixture.project_id, Some(CourseId::new()), Some(cursor), 1)
+            .await
+            .is_err()
+    );
+    let anchor = &first.items[0];
+    let withdrawal = InternalWithdrawEvaluationReleaseRequest {
+        project_id: fixture.project_id,
+        course_id: Some(fixture.course_id),
+        expected_revision: anchor.revision,
+        withdrawn_by: fixture.actor_id,
+        reason_code: DiagnosticCode::registered("LW_EVALUATION_RELEASE_WITHDRAWN"),
+    };
+    let mut new_request = fixture.publish_request.clone();
+    new_request.candidate_id = CandidateId::new();
+    new_request.approval_id = ApprovalId::new();
+    let withdraw_key = idempotency("paging-withdraw")?;
+    let insert_key = idempotency("paging-insert")?;
+    let now = fixture.now().await?;
+    let (withdrawn, inserted) = tokio::join!(
+        fixture.store.withdraw_release(
+            anchor.id,
+            &withdrawal,
+            &withdraw_key,
+            now,
+            "trace-paging-withdraw"
+        ),
+        fixture
+            .store
+            .publish_release(&new_request, &insert_key, now, "trace-paging-insert"),
+    );
+    withdrawn?;
+    inserted?;
+    let second = fixture
+        .store
+        .list_releases(fixture.project_id, Some(fixture.course_id), Some(cursor), 1)
+        .await?;
+    let third = fixture
+        .store
+        .list_releases(
+            fixture.project_id,
+            Some(fixture.course_id),
+            second.next_cursor.as_deref(),
+            1,
+        )
+        .await?;
+    assert_eq!(second.items.len(), 1);
+    assert_eq!(third.items.len(), 1);
+    assert!(third.next_cursor.is_none());
+    let actual = [anchor.id, second.items[0].id, third.items[0].id]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        actual,
+        releases[..3].iter().map(|release| release.id).collect()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn student_result_cursor_uses_immutable_creation_key_after_terminal_updates()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = TestContext::start(single_score_spec()?).await?;
+    let mut ids = std::collections::BTreeSet::new();
+    for index in 0..3 {
+        let trace = format!("trace-result-paging-{index}");
+        let run = fixture.create_seeded_run(&trace).await?;
+        fixture
+            .store
+            .request_cancellation(
+                run.id,
+                &mutation(
+                    fixture.project_id,
+                    fixture.course_id,
+                    run.revision,
+                    fixture.actor_id,
+                ),
+                &idempotency(&format!("cancel-paging-{index}"))?,
+                fixture.now().await?,
+                &trace,
+            )
+            .await?;
+        ids.insert(run.id);
+    }
+    sqlx::query("UPDATE evaluation.evaluation_runs SET created_at='2026-01-01T00:00:00.123456Z'")
+        .execute(&fixture.pool)
+        .await?;
+    let first = fixture
+        .store
+        .student_results(fixture.project_id, None, fixture.actor_id, None, 1)
+        .await?;
+    let cursor = first
+        .next_cursor
+        .as_deref()
+        .ok_or("missing student cursor")?;
+    assert!(
+        fixture
+            .store
+            .student_results(fixture.project_id, None, ActorId::new(), Some(cursor), 1)
+            .await
+            .is_err()
+    );
+    // Mutable updated_at must not move an unseen result ahead of the issued boundary.
+    sqlx::query("UPDATE evaluation.evaluation_runs SET updated_at=clock_timestamp()+interval '1 hour' WHERE run_id<>$1")
+        .bind(first.items[0].run_id.as_uuid()).execute(&fixture.pool).await?;
+    let second = fixture
+        .store
+        .student_results(fixture.project_id, None, fixture.actor_id, Some(cursor), 1)
+        .await?;
+    let third = fixture
+        .store
+        .student_results(
+            fixture.project_id,
+            None,
+            fixture.actor_id,
+            second.next_cursor.as_deref(),
+            1,
+        )
+        .await?;
+    assert_eq!(second.items.len(), 1);
+    assert_eq!(third.items.len(), 1);
+    assert!(third.next_cursor.is_none());
+    let actual = [
+        first.items[0].run_id,
+        second.items[0].run_id,
+        third.items[0].run_id,
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(actual, ids);
+    Ok(())
+}
+
+#[tokio::test]
 async fn project_only_submission_runs_and_rejects_scope_or_environment_mismatch()
 -> Result<(), Box<dyn std::error::Error>> {
     let (fixture, release, request) = project_only_run_context().await?;
