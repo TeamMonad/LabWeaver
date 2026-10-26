@@ -2751,6 +2751,10 @@ fn parse_grant_state(v: &str) -> Result<AccessGrantState, ApiError> {
 }
 
 #[cfg(test)]
+#[path = "gateway_membership_tests.rs"]
+mod gateway_membership_tests;
+
+#[cfg(test)]
 mod project_scope_tests {
     use super::*;
     use sqlx::postgres::PgPoolOptions;
