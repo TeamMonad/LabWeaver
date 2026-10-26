@@ -125,6 +125,14 @@ fn contract_reqwest_method(method: contracts::http::Method) -> reqwest::Method {
     }
 }
 
+fn is_browser_facing_contract_operation(operation: &contracts::http::OperationContract) -> bool {
+    operation.surface == contracts::http::ApiSurface::Public
+        && matches!(
+            operation.security,
+            contracts::http::Security::Oidc | contracts::http::Security::BffSession
+        )
+}
+
 async fn assert_problem_response(
     response: reqwest::Response,
     status: StatusCode,
@@ -2148,14 +2156,19 @@ async fn public_contract_routes_are_registered_and_template_images_require_membe
     assert_eq!(forwarded[0]["actor"], member.to_string());
     assert!(!denied_problem.retryable);
 
+    let expected_browser_operations = contracts::http::OPERATIONS
+        .iter()
+        .filter(|operation| is_browser_facing_contract_operation(operation))
+        .count();
+    let mut checked_operations = 0;
+    let mut checked_template_image_operation = false;
     let mut missing_routes = Vec::new();
-    for operation in contracts::http::OPERATIONS.iter().filter(|operation| {
-        operation.surface == contracts::http::ApiSurface::Public
-            && matches!(
-                operation.security,
-                contracts::http::Security::Oidc | contracts::http::Security::BffSession
-            )
-    }) {
+    for operation in contracts::http::OPERATIONS {
+        if !is_browser_facing_contract_operation(operation) {
+            continue;
+        }
+        checked_operations += 1;
+        checked_template_image_operation |= operation.operation_id == "listProjectTemplateImages";
         let path = contract_route_path(operation.path);
         let method = contract_reqwest_method(operation.method);
         let response = client
@@ -2175,6 +2188,18 @@ async fn public_contract_routes_are_registered_and_template_images_require_membe
             ));
         }
     }
+    assert!(
+        checked_operations > 0,
+        "the route audit must check browser operations"
+    );
+    assert!(
+        checked_operations >= expected_browser_operations,
+        "checked {checked_operations} of {expected_browser_operations} browser-facing contract operations"
+    );
+    assert!(
+        checked_template_image_operation,
+        "the route audit must include listProjectTemplateImages"
+    );
     assert!(
         missing_routes.is_empty(),
         "public contract operations must have a same-method Access route:\n{}",
