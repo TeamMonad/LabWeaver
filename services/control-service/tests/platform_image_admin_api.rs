@@ -1653,17 +1653,20 @@ async fn spawn_tls_service(
     let acceptor = TlsAcceptor::from(config);
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     let task = tokio::spawn(async move {
+        // The server owns its accepted connections, so stopping it also closes keep-alive TLS.
+        let mut connections = tokio::task::JoinSet::new();
         loop {
             let accepted = tokio::select! {
                 result = listener.accept() => result,
                 _ = &mut shutdown_rx => return,
+                _ = connections.join_next(), if !connections.is_empty() => continue,
             };
             let Ok((stream, _)) = accepted else {
                 return;
             };
             let acceptor = acceptor.clone();
             let router = router.clone();
-            tokio::spawn(async move {
+            connections.spawn(async move {
                 let Ok(stream) = acceptor.accept(stream).await else {
                     return;
                 };
@@ -3227,5 +3230,245 @@ async fn abandoned_multipart_uploads_abort_and_accepted_completion_survives_expi
             .map(|request| request.upload_id),
         Some(session.upload_id)
     );
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one authenticated HTTP journey publishes, loses its response, shuts down the runtime authority, and replays without downstream reads"
+)]
+#[tokio::test]
+async fn committed_manual_release_replays_after_environment_transport_is_unavailable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, _postgres) = import_database().await?;
+    let control_config = config()?;
+    let control = ControlService::new(
+        pool.clone(),
+        Arc::new(PlatformImageObjects::new(Vec::new())),
+        control_config.clone(),
+    )?;
+    let actor = ActorId::new();
+    let now = import_now()?;
+    let project = control
+        .create_project(
+            actor,
+            PlatformRole::Teacher,
+            &contracts::CreateProjectRequest {
+                name: "manual publication retry".to_owned(),
+                description: None,
+                course_id: None,
+            },
+            &IdempotencyKey::parse("manual-replay-project")?,
+            now,
+        )
+        .await?;
+    let mut image = platform_image_entry(
+        "manual-replay-image",
+        PlatformImageKind::Container,
+        &format!("sha256:{}", "a".repeat(64)),
+        now,
+    );
+    image.source_reference = "harbor.internal/labweaver-system/manual-replay-image:v1".to_owned();
+    let options: contracts::manual_templates::ManualTemplateRuntimeOptions =
+        serde_json::from_value(json!({"providers":[{
+            "binding":"container-primary-v1","label":"容器环境","description":"平台配置中的运行位置","runtimeKind":"container","storageClasses":[]
+        }]}))?;
+    let spec = serde_json::from_value(json!({
+        "apiVersion":"environment.labweaver.io/v1","kind":"EnvironmentSpec","name":"无模型模板","class":"work",
+        "resources":{"cpuMillicores":1000,"memoryBytes":1_073_741_824_u64,"storageBytes":10_737_418_240_u64},
+        "network":{"mode":"deny_all"},"entries":[{"name":"web","protocol":"http","servicePort":8080}],
+        "security":{"publicExposurePolicy":"deny","securityProfileBinding":"restricted-v1"},
+        "runtime":{"kind":"container","provider_binding":"container-primary-v1","service_port":8080},
+        "retention":{"policyId":control_config.retention_policy_id,"policyRevision":1,"class":"run_evidence","disposition":"delete","retainUntil":UtcTimestamp::from_utc(now.get()+Duration::hours(12))?}
+    }))?;
+    let request = CreateEnvironmentTemplateReleaseRequest {
+        project_id: project.id,
+        course_id: None,
+        candidate_id: None,
+        candidate_revision: None,
+        runtime_kind: RuntimeKind::Container,
+        approval_id: None,
+        manual: Some(Box::new(contracts::http::ManualWorkTemplateRequest {
+            platform_image_id: image.catalog_id,
+            platform_image_generation: image.repin_generation,
+            template_family_id: "manual-replay".to_owned(),
+            description: "无模型重试".to_owned(),
+            spec,
+            reason: "审核并确认发布".to_owned(),
+            confirmed: true,
+        })),
+    };
+    let key = IdempotencyKey::parse("lost-manual-release-response")?;
+    let (ca, leaf, private, jwk) = tls_material()?;
+    let temporary = tempfile::tempdir()?;
+    let ca_path = temporary.path().join("publication-replay-ca.pem");
+    std::fs::write(&ca_path, ca)?;
+    let authority = spawn_authority(jwk).await?;
+    let access_server =
+        spawn_access_server(&leaf, &private, Arc::new(AtomicBool::new(false))).await?;
+    let agent_reads = Arc::new(AtomicUsize::new(0));
+    let observed_agent = Arc::clone(&agent_reads);
+    let catalog = PlatformImageCatalog {
+        entries: vec![image],
+    };
+    let agent_server = spawn_tls_service(
+        Router::new().route(
+            "/internal/v1/platform-images",
+            get(move || {
+                let reads = Arc::clone(&observed_agent);
+                let catalog = catalog.clone();
+                async move {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    Json(catalog)
+                }
+            }),
+        ),
+        &leaf,
+        &private,
+    )
+    .await?;
+    let environment_reads = Arc::new(AtomicUsize::new(0));
+    let observed_environment = Arc::clone(&environment_reads);
+    let environment_server = spawn_tls_service(
+        Router::new().route(
+            "/internal/v1/manual-template-runtime-options",
+            get(move || {
+                let reads = Arc::clone(&observed_environment);
+                let options = options.clone();
+                async move {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    Json(options)
+                }
+            }),
+        ),
+        &leaf,
+        &private,
+    )
+    .await?;
+    let environment_task = environment_server.task.abort_handle();
+    let environment = environment_server.base_url.clone();
+    let tokens = Arc::new(service_token_client(&authority.issuer).await?);
+    let verifier = Arc::new(
+        ServiceTokenVerifier::discover(
+            ServiceAuthConfig::new(
+                &authority.issuer,
+                "labweaver-control".to_owned(),
+                BTreeSet::from(["labweaver-access".to_owned()]),
+                BTreeSet::new(),
+                BTreeSet::from(["ES256".to_owned()]),
+                3_600,
+                1,
+                TransportSecurityMode::InsecureTestOnly,
+            )?,
+            no_redirect_http_client(None, TransportSecurityMode::InsecureTestOnly)?,
+        )
+        .await?,
+    );
+    let state = Arc::new(ApiState {
+        control,
+        access: control_service::clients::AccessClient::new_authenticated(
+            service_config(&access_server.base_url, &ca_path),
+            Arc::clone(&tokens),
+        )?,
+        agent: control_service::clients::AgentClient::new_authenticated(
+            service_config(&agent_server.base_url, &ca_path),
+            Arc::clone(&tokens),
+        )?,
+        environment: control_service::clients::EnvironmentClient::new_authenticated(
+            service_config(&environment, &ca_path),
+            Arc::clone(&tokens),
+        )?,
+        evaluation: control_service::clients::EvaluationClient::new_authenticated(
+            service_config(&agent_server.base_url, &ca_path),
+            tokens,
+        )?,
+        service_token_verifier: Arc::clone(&verifier),
+    });
+    let app = control_service::api::authenticated_router(&state, &verifier);
+    let mut jwt_header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+    jwt_header.kid = Some("test".to_owned());
+    let bearer = jsonwebtoken::encode(
+        &jwt_header,
+        &json!({
+            "iss":authority.issuer, "aud":"labweaver-control", "azp":"labweaver-access",
+            "sub":"service-account-labweaver-access", "exp":time::OffsetDateTime::now_utc().unix_timestamp()+300,
+            "resource_access":{"labweaver-control":{"roles":["access.control.forward"]}}
+        }),
+        &jsonwebtoken::EncodingKey::from_ec_pem(private.as_bytes())?,
+    )?;
+    let session = BffSessionId::new();
+    let publish = || -> Result<Request<Body>, Box<dyn std::error::Error>> {
+        Ok(Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/v1/projects/{}/environment-template-releases",
+                project.id
+            ))
+            .header("Authorization", format!("Bearer {bearer}"))
+            .header("x-labweaver-actor-id", actor.to_string())
+            .header("x-labweaver-session-id", session.to_string())
+            .header("Content-Type", "application/json")
+            .header("Idempotency-Key", key.as_str())
+            .body(Body::from(serde_json::to_vec(&request)?))?)
+    };
+    let missing_token = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/projects/{}/environment-template-releases",
+                    project.id
+                ))
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&request)?))?,
+        )
+        .await?;
+    assert_eq!(missing_token.status(), StatusCode::UNAUTHORIZED);
+    let first = app.clone().oneshot(publish()?).await?;
+    assert_eq!(first.status(), StatusCode::OK);
+    let accepted: OperationAccepted =
+        serde_json::from_slice(&to_bytes(first.into_body(), 65_536).await?)?;
+    assert_eq!(agent_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(environment_reads.load(Ordering::SeqCst), 1);
+    // The publication committed, but its response never reached the browser. Stop the
+    // actual TLS listener before retrying the production route with the original key.
+    let mut environment_server = environment_server;
+    environment_task.abort();
+    assert!(matches!((&mut environment_server.task).await, Err(error) if error.is_cancelled()));
+    drop(environment_server);
+    let unavailable = state
+        .environment
+        .manual_template_runtime_options(&reqwest::header::HeaderMap::new())
+        .await;
+    assert!(matches!(
+        unavailable,
+        Err(control_service::clients::DownstreamError::Unavailable)
+    ));
+    let replay = app.oneshot(publish()?).await?;
+    let status = replay.status();
+    let bytes = to_bytes(replay.into_body(), 65_536).await?;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let replay: OperationAccepted = serde_json::from_slice(&bytes)?;
+    assert_eq!(replay.status_url, accepted.status_url);
+    assert_eq!(replay.revision, accepted.revision);
+    assert_eq!(
+        agent_reads.load(Ordering::SeqCst),
+        1,
+        "replay must not read Agent catalog"
+    );
+    assert_eq!(
+        environment_reads.load(Ordering::SeqCst),
+        1,
+        "replay must not read Environment options"
+    );
+    let counts: (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM control.environment_template_releases),(SELECT count(*) FROM control.outbox_events WHERE subject=$1)")
+        .bind(contracts::events::subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED).fetch_one(&pool).await?;
+    assert_eq!(counts, (1, 1));
     Ok(())
 }

@@ -11,6 +11,8 @@
         <p v-if="restoredPending" class="hint hint--blocked" role="status" data-testid="manual-pending">
           上次发布的结果尚未确认，已恢复同一发布内容。请重新确认后提交；内容不变时平台沿用同一请求，不会重复发布。
         </p>
+        <AsyncStateView :state="publication.options" empty-text="当前没有可用的运行位置。请联系平台管理员检查运行配置。" @retry="publication.loadOptions">
+        <template #success="{ data: options }">
         <form class="manual-form" @submit.prevent="submit">
           <label v-if="manualReleases.length > 0" class="field">
             <span>以已有手工模板为起点（可选）</span>
@@ -82,16 +84,39 @@
           <p v-else class="hint">虚拟机模板通过 SSH（端口 22）和桌面连接，不能访问外部网络。</p>
 
           <fieldset class="field-group">
-            <legend>平台配置（由管理员提供）</legend>
+            <legend>运行与存储</legend>
             <div class="row">
-              <label class="field"><span>运行位置（provider binding）</span><input v-model="draft.providerBinding" class="text-input" spellcheck="false" required /></label>
-              <label class="field"><span>安全配置（security profile）</span><input v-model="draft.securityProfileBinding" class="text-input" spellcheck="false" required /></label>
-              <label v-if="selectedImage?.kind === 'virtual_machine'" class="field"><span>磁盘存储类（storage class）</span><input v-model="draft.storageClassBinding" class="text-input" spellcheck="false" required /></label>
+              <label class="field">
+                <span>运行位置</span>
+                <AppSelect v-model="draft.providerBinding" data-testid="manual-provider" required>
+                  <option value="">请选择运行位置</option>
+                  <option v-for="provider in providers" :key="provider.binding" :value="provider.binding">{{ provider.label }} · {{ provider.binding }}</option>
+                </AppSelect>
+                <small>{{ selectedProvider?.description }}</small>
+              </label>
+              <label class="field"><span>安全配置标签</span><input v-model="draft.securityProfileBinding" class="text-input" spellcheck="false" required /><small>此标签不选择或改变执行侧安全策略。实际权限由已审核的安全配置与平台策略决定。</small></label>
+              <label v-if="selectedImage?.kind === 'virtual_machine'" class="field">
+                <span>磁盘存储</span>
+                <AppSelect v-model="draft.storageClassBinding" data-testid="manual-storage" required>
+                  <option value="">请选择磁盘存储</option>
+                  <option v-for="storage in selectedProvider?.storageClasses ?? []" :key="storage.binding" :value="storage.binding">{{ storage.label }} · {{ storage.binding }}</option>
+                </AppSelect>
+                <small>{{ selectedStorage?.description }}</small>
+              </label>
             </div>
+            <p v-if="!providers.length" class="hint hint--blocked" role="status">当前没有支持此镜像类型的运行位置，请联系平台管理员。</p>
           </fieldset>
 
           <fieldset class="field-group">
             <legend>审核</legend>
+            <label class="field">
+              <span>材料保留策略</span>
+              <AppSelect v-model="draft.retentionPolicyId" data-testid="manual-retention" required>
+                <option value="">请选择材料保留策略</option>
+                <option :value="options.retention.policyId">{{ options.retention.label }} · {{ options.retention.policyId }}</option>
+              </AppSelect>
+              <small>{{ options.retention.description }}</small>
+            </label>
             <label class="field">
               <span>材料保留至</span>
               <input v-model="draft.retainUntil" class="text-input" type="date" required />
@@ -109,6 +134,8 @@
             <span class="hint">发布后版本不可修改；新的 Work 可以选择它，已有 Work 不会被替换。</span>
           </div>
         </form>
+        </template>
+        </AsyncStateView>
       </template>
     </AsyncStateView>
 
@@ -189,7 +216,25 @@ const manualReleases = computed(() => props.releases.filter((release) => release
 const selectedImage = computed<TemplateImage | null>(() => (
   publication.images.kind === 'success' ? publication.images.data.find((image) => image.catalogId === draft.imageId) ?? null : null
 ))
-const problem = computed(() => manualDraftProblem(draft, selectedImage.value))
+const providers = computed(() => publication.options.kind === 'success'
+  ? publication.options.data.runtime.providers.filter((provider) => provider.runtimeKind === selectedImage.value?.kind) : [])
+const selectedProvider = computed(() => providers.value.find((provider) => provider.binding === draft.providerBinding))
+const selectedStorage = computed(() => selectedProvider.value?.storageClasses.find((storage) => storage.binding === draft.storageClassBinding))
+const problem = computed(() => {
+  if (!selectedImage.value) return manualDraftProblem(draft, null)
+  if (!selectedProvider.value) return '请选择当前可用的运行位置。'
+  if (selectedImage.value?.kind === 'virtual_machine' && !selectedStorage.value) return '请选择当前运行位置支持的磁盘存储。'
+  if (publication.options.kind !== 'success' || draft.retentionPolicyId !== publication.options.data.retention.policyId) return '请选择当前平台材料保留策略。'
+  const deadline = Date.parse(`${draft.retainUntil}T00:00:00.000Z`)
+  if (deadline - Date.now() > publication.options.data.retention.maxRetentionSeconds * 1000) return '材料保留日期超过平台允许的最长时间，请选择更早日期。'
+  return manualDraftProblem(draft, selectedImage.value)
+})
+
+watch(() => draft.retentionPolicyId, (id) => {
+  if (publication.options.kind === 'success' && id === publication.options.data.retention.policyId) {
+    draft.retentionPolicyRevision = publication.options.data.retention.policyRevision
+  }
+})
 
 watch(() => props.projectId, () => {
   Object.assign(draft, emptyManualDraft())
@@ -209,7 +254,7 @@ watch(baseReleaseKey, (key) => {
 })
 
 async function submit() {
-  if (publishBlockReason.value) return
+  if (publishBlockReason.value || problem.value) return
   if (await publication.publish({ ...draft })) {
     Object.assign(draft, emptyManualDraft())
     baseReleaseKey.value = ''

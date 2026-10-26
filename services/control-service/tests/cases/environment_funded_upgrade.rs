@@ -422,6 +422,21 @@ async fn publish(
     }
     let config = super::super::super::control_config()
         .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let retention = control
+        .manual_template_options(
+            contracts::manual_templates::ManualTemplateRuntimeOptions::default(),
+        )?
+        .retention;
+    spec.retention.policy_id = retention.policy_id;
+    spec.retention.policy_revision = retention.policy_revision;
+    spec.retention.retain_until = Some(contracts::UtcTimestamp::from_utc(
+        now.get() + time::Duration::hours(12),
+    )?);
+    let runtime_options: contracts::manual_templates::ManualTemplateRuntimeOptions =
+        serde_json::from_value(serde_json::json!({"providers":[{
+            "binding": match &spec.runtime { EnvironmentRuntimeSpec::Container { provider_binding, .. } | EnvironmentRuntimeSpec::VirtualMachine { provider_binding, .. } => provider_binding },
+            "label":"测试容器位置", "description":"升级夹具的真实 provider 配置", "runtimeKind":"container", "storageClasses":[]
+        }]}))?;
     let image = PlatformImageEntry {
         catalog_id: contracts::PlatformImageId::new(),
         kind: PlatformImageKind::Container,
@@ -469,6 +484,7 @@ async fn publish(
             now,
             "upgrade-publish",
             &[image],
+            &runtime_options,
         )
         .await?;
     Ok(contracts::events::ReleasePublished {

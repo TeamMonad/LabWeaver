@@ -160,6 +160,7 @@ pub fn project_operation_action(operation: &str) -> Option<ObjectAction> {
         | "appendProjectEvaluationCandidateDecision"
         | "completeProjectAuthoringApproval"
         | "createEnvironmentTemplateRelease"
+        | "getProjectManualTemplateOptions"
         | "withdrawEnvironmentTemplateRelease" => Some(Edit),
         "upsertProjectResourceBudget"
         | "addProjectMembership"

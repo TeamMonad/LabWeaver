@@ -27,6 +27,7 @@ pub mod events;
 pub mod execution;
 pub mod foundation;
 pub mod http;
+pub mod manual_templates;
 pub mod membership_governance;
 pub mod notifications;
 pub mod object_authorization;

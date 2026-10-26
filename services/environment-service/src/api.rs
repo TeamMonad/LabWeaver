@@ -62,6 +62,7 @@ pub struct EnvironmentApiState {
     freeze_bindings: FreezeBindingService,
     pub(crate) work_executions: Option<ContainerWorkExecutionService>,
     runtime_admission: Option<crate::EnvironmentRuntimeAdmission>,
+    manual_template_options: Option<Arc<contracts::manual_templates::ManualTemplateRuntimeOptions>>,
 }
 
 impl EnvironmentApiState {
@@ -81,6 +82,7 @@ impl EnvironmentApiState {
             freeze_bindings,
             work_executions: None,
             runtime_admission: None,
+            manual_template_options: None,
         }
     }
 
@@ -94,6 +96,16 @@ impl EnvironmentApiState {
     #[must_use]
     pub fn with_runtime_admission(mut self, admission: crate::EnvironmentRuntimeAdmission) -> Self {
         self.runtime_admission = Some(admission);
+        self
+    }
+
+    /// Installs the read projection of the same provider configuration used by the executors.
+    #[must_use]
+    pub fn with_manual_template_options(
+        mut self,
+        options: Arc<contracts::manual_templates::ManualTemplateRuntimeOptions>,
+    ) -> Self {
+        self.manual_template_options = Some(options);
         self
     }
 }
@@ -165,6 +177,10 @@ pub fn environment_api_router(state: EnvironmentApiState) -> Router {
 fn internal_environment_routes() -> Router<EnvironmentApiState> {
     Router::new()
         .route(
+            "/internal/v1/manual-template-runtime-options",
+            get(read_manual_template_runtime_options),
+        )
+        .route(
             "/internal/v1/environments/{environment_id}/freeze-binding",
             post(resolve_freeze_binding),
         )
@@ -212,6 +228,17 @@ fn internal_environment_routes() -> Router<EnvironmentApiState> {
             "/internal/v1/work-configurations/{run_id}/cancel",
             post(cancel_work_configuration),
         )
+}
+
+async fn read_manual_template_runtime_options(
+    State(state): State<EnvironmentApiState>,
+    caller: Option<Extension<auth::ServiceIdentity>>,
+) -> Result<Json<contracts::manual_templates::ManualTemplateRuntimeOptions>, EnvironmentApiError> {
+    require_permission(caller, WORK_READ_PERMISSION)?;
+    let options = state
+        .manual_template_options
+        .ok_or(crate::RuntimeAdmissionError::Unavailable)?;
+    Ok(Json((*options).clone()))
 }
 
 async fn start_work_configuration(

@@ -77,6 +77,7 @@ pub struct EnvironmentProcessRuntime {
     freeze_bindings: FreezeBindingService,
     resource_usage_client: crate::metering::ResourceUsageClient,
     work_executions: ContainerWorkExecutionService,
+    manual_template_options: Arc<contracts::manual_templates::ManualTemplateRuntimeOptions>,
 }
 
 impl EnvironmentProcessRuntime {
@@ -156,6 +157,8 @@ impl EnvironmentProcessRuntime {
         .await?;
 
         let provider_bindings = load_provider_bindings(&required_path(PROVIDER_BINDINGS_PATH)?)?;
+        let manual_template_options =
+            Arc::new(manual_template_runtime_options(&provider_bindings)?);
         let freeze_configuration = freeze_binding_configuration(&provider_bindings)?;
         let freeze_bindings = FreezeBindingService::new(
             pool.clone(),
@@ -325,6 +328,7 @@ impl EnvironmentProcessRuntime {
             freeze_bindings,
             resource_usage_client,
             work_executions,
+            manual_template_options,
         })
     }
 
@@ -350,6 +354,7 @@ impl EnvironmentProcessRuntime {
             self.freeze_bindings.clone(),
         )
         .with_work_executions(self.work_executions.clone())
+        .with_manual_template_options(Arc::clone(&self.manual_template_options))
         .with_runtime_admission(crate::EnvironmentRuntimeAdmission::new(
             self.release_store.clone(),
             Arc::new(self.resource_usage_client.clone()),
@@ -375,6 +380,7 @@ impl EnvironmentProcessRuntime {
             freeze_bindings: _,
             resource_usage_client,
             work_executions,
+            manual_template_options: _,
         } = self;
         let shutdown_rx = crate::service_runtime::subscribe_shutdown();
         tokio::try_join!(
@@ -1054,6 +1060,78 @@ pub fn container_projection_configuration_from_env()
     ))
 }
 
+fn manual_template_runtime_options(
+    bindings: &[ProviderBindingConfiguration],
+) -> Result<contracts::manual_templates::ManualTemplateRuntimeOptions, EnvironmentProcessRuntimeError>
+{
+    use contracts::authoring::RuntimeKind;
+    use contracts::manual_templates::{
+        ManualTemplateProviderOption, ManualTemplateRuntimeOptions, ManualTemplateSeededDiskOption,
+        ManualTemplateStorageOption,
+    };
+    let mut providers = Vec::new();
+    for binding in bindings {
+        let (runtime_kind, label, description, storage_classes) =
+            match binding.provider_kind.as_deref() {
+                Some("container") => {
+                    // Validate exactly the configuration consumed by the registered runtime.
+                    binding.container_configuration()?;
+                    (
+                        RuntimeKind::Container,
+                        "容器运行环境",
+                        "在隔离容器中运行；工作区使用平台配置的持久存储。",
+                        Vec::new(),
+                    )
+                }
+                Some("kubevirt") => {
+                    let Some(storage) = &binding.runtime_vm_base else {
+                        continue;
+                    };
+                    // Only dynamic catalog disks can be used by manual platform-image publication.
+                    binding.runtime_vm_base_policy()?;
+                    (
+                        RuntimeKind::VirtualMachine,
+                        "虚拟机运行环境",
+                        "从固定镜像创建独立虚拟机；磁盘容量不能超过存储配置上限。",
+                        vec![ManualTemplateStorageOption {
+                            binding: storage.storage_class_binding.clone(),
+                            label: "虚拟机持久磁盘".to_owned(),
+                            description: format!(
+                                "存储类 {}；最大磁盘容量 {} GiB。",
+                                storage.storage_class_name,
+                                storage.max_capacity_bytes / 1_073_741_824
+                            ),
+                            max_capacity_bytes: storage.max_capacity_bytes,
+                            seeded_disks: binding
+                                .base_disks
+                                .as_deref()
+                                .unwrap_or_default()
+                                .iter()
+                                .map(|disk| ManualTemplateSeededDiskOption {
+                                    binding: disk.binding.clone(),
+                                    disk_sha256: disk.disk_sha256.clone(),
+                                    capacity_bytes: disk.capacity_bytes,
+                                    source_registry_digest: disk.source_registry_digest.clone(),
+                                    format: disk.format,
+                                    storage_class_binding: disk.storage_class_binding.clone(),
+                                })
+                                .collect(),
+                        }],
+                    )
+                }
+                _ => continue,
+            };
+        providers.push(ManualTemplateProviderOption {
+            binding: binding.binding.clone(),
+            label: label.to_owned(),
+            description: description.to_owned(),
+            runtime_kind,
+            storage_classes,
+        });
+    }
+    Ok(ManualTemplateRuntimeOptions { providers })
+}
+
 fn load_provider_bindings(
     path: &Path,
 ) -> Result<Vec<ProviderBindingConfiguration>, EnvironmentProcessRuntimeError> {
@@ -1145,6 +1223,40 @@ mod deployment_contract_tests {
         ContainerWorkspaceAccessMode, EnvironmentProcessRuntimeError, ProviderBindingConfiguration,
         freeze_binding_configuration,
     };
+
+    #[test]
+    fn manual_options_project_loaded_provider_bindings_and_storage_constraints() {
+        let mut bindings: Vec<ProviderBindingConfiguration> = serde_json::from_str(include_str!(
+            "../../../deploy/config/environment-providers.json.example"
+        ))
+        .expect("provider config");
+        bindings[0].binding = "campus-container".to_owned();
+        let vm = bindings
+            .iter_mut()
+            .find(|binding| binding.provider_kind.as_deref() == Some("kubevirt"))
+            .expect("VM config");
+        let storage = vm.runtime_vm_base.as_mut().expect("dynamic VM catalog");
+        storage.storage_class_name = "campus-rbd".to_owned();
+        let options = super::manual_template_runtime_options(&bindings).expect("options");
+        assert_eq!(options.providers[0].binding, "campus-container");
+        assert_eq!(options.providers[0].label, "容器运行环境");
+        let disk = &options.providers[1].storage_classes[0];
+        assert_eq!(disk.binding, "vm-rwo-primary-v1");
+        assert!(disk.description.contains("campus-rbd"));
+        assert_eq!(disk.max_capacity_bytes, 137_438_953_472);
+        assert_eq!(disk.seeded_disks.len(), 2);
+        assert!(disk.seeded_disks.iter().any(|seeded| {
+            seeded.binding == "ubuntu-24.04-v1"
+                && seeded.disk_sha256
+                    == "ffe6203da54deeb6db5d2a98a83f9ec8e55f149d3f7ba622e1abe5fa966ee3d6"
+                && seeded.capacity_bytes == 10_737_418_240
+        }));
+        bindings.retain(|binding| binding.provider_kind.as_deref() != Some("kubevirt"));
+        let options =
+            super::manual_template_runtime_options(&bindings).expect("container-only options");
+        assert_eq!(options.providers.len(), 1);
+        assert!(options.providers[0].storage_classes.is_empty());
+    }
 
     #[test]
     fn checked_in_platform_provider_example_has_no_legacy_contract() {

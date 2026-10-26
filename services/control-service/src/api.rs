@@ -231,6 +231,10 @@ pub fn router(state: Arc<ApiState>) -> Router {
             get(list_project_template_images),
         )
         .route(
+            "/api/v1/projects/{project_id}/manual-template-options",
+            get(get_project_manual_template_options),
+        )
+        .route(
             "/api/v1/projects/{project_id}/environment-template-releases",
             get(list_project_releases).post(create_project_work_release),
         )
@@ -2437,6 +2441,35 @@ async fn list_project_template_images(
     Ok(Json(catalog))
 }
 
+async fn get_project_manual_template_options(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(project_id): Path<ProjectId>,
+    headers: HeaderMap,
+) -> Result<Json<contracts::manual_templates::ManualTemplateOptions>, ApiError> {
+    let decision = authorize_project(
+        &state,
+        &principal,
+        &headers,
+        "getProjectManualTemplateOptions",
+        project_id,
+    )
+    .await?;
+    state
+        .control
+        .require_manual_template_publisher(
+            project_id,
+            decision.actor.actor_id,
+            decision.actor.roles.contains(&PlatformRole::PlatformAdmin),
+        )
+        .await?;
+    let runtime = state
+        .environment
+        .manual_template_runtime_options(&headers)
+        .await?;
+    Ok(Json(state.control.manual_template_options(runtime)?))
+}
+
 async fn create_project_work_release(
     State(state): State<Arc<ApiState>>,
     Extension(principal): Extension<GatewayPrincipal>,
@@ -2452,6 +2485,20 @@ async fn create_project_work_release(
         project_id,
     )
     .await?;
+    let key = idempotency(&headers)?;
+    if let Some(release) = state
+        .control
+        .replay_project_work_release(
+            project_id,
+            &request,
+            decision.actor.actor_id,
+            decision.actor.roles.contains(&PlatformRole::PlatformAdmin),
+            &key,
+        )
+        .await?
+    {
+        return accepted_work_release(project_id, &release);
+    }
     let catalog = if request.manual.is_some() {
         state.agent.list_platform_images(&headers).await?.entries
     } else {
@@ -2464,7 +2511,14 @@ async fn create_project_work_release(
             .await?;
         candidate_platform_images(&state, &headers, &candidate).await?
     };
-    let key = idempotency(&headers)?;
+    let runtime_options = if request.manual.is_some() {
+        state
+            .environment
+            .manual_template_runtime_options(&headers)
+            .await?
+    } else {
+        contracts::manual_templates::ManualTemplateRuntimeOptions::default()
+    };
     let published_at = now()?;
     let trace_id = trace_id(&headers);
     let release = state
@@ -2478,8 +2532,16 @@ async fn create_project_work_release(
             published_at,
             &trace_id,
             &catalog,
+            &runtime_options,
         )
         .await?;
+    accepted_work_release(project_id, &release)
+}
+
+fn accepted_work_release(
+    project_id: ProjectId,
+    release: &contracts::supply_chain::EnvironmentTemplateRelease,
+) -> Result<Response, ApiError> {
     Ok(Json(OperationAccepted {
         operation_id: OperationId::new(),
         revision: Revision::new(release.version)
@@ -3176,6 +3238,10 @@ impl ApiError {
 
 impl From<ControlError> for ApiError {
     fn from(error: ControlError) -> Self {
+        if matches!(error, ControlError::ManualTemplateOptionInvalid) {
+            return Self::new(StatusCode::UNPROCESSABLE_ENTITY, &error.to_string(), false)
+                .with_detail("所选运行位置、磁盘存储或材料保留策略已不可用，或超出平台允许范围。请重新加载选项并选择；如无可用选项，请联系平台管理员。");
+        }
         let status = match error {
             ControlError::CursorInvalid => StatusCode::BAD_REQUEST,
             ControlError::InvitationNotFound

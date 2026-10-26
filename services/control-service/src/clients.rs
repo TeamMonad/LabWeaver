@@ -688,6 +688,25 @@ impl EnvironmentClient {
         })
     }
 
+    /// Reads only Environment's public-safe projection of its loaded provider configuration.
+    pub async fn manual_template_runtime_options(
+        &self,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Result<contracts::manual_templates::ManualTemplateRuntimeOptions, DownstreamError> {
+        send_json(
+            correlate(
+                self.client.get(
+                    self.config
+                        .endpoint("internal/v1/manual-template-runtime-options")?,
+                ),
+                headers,
+            ),
+            &self.service_token_client,
+            self.token_target,
+        )
+        .await
+    }
+
     /// Resolves the runtime only from Environment's authoritative Work aggregate and lease.
     pub async fn work_configuration_target(
         &self,

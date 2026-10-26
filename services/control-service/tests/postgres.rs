@@ -909,6 +909,7 @@ async fn candidate_publication_fixture(
             "2026-07-16T08:30:00.000Z".parse()?,
             "trace-publish-container-release",
             &[],
+            &contracts::manual_templates::ManualTemplateRuntimeOptions::default(),
         )
         .await?;
     let work_admission = service
