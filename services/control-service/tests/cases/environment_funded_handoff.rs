@@ -1182,13 +1182,17 @@ async fn exercise_execution(
     assert_eq!(refreshed.generation, ready.generation);
     assert_eq!(refreshed.owner_id, ready.owner_id);
     lifecycle_command(store, &refreshed, Kind::Stop, None).await?;
-    assert!(matches!(
-        run_due(&worker, store, "native-stop").await?,
-        ReconcileWorkerOutcome::Advanced {
-            state: State::Stopped,
-            ..
-        }
-    ));
+    let outcome = run_due(&worker, store, "native-stop").await?;
+    assert!(
+        matches!(
+            outcome,
+            ReconcileWorkerOutcome::Advanced {
+                state: State::Stopped,
+                ..
+            }
+        ),
+        "native-stop outcome: {outcome:?}"
+    );
     let stopped = store.load(instance.id).await?;
     let retained = resource
         .next_active_environment_cleanup(None)
@@ -1221,13 +1225,17 @@ async fn exercise_execution(
         .await;
     }
     http.command(&stopped, "start").await?;
-    assert!(matches!(
-        run_due(&worker, store, "native-restart").await?,
-        ReconcileWorkerOutcome::Advanced {
-            state: State::Ready,
-            ..
-        }
-    ));
+    let outcome = run_due(&worker, store, "native-restart").await?;
+    assert!(
+        matches!(
+            outcome,
+            ReconcileWorkerOutcome::Advanced {
+                state: State::Ready,
+                ..
+            }
+        ),
+        "native-restart outcome: {outcome:?}"
+    );
     let restarted = store.load(instance.id).await?;
     assert_eq!(restarted.generation, stopped.generation + 1);
     assert_eq!(restarted.lease_id, ready.lease_id);
@@ -1240,10 +1248,11 @@ async fn exercise_execution(
         Some(current.lease_authorization.clone()),
     )
     .await?;
-    assert!(matches!(
-        run_due(&worker, store, "native-interrupted-restart").await?,
-        ReconcileWorkerOutcome::Failed { .. }
-    ));
+    let outcome = run_due(&worker, store, "native-interrupted-restart").await?;
+    assert!(
+        matches!(outcome, ReconcileWorkerOutcome::Failed { .. }),
+        "native-interrupted-restart outcome: {outcome:?}"
+    );
     assert_eq!(
         calls.load(Ordering::SeqCst),
         2,
@@ -1251,13 +1260,17 @@ async fn exercise_execution(
     );
     let interrupted = store.load(instance.id).await?;
     http.command(&interrupted, "recover").await?;
-    assert!(matches!(
-        run_due(&worker, store, "native-recovered-original-lease").await?,
-        ReconcileWorkerOutcome::Advanced {
-            state: State::Ready,
-            ..
-        }
-    ));
+    let outcome = run_due(&worker, store, "native-recovered-original-lease").await?;
+    assert!(
+        matches!(
+            outcome,
+            ReconcileWorkerOutcome::Advanced {
+                state: State::Ready,
+                ..
+            }
+        ),
+        "native-recovered-original-lease outcome: {outcome:?}"
+    );
     let restarted = store.load(instance.id).await?;
     assert_eq!(restarted.lease_id, initial.lease_id.into());
     assert_eq!(calls.load(Ordering::SeqCst), 3);
@@ -1290,13 +1303,17 @@ async fn exercise_execution(
             restarted
         };
         lifecycle_command(store, &restarted, Kind::Delete, None).await?;
-        assert!(matches!(
-            run_due(&worker, store, "native-known-funded-delete").await?,
-            ReconcileWorkerOutcome::Advanced {
-                state: State::Deleted,
-                ..
-            }
-        ));
+        let outcome = run_due(&worker, store, "native-known-funded-delete").await?;
+        assert!(
+            matches!(
+                outcome,
+                ReconcileWorkerOutcome::Advanced {
+                    state: State::Deleted,
+                    ..
+                }
+            ),
+            "native-known-funded-delete outcome: {outcome:?}"
+        );
         let deleted = store.load(instance.id).await?;
         executor
             .execute(physical_envelope(pool, &deleted, 1, true, deadline).await?)
@@ -1352,13 +1369,17 @@ async fn exercise_execution(
         assert_eq!(physical_calls.load(Ordering::SeqCst), 1);
     }
     lifecycle_command(store, &restarted, Kind::Stop, None).await?;
-    assert!(matches!(
-        run_due(&worker, store, "native-unfunded-stop").await?,
-        ReconcileWorkerOutcome::Advanced {
-            state: State::Stopped,
-            ..
-        }
-    ));
+    let outcome = run_due(&worker, store, "native-unfunded-stop").await?;
+    assert!(
+        matches!(
+            outcome,
+            ReconcileWorkerOutcome::Advanced {
+                state: State::Stopped,
+                ..
+            }
+        ),
+        "native-unfunded-stop outcome: {outcome:?}"
+    );
     let stopped = store.load(instance.id).await?;
     lifecycle_command(
         store,
@@ -1367,8 +1388,10 @@ async fn exercise_execution(
         Some(current.lease_authorization),
     )
     .await?;
+    let outcome = run_due(&worker, store, "native-unfunded-restart").await?;
     assert!(
-        matches!(run_due(&worker, store, "native-unfunded-restart").await?, ReconcileWorkerOutcome::Failed { ref diagnostic_code } if diagnostic_code == "LW_RUNTIME_FUNDING_INACTIVE")
+        matches!(outcome, ReconcileWorkerOutcome::Failed { ref diagnostic_code } if diagnostic_code == "LW_RUNTIME_FUNDING_INACTIVE"),
+        "native-unfunded-restart outcome: {outcome:?}"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 3);
     credits
@@ -1403,13 +1426,17 @@ async fn exercise_execution(
         ));
     }
     lifecycle_command(store, &failed, Kind::Delete, None).await?;
-    assert!(matches!(
-        run_due(&worker, store, "native-unfunded-cleanup").await?,
-        ReconcileWorkerOutcome::Advanced {
-            state: State::Deleted,
-            ..
-        }
-    ));
+    let outcome = run_due(&worker, store, "native-unfunded-cleanup").await?;
+    assert!(
+        matches!(
+            outcome,
+            ReconcileWorkerOutcome::Advanced {
+                state: State::Deleted,
+                ..
+            }
+        ),
+        "native-unfunded-cleanup outcome: {outcome:?}"
+    );
     let deleted = store.load(instance.id).await?;
     if container {
         recovered
