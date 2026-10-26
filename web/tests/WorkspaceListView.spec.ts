@@ -258,6 +258,25 @@ describe('WorkspaceListView', () => {
     expect(mocks.remove).toHaveBeenCalledWith('student-1', expect.objectContaining({ actorId: 'student-1' }))
   })
 
+
+  it('blocks directory search below two characters and guides refinement', async () => {
+    const { wrapper } = await mountView()
+    const search = wrapper.get('.directory-picker input')
+    const button = wrapper.get('.directory-picker .outlined-button')
+
+    await search.setValue('a')
+    expect(mocks.directoryLoad).toHaveBeenCalledTimes(0)
+    expect(wrapper.get('.directory-picker [role="status"]').text()).toContain('请至少输入 2 个字符')
+    expect(button.attributes('disabled')).toBeDefined()
+
+    await search.setValue('ab')
+    expect(wrapper.find('.directory-picker [role="status"]').exists()).toBe(false)
+    expect(button.attributes('disabled')).toBeUndefined()
+    await button.trigger('click')
+    expect(mocks.directoryLoad).toHaveBeenCalledTimes(1)
+    expect(mocks.directoryLoad).toHaveBeenCalledWith('ab')
+    wrapper.unmount()
+  })
   it('lets teachers search and select an enabled organization account before adding it', async () => {
     directoryState.users = {
       kind: 'success',
