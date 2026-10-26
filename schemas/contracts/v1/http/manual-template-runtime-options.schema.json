@@ -1,0 +1,84 @@
+{
+  "$defs": {
+    "ManualTemplateProviderOption": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "runtimeKind": {
+          "$ref": "#/$defs/RuntimeKind"
+        },
+        "storageClasses": {
+          "items": {
+            "$ref": "#/$defs/ManualTemplateStorageOption"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "binding",
+        "label",
+        "description",
+        "runtimeKind",
+        "storageClasses"
+      ],
+      "type": "object"
+    },
+    "ManualTemplateStorageOption": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "maxCapacityBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "binding",
+        "label",
+        "description",
+        "maxCapacityBytes"
+      ],
+      "type": "object"
+    },
+    "RuntimeKind": {
+      "description": "Runtime kind shared by candidates, releases, and instances.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "providers": {
+      "items": {
+        "$ref": "#/$defs/ManualTemplateProviderOption"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "providers"
+  ],
+  "title": "ManualTemplateRuntimeOptions",
+  "type": "object"
+}

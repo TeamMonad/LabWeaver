@@ -74,6 +74,16 @@ entry must be active, have the exact repin generation, match the runtime and tru
 and bind the reviewed registry digest or VM disk/capacity/format. Missing confirmation,
 mixed sources, changed catalog identity and insufficient project authority fail closed.
 
+Before publication, `GET /api/v1/projects/{projectId}/manual-template-options` returns labelled
+runtime/storage selections from Environment's loaded provider configuration and Control's actual
+retention policy ID, revision and maximum duration. This read requires publication authority, not
+merely template browsing. The publication transaction validates those identities and limits again
+after its idempotency replay check. Unknown placement/storage, forged retention identities and
+out-of-range dates return 422 `LW_MANUAL_TEMPLATE_OPTION_INVALID` with a readable explanation;
+no release or Outbox event commits. Accepted command replay retains its original frozen decision.
+`securityProfileBinding` remains a non-empty label and is not an executable security profile.
+No selectable profile catalog is claimed for it.
+
 This one human command records `manualApproval` and publishes through the existing release
 table, transactional idempotency ledger, Outbox and Environment projection. It does not create
 an Agent run, candidate, build request or project model policy. Imported Container artifacts use

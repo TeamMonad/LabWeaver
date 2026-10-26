@@ -11022,10 +11022,9 @@
         ],
         "x-labweaver-cancellable": true,
         "x-labweaver-errors": [
-          "LW_CONTRACT_DOCUMENT_INVALID",
-          "LW_ACCESS_DENIED",
-          "LW_IDEMPOTENCY_CONFLICT",
-          "LW_REVISION_CONFLICT"
+          "LW_AUTH_SCOPE_DENIED",
+          "LW_PROJECT_GOVERNANCE_DENIED",
+          "LW_MANUAL_TEMPLATE_OPTION_INVALID"
         ],
         "x-labweaver-idempotency": "IdempotentCreate",
         "x-labweaver-object-action": "edit",
@@ -12272,6 +12271,102 @@
         "x-labweaver-idempotency": "None",
         "x-labweaver-object-action": "browse",
         "x-labweaver-permission": "llm_policy:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "project",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/projects/{projectId}/manual-template-options": {
+      "get": {
+        "description": "Permission: release:publish. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getProjectManualTemplateOptions",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/manual-template-options.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "release:publish"
+            ]
+          }
+        ],
+        "summary": "getProjectManualTemplateOptions",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_AUTH_SCOPE_DENIED",
+          "LW_PROJECT_GOVERNANCE_DENIED",
+          "LW_MANUAL_TEMPLATE_OPTION_INVALID"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-object-action": "edit",
+        "x-labweaver-permission": "release:publish",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
         "x-labweaver-scope": "project",

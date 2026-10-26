@@ -1,0 +1,140 @@
+{
+  "$defs": {
+    "ManualTemplateProviderOption": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "runtimeKind": {
+          "$ref": "#/$defs/RuntimeKind"
+        },
+        "storageClasses": {
+          "items": {
+            "$ref": "#/$defs/ManualTemplateStorageOption"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "binding",
+        "label",
+        "description",
+        "runtimeKind",
+        "storageClasses"
+      ],
+      "type": "object"
+    },
+    "ManualTemplateRetentionOption": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "maxRetentionSeconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "policyId": {
+          "$ref": "#/$defs/PolicyId"
+        },
+        "policyRevision": {
+          "$ref": "#/$defs/Revision"
+        }
+      },
+      "required": [
+        "policyId",
+        "policyRevision",
+        "label",
+        "description",
+        "maxRetentionSeconds"
+      ],
+      "type": "object"
+    },
+    "ManualTemplateRuntimeOptions": {
+      "additionalProperties": false,
+      "properties": {
+        "providers": {
+          "items": {
+            "$ref": "#/$defs/ManualTemplateProviderOption"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "providers"
+      ],
+      "type": "object"
+    },
+    "ManualTemplateStorageOption": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "maxCapacityBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "binding",
+        "label",
+        "description",
+        "maxCapacityBytes"
+      ],
+      "type": "object"
+    },
+    "PolicyId": {
+      "description": "Strongly typed UUIDv7 identifier for `PolicyId`.",
+      "type": "string"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "RuntimeKind": {
+      "description": "Runtime kind shared by candidates, releases, and instances.",
+      "enum": [
+        "container",
+        "virtual_machine"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "retention": {
+      "$ref": "#/$defs/ManualTemplateRetentionOption"
+    },
+    "runtime": {
+      "$ref": "#/$defs/ManualTemplateRuntimeOptions"
+    }
+  },
+  "required": [
+    "runtime",
+    "retention"
+  ],
+  "title": "ManualTemplateOptions",
+  "type": "object"
+}

@@ -381,6 +381,24 @@ pub(super) async fn forward_project_template_images(
         .await?;
     forward_control(State(state), method, uri, headers, body).await
 }
+
+pub(super) async fn forward_manual_template_options(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<contracts::ProjectId>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    authorize_environment_project(
+        &state,
+        &headers,
+        project_id,
+        "getProjectManualTemplateOptions",
+    )
+    .await?;
+    forward_control(State(state), method, uri, headers, body).await
+}
 pub(super) async fn forward_control(
     State(state): State<std::sync::Arc<AppState>>,
     method: Method,

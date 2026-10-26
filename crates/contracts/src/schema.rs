@@ -50,6 +50,14 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::authoring::ProjectLlmPolicyOptions
     );
     document!(
+        "schemas/contracts/v1/http/manual-template-options.schema.json",
+        crate::manual_templates::ManualTemplateOptions
+    );
+    document!(
+        "schemas/contracts/v1/http/manual-template-runtime-options.schema.json",
+        crate::manual_templates::ManualTemplateRuntimeOptions
+    );
+    document!(
         "schemas/contracts/v1/available-object-actions.schema.json",
         crate::object_authorization::AvailableObjectActions
     );
@@ -2278,6 +2286,11 @@ fn environment_management_parameters(operation_id: &str) -> Vec<Value> {
 
 fn environment_management_errors(operation_id: &str) -> Option<Value> {
     let errors = match operation_id {
+        "createEnvironmentTemplateRelease" | "getProjectManualTemplateOptions" => vec![
+            "LW_AUTH_SCOPE_DENIED",
+            "LW_PROJECT_GOVERNANCE_DENIED",
+            "LW_MANUAL_TEMPLATE_OPTION_INVALID",
+        ],
         "getProjectAgentCapability" => vec![
             "LW_CONTRACT_DOCUMENT_INVALID",
             "LW_ACCESS_DENIED",
@@ -2686,6 +2699,8 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         }
         "listPlatformImages" => contract_ref("http/platform-image-catalog-view"),
         "listProjectTemplateImages" => contract_ref("http/platform-image-catalog"),
+        "getProjectManualTemplateOptions" => contract_ref("http/manual-template-options"),
+        "getManualTemplateRuntimeOptions" => contract_ref("http/manual-template-runtime-options"),
         "getPlatformImageUpload" => contract_ref("http/platform-image-upload-status"),
         "registerPlatformImage" | "repinPlatformImage" | "disablePlatformImage" => {
             contract_ref("http/platform-image-entry-view")

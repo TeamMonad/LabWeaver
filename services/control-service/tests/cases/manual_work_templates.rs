@@ -4,6 +4,14 @@ use contracts::http::{ManualWorkTemplateRequest, ProjectAgentCapability};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+fn manual_runtime_options() -> TestResult<contracts::manual_templates::ManualTemplateRuntimeOptions>
+{
+    Ok(serde_json::from_value(serde_json::json!({"providers":[
+        {"binding":"container-primary-v1","label":"教学容器","description":"配置中的容器位置","runtimeKind":"container","storageClasses":[]},
+        {"binding":"kubevirt-primary-v1","label":"教学虚拟机","description":"配置中的虚拟机位置","runtimeKind":"virtual_machine","storageClasses":[{"binding":"vm-rwo-primary-v1","label":"教学磁盘","description":"最大 128 GiB","maxCapacityBytes":137_438_953_472_u64}]}
+    ]}))?)
+}
+
 fn manual_spec(kind: RuntimeKind, image: &PlatformImageEntry) -> TestResult<EnvironmentSpec> {
     let runtime = match kind {
         RuntimeKind::Container => serde_json::json!({
@@ -99,6 +107,15 @@ impl ManualPublication {
                 confirmed: true,
             })),
         };
+        let mut request = request;
+        let retention = service
+            .manual_template_options(manual_runtime_options()?)?
+            .retention;
+        let spec = &mut request.manual.as_mut().ok_or("manual request")?.spec;
+        spec.retention.policy_id = retention.policy_id;
+        spec.retention.retain_until = Some(UtcTimestamp::from_utc(
+            now.get() + time::Duration::hours(12),
+        )?);
         Ok(Self {
             service,
             project,
@@ -125,6 +142,7 @@ impl ManualPublication {
                 self.now,
                 "manual-work-publish",
                 std::slice::from_ref(&self.image),
+                &manual_runtime_options().map_err(|_| ControlError::ContractInvalid)?,
             )
             .await
     }
@@ -184,7 +202,8 @@ impl ManualPublication {
                     &IdempotencyKey::parse("manual-disabled-image")?,
                     self.now,
                     "manual-work-publish",
-                    &[disabled]
+                    &[disabled],
+                    &manual_runtime_options()?,
                 )
                 .await,
             Err(ControlError::ArtifactNotAuthoritative)
@@ -438,5 +457,107 @@ async fn ordinary_capability_publication_requires_platform_range_and_current_sco
         fixture.now,
     )
     .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn manual_options_require_publication_authority_and_reject_forged_choices() -> TestResult {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    apply_domain_migrations(&pool, Domain::Control).await?;
+    let fixture = ManualPublication::new(&pool, RuntimeKind::VirtualMachine).await?;
+    let owner = fixture.project.owner_actor_id;
+    fixture
+        .service
+        .require_manual_template_publisher(fixture.project.id, owner, false)
+        .await?;
+    fixture
+        .service
+        .require_manual_template_publisher(fixture.project.id, ActorId::new(), true)
+        .await?;
+    for (role, object_role, allowed) in [
+        ("student", "viewer", false),
+        ("teacher", "editor", false),
+        ("teacher", "manager", true),
+    ] {
+        let actor = ActorId::new();
+        sqlx::query("INSERT INTO control.project_memberships(project_id,actor_id,role,object_role,state,revision) VALUES($1,$2,$3,$4,'active',1)")
+            .bind(fixture.project.id.as_uuid()).bind(actor.as_uuid()).bind(role).bind(object_role).execute(&pool).await?;
+        let result = fixture
+            .service
+            .require_manual_template_publisher(fixture.project.id, actor, false)
+            .await;
+        assert_eq!(result.is_ok(), allowed, "{role}/{object_role}");
+    }
+    let options = fixture
+        .service
+        .manual_template_options(manual_runtime_options()?)?;
+    assert_eq!(
+        options.retention.policy_id,
+        fixture
+            .request
+            .manual
+            .as_ref()
+            .ok_or("manual request")?
+            .spec
+            .retention
+            .policy_id
+    );
+    assert_eq!(
+        options.retention.max_retention_seconds,
+        control_config()?.retention_seconds
+    );
+    for (index, pointer, value) in [
+        (
+            0,
+            "/manual/spec/runtime/provider_binding",
+            serde_json::json!("unknown-provider"),
+        ),
+        (
+            1,
+            "/manual/spec/runtime/storage_class_binding",
+            serde_json::json!("unknown-storage"),
+        ),
+        (
+            2,
+            "/manual/spec/retention/policyId",
+            serde_json::json!(PolicyId::new()),
+        ),
+        (
+            3,
+            "/manual/spec/retention/policyRevision",
+            serde_json::json!(2),
+        ),
+        (
+            4,
+            "/manual/spec/retention/retainUntil",
+            serde_json::json!("2027-07-16T08:00:00.000Z"),
+        ),
+    ] {
+        let mut invalid = serde_json::to_value(&fixture.request)?;
+        *invalid.pointer_mut(pointer).ok_or("invalid test pointer")? = value;
+        let invalid = serde_json::from_value(invalid)?;
+        assert!(
+            matches!(
+                fixture
+                    .publish(owner, &format!("unknown-choice-{index}"), &invalid)
+                    .await,
+                Err(ControlError::ManualTemplateOptionInvalid)
+            ),
+            "{pointer}"
+        );
+    }
+    let counts: (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM control.environment_template_releases),(SELECT count(*) FROM control.outbox_events WHERE subject=$1)")
+        .bind(contracts::events::subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED).fetch_one(&pool).await?;
+    assert_eq!(counts, (0, 0));
+    fixture
+        .publish(owner, "valid-options", &fixture.request)
+        .await?;
     Ok(())
 }

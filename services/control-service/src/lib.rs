@@ -5954,6 +5954,7 @@ impl ControlService {
         now: UtcTimestamp,
         trace_id: &str,
         catalog: &[PlatformImageEntry],
+        runtime_options: &contracts::manual_templates::ManualTemplateRuntimeOptions,
     ) -> Result<EnvironmentTemplateRelease, ControlError> {
         if request.project_id != project_id {
             return Err(ControlError::ProjectMismatch);
@@ -6025,6 +6026,7 @@ impl ControlService {
                 actor_id,
                 now,
                 catalog,
+                runtime_options,
             )?;
             let spec = approval.spec.clone();
             let digest = canonical_hash(&spec)?.to_string();
@@ -9380,6 +9382,8 @@ pub enum ControlError {
     ConfigurationInvalid,
     #[error("LW_CONTRACT_DOCUMENT_INVALID")]
     ContractInvalid,
+    #[error("LW_MANUAL_TEMPLATE_OPTION_INVALID")]
+    ManualTemplateOptionInvalid,
     #[error("LW_CONTRACT_DOCUMENT_INVALID")]
     CursorInvalid,
     #[error("LW_IDEMPOTENCY_CONFLICT")]

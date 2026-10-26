@@ -1,13 +1,14 @@
 import { reactive, ref, watch, type Ref } from 'vue'
-import { createEnvironmentTemplateRelease, listProjectTemplateImages } from '@/generated/contracts'
+import { createEnvironmentTemplateRelease, getProjectManualTemplateOptions, listProjectTemplateImages } from '@/generated/contracts'
 import type {
   CreateEnvironmentTemplateReleaseRequestSchema,
   EnvironmentSpec,
   EnvironmentTemplateReleaseViewSchema,
   PlatformImageCatalogSchemaPlatformImageEntry,
+  ManualTemplateOptionsSchema,
 } from '@/generated/contracts'
 import { diagnosticFromError, type AsyncState, type DiagnosticViewModel } from '@/types/async'
-import { idempotencyKey, newUuidV7 } from '@/utils/format'
+import { idempotencyKey } from '@/utils/format'
 import { clearPendingCommand, readPendingCommand, writePendingCommand } from '@/utils/pendingCommands'
 
 export type TemplateImage = PlatformImageCatalogSchemaPlatformImageEntry
@@ -18,12 +19,7 @@ const DAY_MS = 24 * 60 * 60 * 1000
 export const MANUAL_TEMPLATE_LIMITS = { reason: 500, description: 4000, templateFamilyId: 128 } as const
 export const TEMPLATE_FAMILY_PATTERN = /^[A-Za-z0-9._-]+$/
 
-/**
- * Everything a reviewer fills in for one manual Work template. Deployment
- * bindings have no read contract, so the reviewer enters the values the
- * platform administrator provides (or copies them from an earlier manual
- * version of the same template).
- */
+/** The publisher reviews human-labelled deployment choices; their identities come from the server. */
 export interface ManualWorkTemplateDraft {
   imageId: string
   name: string
@@ -37,6 +33,8 @@ export interface ManualWorkTemplateDraft {
   securityProfileBinding: string
   /** VM only. */
   storageClassBinding: string
+  retentionPolicyId: string
+  retentionPolicyRevision: number
   /** Container only: the application entry. */
   entryProtocol: 'http' | 'https'
   servicePort: number
@@ -62,6 +60,8 @@ export function emptyManualDraft(now = Date.now()): ManualWorkTemplateDraft {
     providerBinding: '',
     securityProfileBinding: '',
     storageClassBinding: '',
+    retentionPolicyId: '',
+    retentionPolicyRevision: 1,
     entryProtocol: 'http',
     servicePort: 8080,
     terminal: true,
@@ -92,6 +92,8 @@ export function draftFromManualRelease(release: EnvironmentTemplateReleaseViewSc
     providerBinding: spec.runtime.provider_binding,
     securityProfileBinding: spec.security.securityProfileBinding,
     storageClassBinding: spec.runtime.kind === 'virtual_machine' ? spec.runtime.storage_class_binding : '',
+    retentionPolicyId: spec.retention.policyId,
+    retentionPolicyRevision: spec.retention.policyRevision,
     entryProtocol: entry?.protocol === 'https' ? 'https' : 'http',
     servicePort: container?.service_port ?? 8080,
     terminal: Boolean(container?.terminal),
@@ -116,14 +118,15 @@ export function manualDraftProblem(draft: ManualWorkTemplateDraft, image: Templa
   if (!positiveInteger(draft.cpuMillicores) || !positiveInteger(draft.memoryGiB) || !positiveInteger(draft.storageGiB)) {
     return 'CPU、内存和存储都必须是大于 0 的整数。'
   }
-  if (!draft.providerBinding.trim() || !draft.securityProfileBinding.trim()) return '请填写管理员提供的运行位置和安全配置。'
+  if (!draft.providerBinding.trim() || !draft.securityProfileBinding.trim()) return '请选择运行位置，并填写安全配置标签。'
   if (image.kind === 'virtual_machine') {
-    if (!draft.storageClassBinding.trim()) return '虚拟机模板需要填写管理员提供的磁盘存储类。'
+    if (!draft.storageClassBinding.trim()) return '请选择虚拟机磁盘存储。'
     if (!positiveInteger(image.capacityBytes ?? 0)) return '这个虚拟机镜像缺少磁盘容量，不能用于发布。'
   } else {
     if (!Number.isInteger(draft.servicePort) || draft.servicePort < 1 || draft.servicePort > 65535) return '应用端口必须在 1 到 65535 之间。'
     if (draft.terminal && !/^\/[^\0]*$/.test(draft.terminalExecutable.trim())) return '终端程序必须是绝对路径，例如 /bin/bash。'
   }
+  if (!draft.retentionPolicyId) return '请选择平台材料保留策略。'
   const retainUntil = Date.parse(`${draft.retainUntil}T00:00:00.000Z`)
   if (Number.isNaN(retainUntil) || retainUntil <= now) return '材料保留期限必须是今天之后的日期。'
   const reason = draft.reason.trim()
@@ -132,8 +135,8 @@ export function manualDraftProblem(draft: ManualWorkTemplateDraft, image: Templa
   return null
 }
 
-/** The exact EnvironmentSpec the reviewer approves. `policyId` identifies this publication's retention decision. */
-export function manualTemplateSpec(draft: ManualWorkTemplateDraft, image: TemplateImage, policyId: string): EnvironmentSpec {
+/** The exact EnvironmentSpec the reviewer approves, including the real platform retention identity. */
+export function manualTemplateSpec(draft: ManualWorkTemplateDraft, image: TemplateImage): EnvironmentSpec {
   const resources = {
     cpuMillicores: draft.cpuMillicores,
     memoryBytes: draft.memoryGiB * GIB,
@@ -147,8 +150,8 @@ export function manualTemplateSpec(draft: ManualWorkTemplateDraft, image: Templa
     securityProfileBinding: draft.securityProfileBinding.trim(),
   }
   const retention = {
-    policyId,
-    policyRevision: 1,
+    policyId: draft.retentionPolicyId,
+    policyRevision: draft.retentionPolicyRevision,
     class: 'run_evidence' as const,
     disposition: 'delete' as const,
     retainUntil: `${draft.retainUntil}T00:00:00.000Z`,
@@ -165,7 +168,7 @@ export function manualTemplateSpec(draft: ManualWorkTemplateDraft, image: Templa
         provider_binding: draft.providerBinding.trim(),
         storage_class_binding: draft.storageClassBinding.trim(),
         ssh_port: 22,
-        base_disk: { binding: image.binding, capacityBytes: image.capacityBytes ?? 0, sourceRegistryDigest: image.resolvedDigest },
+        base_disk: { binding: image.binding, capacityBytes: image.capacityBytes ?? 0, sourceRegistryDigest: `docker://${image.sourceReference.split('@')[0]!.replace(/:[^/]+$/, '')}@${image.resolvedDigest}` },
       },
     }
   }
@@ -183,8 +186,8 @@ export function manualTemplateSpec(draft: ManualWorkTemplateDraft, image: Templa
   }
 }
 
-/** Request body for a draft, with the retention identity left out so equal content fingerprints equally. */
-function publicationBody(projectId: string, courseId: string | null, draft: ManualWorkTemplateDraft, image: TemplateImage, policyId: string): CreateEnvironmentTemplateReleaseRequestSchema {
+/** Request body and fingerprint include the authoritative retention policy. */
+function publicationBody(projectId: string, courseId: string | null, draft: ManualWorkTemplateDraft, image: TemplateImage): CreateEnvironmentTemplateReleaseRequestSchema {
   return {
     projectId,
     ...(courseId ? { courseId } : {}),
@@ -195,15 +198,14 @@ function publicationBody(projectId: string, courseId: string | null, draft: Manu
       templateFamilyId: draft.templateFamilyId.trim(),
       description: draft.description.trim(),
       reason: draft.reason.trim(),
-      spec: manualTemplateSpec(draft, image, policyId),
+      spec: manualTemplateSpec(draft, image),
       confirmed: true,
     },
   }
 }
 
-/** What a pending manual publication keeps besides its key: the reviewed draft and its retention identity. */
+/** What a pending manual publication keeps besides its key. */
 interface PendingPublication {
-  policyId: string
   draft: ManualWorkTemplateDraft
 }
 
@@ -216,7 +218,7 @@ interface PendingPublication {
  * 409 such as an operation in progress, 5xx, a transport failure or an
  * unknown code, leaves the outcome unknown.
  */
-const NOT_ACCEPTED_CODES: readonly string[] = ['LW_CONTRACT_DOCUMENT_INVALID', 'LW_MATERIAL_RETENTION_EXPIRED', 'LW_RELEASE_ARTIFACT_MISMATCH']
+const NOT_ACCEPTED_CODES: readonly string[] = ['LW_CONTRACT_DOCUMENT_INVALID', 'LW_MATERIAL_RETENTION_EXPIRED', 'LW_RELEASE_ARTIFACT_MISMATCH', 'LW_MANUAL_TEMPLATE_OPTION_INVALID']
 
 export type PublicationOutcome =
   | { kind: 'accepted' }
@@ -240,6 +242,20 @@ export function useManualWorkTemplatePublication(
   actorId: Ref<string | null | undefined>,
 ) {
   const images = ref<AsyncState<TemplateImage[]>>({ kind: 'idle' })
+  const options = ref<AsyncState<ManualTemplateOptionsSchema>>({ kind: 'idle' })
+  let optionsGeneration = 0
+
+  async function loadOptions() {
+    const id = projectId.value
+    const current = ++optionsGeneration
+    if (!id || !actorId.value) { options.value = { kind: 'idle' }; return }
+    options.value = { kind: 'loading', message: '加载平台运行与保留选项…' }
+    const result = await getProjectManualTemplateOptions({ path: { projectId: id } }).catch((error: unknown) => ({ data: undefined, error }))
+    if (current !== optionsGeneration) return
+    options.value = result.data
+      ? result.data.runtime.providers.length ? { kind: 'success', data: result.data } : { kind: 'empty' }
+      : { kind: 'error', diagnostic: diagnosticFromError(result.error, 'MANUAL_TEMPLATE_OPTIONS_LOAD_FAILED', '加载平台配置选项失败，不能发布。') }
+  }
   const publishing = ref(false)
   const outcome = ref<PublicationOutcome | null>(null)
   /** The reviewed draft of a publication whose outcome is still unknown, restored after a refresh. */
@@ -273,13 +289,13 @@ export function useManualWorkTemplatePublication(
     const id = projectId.value
     const actor = actorId.value
     const image = images.value.kind === 'success' ? images.value.data.find((entry) => entry.catalogId === draft.imageId) ?? null : null
-    if (!id || !actor || publishing.value || !image || manualDraftProblem(draft, image)) return false
+    if (!id || !actor || publishing.value || !image || options.value.kind !== 'success' || manualDraftProblem(draft, image)) return false
     const course = courseId.value ?? null
-    const fingerprint = JSON.stringify(publicationBody(id, course, draft, image, ''))
+    const fingerprint = JSON.stringify(publicationBody(id, course, draft, image))
     const stored = readPendingCommand<PendingPublication>(actor, scope(id))
-    const command = stored?.fingerprint === fingerprint && typeof stored.data?.policyId === 'string'
+    const command = stored?.fingerprint === fingerprint
       ? stored
-      : { fingerprint, idempotencyKey: idempotencyKey(), data: { policyId: newUuidV7(), draft: { ...draft } } }
+      : { fingerprint, idempotencyKey: idempotencyKey(), data: { draft: { ...draft } } }
     // Recorded before sending: a response lost after this point is replayed, never re-minted.
     writePendingCommand(actor, scope(id), command)
     const requestContext = context
@@ -291,7 +307,7 @@ export function useManualWorkTemplatePublication(
       const result = await createEnvironmentTemplateRelease({
         path: { projectId: id },
         headers: { 'Idempotency-Key': command.idempotencyKey },
-        body: publicationBody(id, course, draft, image, command.data.policyId),
+        body: publicationBody(id, course, draft, image),
       })
       if (result.error || !result.data) {
         const diagnostic = diagnosticFromError(result.error, 'MANUAL_TEMPLATE_PUBLISH_FAILED', '发布 Work 模板失败。')
@@ -319,6 +335,7 @@ export function useManualWorkTemplatePublication(
     pendingDraft.value = id && actor ? readPendingCommand<PendingPublication>(actor, scope(id))?.data?.draft ?? null : null
   }, { immediate: true })
   watch(projectId, () => { void loadImages() }, { immediate: true })
+  watch([projectId, actorId], () => { void loadOptions() }, { immediate: true })
 
-  return reactive({ images, publishing, outcome, pendingDraft, loadImages, publish })
+  return reactive({ images, options, publishing, outcome, pendingDraft, loadImages, loadOptions, publish })
 }

@@ -10328,6 +10328,56 @@ export type RubricModelInputRuleAction = {
 export type RubricModelInputVisibility = 'course_public' | 'hidden';
 
 /**
+ * ManualTemplateOptions
+ */
+export type ManualTemplateOptionsSchema = {
+    retention: ManualTemplateRetentionOption;
+    runtime: ManualTemplateRuntimeOptions;
+};
+
+export type ManualTemplateProviderOption = {
+    binding: string;
+    description: string;
+    label: string;
+    runtimeKind: ManualTemplateOptionsSchemaRuntimeKind;
+    storageClasses: Array<ManualTemplateStorageOption>;
+};
+
+export type ManualTemplateRetentionOption = {
+    description: string;
+    label: string;
+    maxRetentionSeconds: number;
+    policyId: ManualTemplateOptionsSchemaPolicyId;
+    policyRevision: ManualTemplateOptionsSchemaRevision;
+};
+
+export type ManualTemplateRuntimeOptions = {
+    providers: Array<ManualTemplateProviderOption>;
+};
+
+export type ManualTemplateStorageOption = {
+    binding: string;
+    description: string;
+    label: string;
+    maxCapacityBytes: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `PolicyId`.
+ */
+export type ManualTemplateOptionsSchemaPolicyId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type ManualTemplateOptionsSchemaRevision = number;
+
+/**
+ * Runtime kind shared by candidates, releases, and instances.
+ */
+export type ManualTemplateOptionsSchemaRuntimeKind = 'container' | 'virtual_machine';
+
+/**
  * PlatformImageCatalogView
  *
  * Catalog listing with the Control-owned release impact hint on every entry.
@@ -21350,6 +21400,73 @@ export type GetProjectLlmPolicyOptionsResponses = {
 };
 
 export type GetProjectLlmPolicyOptionsResponse = GetProjectLlmPolicyOptionsResponses[keyof GetProjectLlmPolicyOptionsResponses];
+
+export type GetProjectManualTemplateOptionsData = {
+    body?: never;
+    path: {
+        projectId: string;
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/manual-template-options';
+};
+
+export type GetProjectManualTemplateOptionsErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetProjectManualTemplateOptionsError = GetProjectManualTemplateOptionsErrors[keyof GetProjectManualTemplateOptionsErrors];
+
+export type GetProjectManualTemplateOptionsResponses = {
+    /**
+     * Successful response
+     */
+    200: ManualTemplateOptionsSchema;
+};
+
+export type GetProjectManualTemplateOptionsResponse = GetProjectManualTemplateOptionsResponses[keyof GetProjectManualTemplateOptionsResponses];
 
 export type ListOwnProjectEvaluationResultsData = {
     body?: never;

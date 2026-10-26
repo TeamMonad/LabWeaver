@@ -2175,12 +2175,34 @@ async fn public_contract_routes_are_registered_and_template_images_require_membe
     assert_eq!(forwarded[0]["actor"], member.to_string());
     assert!(!denied_problem.retryable);
 
+    // Browsing images is insufficient to read publication configuration. These GETs
+    // need no CSRF token, but still require the publication's project Edit action.
+    for session in [&member_session, &non_member_session] {
+        let response = client
+            .get(format!(
+                "{base}/api/v1/projects/{project_id}/manual-template-options"
+            ))
+            .header(
+                header::COOKIE,
+                format!("{cookie_name}={}", session.session_id),
+            )
+            .send()
+            .await?;
+        assert_problem_response(response, StatusCode::FORBIDDEN, "LW_AUTH_SCOPE_DENIED").await?;
+    }
+    assert_eq!(
+        requests.lock().await.len(),
+        1,
+        "unauthorized option reads must not reach Control"
+    );
+
     let expected_browser_operations = contracts::http::OPERATIONS
         .iter()
         .filter(|operation| is_browser_facing_contract_operation(operation))
         .count();
     let mut checked_operations = 0;
     let mut checked_template_image_operation = false;
+    let mut checked_manual_template_options = false;
     let mut missing_routes = Vec::new();
     for operation in contracts::http::OPERATIONS {
         if !is_browser_facing_contract_operation(operation) {
@@ -2188,6 +2210,8 @@ async fn public_contract_routes_are_registered_and_template_images_require_membe
         }
         checked_operations += 1;
         checked_template_image_operation |= operation.operation_id == "listProjectTemplateImages";
+        checked_manual_template_options |=
+            operation.operation_id == "getProjectManualTemplateOptions";
         let path = contract_route_path(operation.path);
         let method = contract_reqwest_method(operation.method);
         let response = client
@@ -2218,6 +2242,10 @@ async fn public_contract_routes_are_registered_and_template_images_require_membe
     assert!(
         checked_template_image_operation,
         "the route audit must include listProjectTemplateImages"
+    );
+    assert!(
+        checked_manual_template_options,
+        "the route audit must include getProjectManualTemplateOptions"
     );
     assert!(
         missing_routes.is_empty(),

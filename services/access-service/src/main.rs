@@ -621,6 +621,10 @@ fn project_browser_router() -> Router<Arc<AppState>> {
             get(proxy::forward_project_template_images),
         )
         .route(
+            "/api/v1/projects/{project_id}/manual-template-options",
+            get(proxy::forward_manual_template_options),
+        )
+        .route(
             "/api/v1/projects/{project_id}/environment-template-releases",
             axum::routing::any(proxy::forward_control),
         )

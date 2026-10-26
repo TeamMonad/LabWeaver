@@ -9,6 +9,7 @@ import {
   createEnvironmentTemplateRelease,
   getProjectAgentCapability,
   getProjectAvailableActions,
+  getProjectManualTemplateOptions,
   listEnvironments,
   listEnvironmentTemplateReleases,
   listProjectResourceLeases,
@@ -20,6 +21,7 @@ vi.mock('@/generated/contracts', () => ({
   createEnvironmentTemplateRelease: vi.fn(),
   getProjectAgentCapability: vi.fn(),
   getProjectAvailableActions: vi.fn(),
+  getProjectManualTemplateOptions: vi.fn(),
   listEnvironments: vi.fn(),
   listEnvironmentTemplateReleases: vi.fn(),
   listProjectResourceLeases: vi.fn(),
@@ -118,6 +120,14 @@ const vmImage = {
 }
 const disabledImage = { ...containerImage, catalogId: '0197f0e0-0000-7000-8000-000000000003', binding: 'alpine-v1', status: 'disabled' }
 
+const manualOptions = {
+  runtime: { providers: [
+    { binding: 'kubernetes-work', label: '校园教学容器', description: '工作区使用持久存储。', runtimeKind: 'container', storageClasses: [] },
+    { binding: 'kubevirt-primary-v1', label: '校园教学虚拟机', description: '独立虚拟机磁盘。', runtimeKind: 'virtual_machine', storageClasses: [{ binding: 'vm-rwo-primary-v1', label: '教学持久磁盘', description: '最大 128 GiB。', maxCapacityBytes: 128 * 1024 ** 3 }] },
+  ] },
+  retention: { policyId: '0197f0e0-0000-7000-8000-000000000099', policyRevision: 1, label: '校园材料保留策略', description: '最长保留 365 天。', maxRetentionSeconds: 31536000 },
+}
+
 const workSummary = {
   id: 'env-work-1',
   projectId: 'project-1',
@@ -173,7 +183,7 @@ async function mountAt(query: Record<string, string> = { projectId: 'project-1' 
 function field(wrapper: VueWrapper, label: string) {
   const match = wrapper.findAll('.manual-form label.field').find((item) => item.find('span').text() === label)
   if (!match) throw new Error(`field ${label} not found`)
-  return match.get('input, textarea')
+  return match.get('input, textarea, select')
 }
 
 describe('WorkEnvironmentsView', () => {
@@ -189,6 +199,54 @@ describe('WorkEnvironmentsView', () => {
     vi.mocked(listProjectResourceRequests).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined } as never)
     vi.mocked(listProjectResourceLeases).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined } as never)
     vi.mocked(listProjectTemplateImages).mockResolvedValue({ data: { entries: [containerImage, vmImage, disabledImage] }, error: undefined } as never)
+    vi.mocked(getProjectManualTemplateOptions).mockResolvedValue({ data: manualOptions, error: undefined } as never)
+  })
+
+  it('uses labelled provider and retention selects from the server and scopes storage to the selected runtime', async () => {
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined } as never)
+    const { wrapper } = await mountAt()
+    await wrapper.get(`[data-image-id="${containerImage.catalogId}"]`).trigger('click')
+    expect(getProjectManualTemplateOptions).toHaveBeenCalledWith({ path: { projectId: 'project-1' } })
+    const provider = field(wrapper, '运行位置')
+    expect(provider.element.tagName).toBe('SELECT')
+    expect(provider.text()).toContain('校园教学容器 · kubernetes-work')
+    expect(provider.text()).not.toContain('kubevirt-primary-v1')
+    expect(field(wrapper, '材料保留策略').text()).toContain('校园材料保留策略')
+    await provider.setValue('kubernetes-work')
+    expect(wrapper.text()).toContain('工作区使用持久存储。')
+    await wrapper.get(`[data-image-id="${vmImage.catalogId}"]`).trigger('click')
+    expect((wrapper.get('[data-testid="manual-publish"]').element as HTMLButtonElement).disabled).toBe(true)
+    await field(wrapper, '运行位置').setValue('kubevirt-primary-v1')
+    expect(field(wrapper, '磁盘存储').text()).toContain('教学持久磁盘 · vm-rwo-primary-v1')
+    await field(wrapper, '磁盘存储').setValue('vm-rwo-primary-v1')
+    expect(wrapper.text()).toContain('最大 128 GiB')
+    wrapper.unmount()
+  })
+
+  it('does not offer free-text fallback or publication when runtime options are empty', async () => {
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined } as never)
+    vi.mocked(getProjectManualTemplateOptions).mockResolvedValue({ data: { ...manualOptions, runtime: { providers: [] } }, error: undefined } as never)
+    const { wrapper } = await mountAt()
+    expect(wrapper.text()).toContain('当前没有可用的运行位置')
+    expect(wrapper.find('.manual-form').exists()).toBe(false)
+    expect(createEnvironmentTemplateRelease).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('shows an actionable options error and reloads it without treating unreadable config as an empty catalog', async () => {
+    vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined } as never)
+    const unavailable = problem(503, 'LW_CONTROL_DOWNSTREAM_UNAVAILABLE')
+    unavailable.error.retryable = true
+    vi.mocked(getProjectManualTemplateOptions).mockResolvedValueOnce(unavailable as never)
+    const { wrapper } = await mountAt()
+    expect(wrapper.find('.manual-form').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('当前没有可用的运行位置')
+    const banner = wrapper.get('[data-testid="manual-publisher"] .diagnostic-banner')
+    expect(banner.text()).toContain('req-1')
+    await banner.findAll('button').find((button) => button.text() === '重试')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.manual-form').exists()).toBe(true)
+    wrapper.unmount()
   })
 
   it('lists only Work templates with name, description, capabilities and source; Agent is off with a reason', async () => {
@@ -308,8 +366,9 @@ describe('WorkEnvironmentsView', () => {
     await field(wrapper, '模板名称').setValue('Python 分析')
     await field(wrapper, '模板系列标识').setValue('python-analysis')
     await field(wrapper, '说明（用途、预装软件）').setValue('预装 Python 3.12。')
-    await field(wrapper, '运行位置（provider binding）').setValue('kubernetes-work')
-    await field(wrapper, '安全配置（security profile）').setValue('restricted-v1')
+    await field(wrapper, '运行位置').setValue('kubernetes-work')
+    await field(wrapper, '安全配置标签').setValue('restricted-v1')
+    await field(wrapper, '材料保留策略').setValue(manualOptions.retention.policyId)
     await field(wrapper, '审核说明').setValue('已核对镜像与端口。')
     expect(wrapper.get('[data-testid="manual-problem"]').text()).toContain('请先确认')
     await wrapper.get('[data-testid="manual-confirm"]').setValue(true)
@@ -337,7 +396,7 @@ describe('WorkEnvironmentsView', () => {
           network: { mode: 'deny_all' },
           security: { readOnlyRootFilesystem: false, securityProfileBinding: 'restricted-v1', runAsUser: null },
           runtime: { kind: 'container', provider_binding: 'kubernetes-work', service_port: 8080, terminal: { executable: '/bin/bash', args: [], workingDirectory: '/workspace' } },
-          retention: { class: 'run_evidence', disposition: 'delete', policyRevision: 1 },
+          retention: { class: 'run_evidence', disposition: 'delete', policyRevision: 1, policyId: manualOptions.retention.policyId },
         },
       },
     })
@@ -368,12 +427,13 @@ describe('WorkEnvironmentsView', () => {
     await wrapper.get(`[data-image-id="${vmImage.catalogId}"]`).trigger('click')
     await field(wrapper, '模板名称').setValue('Ubuntu 桌面')
     await field(wrapper, '模板系列标识').setValue('ubuntu-desktop')
-    await field(wrapper, '运行位置（provider binding）').setValue('kubevirt-primary-v1')
-    await field(wrapper, '安全配置（security profile）').setValue('kubevirt-restricted-v1')
+    await field(wrapper, '运行位置').setValue('kubevirt-primary-v1')
+    await field(wrapper, '安全配置标签').setValue('kubevirt-restricted-v1')
+    await field(wrapper, '材料保留策略').setValue(manualOptions.retention.policyId)
     await field(wrapper, '审核说明').setValue('已核对磁盘。')
     await wrapper.get('[data-testid="manual-confirm"]').setValue(true)
-    expect(wrapper.get('[data-testid="manual-problem"]').text()).toContain('磁盘存储类')
-    await field(wrapper, '磁盘存储类（storage class）').setValue('vm-rwo-primary-v1')
+    expect(wrapper.get('[data-testid="manual-problem"]').text()).toContain('磁盘存储')
+    await field(wrapper, '磁盘存储').setValue('vm-rwo-primary-v1')
     await wrapper.get('.manual-form').trigger('submit')
     await flushPromises()
     expect(vi.mocked(createEnvironmentTemplateRelease).mock.calls[0][0].body).toMatchObject({
@@ -390,7 +450,7 @@ describe('WorkEnvironmentsView', () => {
             provider_binding: 'kubevirt-primary-v1',
             storage_class_binding: 'vm-rwo-primary-v1',
             ssh_port: 22,
-            base_disk: { binding: 'ubuntu-24.04-vm-v1', capacityBytes: 10 * 1024 ** 3, sourceRegistryDigest: vmImage.resolvedDigest },
+            base_disk: { binding: 'ubuntu-24.04-vm-v1', capacityBytes: 10 * 1024 ** 3, sourceRegistryDigest: `docker://registry.example/labweaver-system/ubuntu@${vmImage.resolvedDigest}` },
           },
         },
       },
@@ -402,8 +462,9 @@ describe('WorkEnvironmentsView', () => {
     await wrapper.get(`[data-image-id="${containerImage.catalogId}"]`).trigger('click')
     await field(wrapper, '模板名称').setValue(name)
     await field(wrapper, '模板系列标识').setValue('python-analysis')
-    await field(wrapper, '运行位置（provider binding）').setValue('kubernetes-work')
-    await field(wrapper, '安全配置（security profile）').setValue('restricted-v1')
+    await field(wrapper, '运行位置').setValue('kubernetes-work')
+    await field(wrapper, '安全配置标签').setValue('restricted-v1')
+    await field(wrapper, '材料保留策略').setValue(manualOptions.retention.policyId)
     await field(wrapper, '审核说明').setValue('已核对镜像与端口。')
     await wrapper.get('[data-testid="manual-confirm"]').setValue(true)
   }
@@ -554,7 +615,7 @@ describe('WorkEnvironmentsView', () => {
         .map(([, value]) => JSON.parse(value))
       expect(stored).toHaveLength(1)
       expect(stored[0].idempotencyKey).toBe(b.headers['Idempotency-Key'])
-      expect(stored[0].data.policyId).toBe(b.body.manual?.spec.retention.policyId)
+      expect(stored[0].data.draft.retentionPolicyId).toBe(b.body.manual?.spec.retention.policyId)
       // The reopened form still shows B's unconfirmed outcome, not A's acceptance.
       expect(wrapper.find('[data-testid="manual-accepted"]').exists()).toBe(false)
       expect(wrapper.get('[data-testid="manual-unconfirmed"]').exists()).toBe(true)
@@ -605,7 +666,7 @@ describe('WorkEnvironmentsView', () => {
         const policyId = (options: typeof a) => options.body.manual?.spec.retention.policyId
         expect(policyId(b2)).toBe(policyId(b1))
         expect(policyId(b3)).toBe(policyId(b1))
-        expect(policyId(b1)).not.toBe(policyId(a))
+        expect(policyId(b1)).toBe(manualOptions.retention.policyId)
         // The older stored A no longer competes with B.
         expect(Object.keys(window.sessionStorage).filter((key) => key.startsWith('labweaver.pending-command:owner-1:manual-work-template:'))).toEqual([])
         expect(listPendingCommands('owner-1', 'manual-work-template:')).toEqual([
@@ -681,7 +742,7 @@ describe('WorkEnvironmentsView', () => {
       await flushPromises()
       const [first, second] = vi.mocked(createEnvironmentTemplateRelease).mock.calls.map(([options]) => options)
       expect(second.headers['Idempotency-Key']).not.toBe(first.headers['Idempotency-Key'])
-      expect(second.body.manual?.spec.retention.policyId).not.toBe(first.body.manual?.spec.retention.policyId)
+      expect(second.body.manual?.spec.retention.policyId).toBe(manualOptions.retention.policyId)
       wrapper.unmount()
     })
 

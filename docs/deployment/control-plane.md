@@ -79,6 +79,37 @@ Service startup verifies required tables and exits with a stable diagnostic when
 certificate, secret locator, provider binding or durable consumer configuration is absent.
 Startup never repairs an unknown schema.
 
+## Model-free Work publication options
+
+The teacher's `GET /api/v1/projects/{projectId}/manual-template-options` requires the same
+project edit and owner/manager (or platform administrator) authority as manual publication.
+Control reads Environment's authenticated `GET /internal/v1/manual-template-runtime-options`
+using its existing `environment.work.read` service permission. The response is a public-safe
+projection, not the provider JSON itself: no credentials, subjects, cluster addresses or Secret
+references are returned. Service/configuration read failures remain errors, never an empty catalog.
+
+Administrators maintain the existing Bundle `environment-service-config/providers.json`, loaded
+through `LABWEAVER_ENVIRONMENT_PROVIDER_BINDINGS_PATH`; no second options configuration exists.
+Container choices use registered `providerKind=container` bindings. VM choices require a
+`providerKind=kubevirt` binding with `runtimeVmBase`; its `storageClassBinding`,
+`storageClassName` and `maxCapacityBytes` supply the disk choice, explanation and hard capacity
+limit. Apply the Bundle and restart/reconcile Environment through the existing deployment flow
+before teachers reload choices. An option means configured support, not live capacity or health;
+Resource admission still decides allocation. Removing a choice prevents new publication but does
+not rewrite existing releases or Work.
+
+Retention uses Control's existing `control.retentionPolicyId` and `control.retentionSeconds`,
+revision 1, with finite `run_evidence`/`delete` snapshots. Teachers choose a date within that
+duration; forged policy IDs/revisions, unknown placement/storage and excessive durations fail
+with HTTP 422 `LW_MANUAL_TEMPLATE_OPTION_INVALID`. The browser never mints policy identities.
+
+`securityProfileBinding` is currently a non-empty descriptive label, not an executed profile
+selector. Do not present it as a security guarantee or create a parallel profile catalog.
+Execution posture is governed by the approved security specification and applied platform runtime
+policy (#204/#207). Control's existing VM base catalog remains needed for Agent candidate
+artifact resolution; manual publication no longer consults its copied provider/storage bindings.
+
+
 ## One-shot workload runtime prerequisites
 
 Every platform one-shot workload — admitted Agent authoring attempts, OJ runs and Ansible probes —

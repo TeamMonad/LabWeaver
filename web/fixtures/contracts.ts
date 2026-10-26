@@ -32,6 +32,7 @@ import type {
   PlatformImageCatalogSchemaPlatformImageEntry,
   PlatformImageCatalogViewSchema,
   ProjectAgentCapabilitySchema,
+  ManualTemplateOptionsSchema,
   ProblemDetails,
   ResourceLeaseSchema,
   ResourceLeaseState,
@@ -1012,6 +1013,15 @@ export async function listProjectTemplateImages(options?: FixtureOptions): Promi
     entries: platformImageCatalog.entries
       .filter((entry) => entry.status === 'active')
       .map(({ releaseReferenceCount: _count, ...entry }) => entry),
+  })
+}
+
+export async function getProjectManualTemplateOptions(options?: FixtureOptions): Promise<FixtureResult<ManualTemplateOptionsSchema>> {
+  const projectId = options?.path?.projectId
+  if (projectId !== fixtureProjectId) return notFoundResponse('读取手工模板选项', projectId)
+  return fixtureResponse({
+    runtime: { providers: [{ binding: 'fixture-kubernetes', label: '教学容器环境', description: '演示运行位置，持久工作区由平台配置。', runtimeKind: 'container', storageClasses: [] }] },
+    retention: { policyId: '0197f0e0-0000-7000-8000-0000000000c1', policyRevision: 1, label: '平台材料保留策略', description: '最多保留 365 天，到期删除材料。', maxRetentionSeconds: 31536000 },
   })
 }
 
