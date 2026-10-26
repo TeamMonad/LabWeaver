@@ -37,7 +37,7 @@ pub(super) async fn recheck_gateway(
         std::time::Duration::from_secs(contracts::object_authorization::AUTHORIZATION_CHECK_TIMEOUT_SECONDS),
         sqlx::query(
             "UPDATE access.gateway_sessions s SET state='terminating',revision=revision+1, \
-             termination_requested_at=clock_timestamp(),terminate_by=clock_timestamp()+interval '60 seconds' \
+             termination_requested_at=statement_timestamp(),terminate_by=statement_timestamp()+interval '60 seconds' \
              WHERE session_id=$1 AND gateway_identity=$2 AND connection_id=$3 AND state='active' \
                AND NOT EXISTS(SELECT 1 FROM access.access_grants g \
                  JOIN access.actors a ON a.actor_id=g.actor_id \
