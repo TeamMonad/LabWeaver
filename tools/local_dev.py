@@ -2823,6 +2823,20 @@ def start_foundation(kubeconfig: Path, foundation: Path, work: Path,
                     for role in sorted(client_roles[client_id])]
         for client_id in client_ids
     }
+    # Keycloak owns realm-management and its built-in roles. Import only the
+    # grants from the production identity policy, never redefine those roles.
+    realm_assignments = identity_defaults.get("identity_service_realm_role_assignments")
+    if not isinstance(realm_assignments, list):
+        fail("identity defaults do not contain the realm role contract")
+    for assignment in realm_assignments:
+        if not isinstance(assignment, dict):
+            fail("identity realm role assignment is invalid")
+        caller = assignment.get("caller")
+        roles = assignment.get("roles")
+        if (caller not in client_ids or not isinstance(roles, list) or not roles
+                or any(not isinstance(role, str) or not role for role in roles)):
+            fail("identity realm role assignment references an unknown client or invalid roles")
+        service_account_roles[caller].setdefault("realm-management", set()).update(roles)
     # Keep the browser client least-privileged while explicitly mapping its
     # user-facing realm roles.  This is a RealmRepresentation scope mapping;
     # relying on fullScopeAllowed would silently broaden every client.
