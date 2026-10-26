@@ -1064,7 +1064,7 @@ impl ControlService {
                     a.username,a.display_name \
              FROM control.project_memberships pm \
              JOIN access.actors a ON a.actor_id=pm.actor_id \
-             WHERE pm.project_id=$1 AND pm.actor_id=$2 AND pm.state='active' FOR UPDATE",
+             WHERE pm.project_id=$1 AND pm.actor_id=$2 AND pm.state='active' FOR UPDATE OF pm",
         )
         .bind(project_id.as_uuid())
         .bind(target_actor_id.as_uuid())

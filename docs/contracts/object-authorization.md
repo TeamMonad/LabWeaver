@@ -1,6 +1,6 @@
 # 对象动作与成员授权
 
-Control 保存课程成员和项目成员。Access 保存身份、BFF 会话、AccessGrant 和连接状态。Access 直接读取 Control 的当前成员事实，不保存成员副本。
+Control 保存课程成员和项目成员。Access 保存身份、BFF 会话、AccessGrant 和连接状态。Access 直接读取 Control 的当前成员事实，不保存成员副本。跨域读取仅授予 `SELECT`：只有 Control 锁定并写入成员记录，Access 只锁定自己的记录。SSH 强制命令兑换时对当前成员做快照授权，不与并发成员撤销串行化；撤销若在兑换查询后提交，该会话可能先建立，再由下一次心跳的当前成员复核进入终止流程。
 
 `Teacher`、`Student` 和 `PlatformAdmin` 表示已验证的平台身份。项目成员的 `objectRole` 表示该项目中的职责。教师身份不能提高只读成员的项目权限。
 
@@ -68,7 +68,7 @@ Access 在目录解析前检查管理权限。Control 再检查目标本人、�
 
 - 课程和项目 SSE 绑定原 BFF 会话，每 1 秒检查当前会话和成员。每次发送事件前也检查。成员失效、revision 改变、会话注销、账号停用、身份到期或查询失败结束连接。每次成员检查和事件读取最多等待 5 秒。
 - 控制台每 1 秒检查 Control 成员、当前 AccessGrant、BFF 会话和账号状态。检查最多等待 5 秒。转发写入也有 5 秒上限。授权结束时关闭浏览器连接，诊断为 `LW_CONSOLE_AUTHORIZATION_ENDED`。
-- SSH Gateway 沿用每 15 秒心跳和 5 秒 HTTP 超时。Access 在心跳中检查当前成员和 AccessGrant。无权会话进入 `terminating`，Gateway 停止目标进程。
+- SSH 强制命令兑换使用成员快照授权，不与 Control 撤销串行化，也不签发每用户证书。一次性令牌配置限制为 5–60 秒（`crates/auth/src/config.rs:370`）。Gateway 每 15 秒心跳（`access-gateway/src/main.rs:562`）；整个心跳调用共享 5 秒 deadline，包含服务令牌获取/刷新、Access 请求及响应体解析（同文件 `26,641`）。第一次失败、超时、非 active 响应或 revision 冲突立即进入目标停止流程，不重试心跳。因此撤销到请求停止目标的最坏调度/调用窗口为 **15 + 5 = 20 秒**，另计操作系统完成进程终止的时间（同文件 `599-619`）。Access 心跳的授权复核检查当前项目/课程成员和 AccessGrant（`services/access-service/src/grants.rs:1214`、`object_authorization.rs:30-54`）。无权会话持久化为 `terminating`，同一 UPDATE 用稳定的 statement timestamp 设定精确 `terminate_by - termination_requested_at = 60 秒`，不会因两次时钟取值的微秒差违反数据库约束。该 60 秒是服务端终止记录期限，不是 Gateway 等待时间：Gateway 先停止目标进程，再报告 closed；即使令牌服务或 Access 不响应，也在上述心跳 deadline 后停止目标。
 
 事件用于通知观察者。周期检查保证丢失事件时也能收敛。重新加入项目产生新 revision，不能恢复旧 SSE 授权。
 

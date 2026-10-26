@@ -23,6 +23,7 @@ use tracing::{error, info, warn};
 const AUTHORIZE_PATH: &str = "/internal/v1/ssh/authorize";
 const SESSION_PATH: &str = "/internal/v1/sessions";
 const MAX_GUEST_COMMAND_BYTES: usize = 4096;
+const ACCESS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 enum GatewayError {
@@ -207,7 +208,7 @@ impl GatewayConfig {
         let client = Client::builder()
             .add_root_certificate(ca)
             .https_only(true)
-            .timeout(Duration::from_secs(5))
+            .timeout(ACCESS_REQUEST_TIMEOUT)
             .build()
             .map_err(|_| GatewayError::Configuration)?;
         let service_token_config = ServiceTokenClientConfig::new(
@@ -636,45 +637,50 @@ async fn heartbeat_session(
     session: &GatewaySession,
     connection_id: &str,
 ) -> Result<HeartbeatUpdate, GatewayError> {
-    let body = HeartbeatGatewaySessionRequest {
-        gateway_identity: config.service_client_id.clone(),
-        connection_id: connection_id.to_owned(),
-        expected_revision: session.revision,
-        observed_at: now()?,
-    };
-    let response = config
-        .post(
-            &format!("{SESSION_PATH}/{}/heartbeat", session.id),
-            &body,
-            None,
-            Some(session.revision),
-        )
-        .await?;
-    if response.status() == StatusCode::OK {
-        let updated = response
-            .json::<GatewaySession>()
+    // Include token refresh, request transmission and response decoding in one fail-closed deadline.
+    tokio::time::timeout(ACCESS_REQUEST_TIMEOUT, async {
+        let body = HeartbeatGatewaySessionRequest {
+            gateway_identity: config.service_client_id.clone(),
+            connection_id: connection_id.to_owned(),
+            expected_revision: session.revision,
+            observed_at: now()?,
+        };
+        let response = config
+            .post(
+                &format!("{SESSION_PATH}/{}/heartbeat", session.id),
+                &body,
+                None,
+                Some(session.revision),
+            )
+            .await?;
+        if response.status() == StatusCode::OK {
+            let updated = response
+                .json::<GatewaySession>()
+                .await
+                .map_err(|_| GatewayError::Authority)?;
+            updated.validate().map_err(|_| GatewayError::Authority)?;
+            return Ok(if updated.state == GatewaySessionState::Active {
+                HeartbeatUpdate::Active(Box::new(updated))
+            } else {
+                HeartbeatUpdate::Stop(updated.revision)
+            });
+        }
+        if response.status() != StatusCode::PRECONDITION_FAILED {
+            return Err(GatewayError::Authority);
+        }
+        let conflict = response
+            .json::<SessionRevisionConflict>()
             .await
             .map_err(|_| GatewayError::Authority)?;
-        updated.validate().map_err(|_| GatewayError::Authority)?;
-        return Ok(if updated.state == GatewaySessionState::Active {
-            HeartbeatUpdate::Active(Box::new(updated))
-        } else {
-            HeartbeatUpdate::Stop(updated.revision)
-        });
-    }
-    if response.status() != StatusCode::PRECONDITION_FAILED {
-        return Err(GatewayError::Authority);
-    }
-    let conflict = response
-        .json::<SessionRevisionConflict>()
-        .await
-        .map_err(|_| GatewayError::Authority)?;
-    if conflict.diagnostic_code != "LW_REVISION_CONFLICT"
-        || conflict.current_revision <= session.revision
-    {
-        return Err(GatewayError::Authority);
-    }
-    Ok(HeartbeatUpdate::Stop(conflict.current_revision))
+        if conflict.diagnostic_code != "LW_REVISION_CONFLICT"
+            || conflict.current_revision <= session.revision
+        {
+            return Err(GatewayError::Authority);
+        }
+        Ok(HeartbeatUpdate::Stop(conflict.current_revision))
+    })
+    .await
+    .map_err(|_| GatewayError::Transport)?
 }
 
 async fn stop_target(child: &mut tokio::process::Child) -> Result<(), GatewayError> {
@@ -1049,11 +1055,12 @@ mod tests {
     use super::*;
     use std::collections::{BTreeMap, VecDeque};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use serde_json::Value;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, Notify};
     use tokio::task::JoinHandle;
 
     #[derive(Clone, Debug)]
@@ -1089,6 +1096,8 @@ mod tests {
 
     struct MockAuthorityState {
         token_status: u16,
+        stall_token: AtomicBool,
+        token_started: Notify,
         close_responses: Mutex<VecDeque<MockResponse>>,
         close_requests: Mutex<Vec<MockCloseRequest>>,
         heartbeat_response: Mutex<Option<MockResponse>>,
@@ -1110,6 +1119,8 @@ mod tests {
             let base_url = format!("http://{address}");
             let state = Arc::new(MockAuthorityState {
                 token_status,
+                stall_token: AtomicBool::new(false),
+                token_started: Notify::new(),
                 close_responses: Mutex::new(close_responses.into()),
                 close_requests: Mutex::new(Vec::new()),
                 heartbeat_response: Mutex::new(None),
@@ -1227,6 +1238,13 @@ mod tests {
         } else if request.path == "/jwks" {
             (200, serde_json::json!({"keys": []}).to_string())
         } else if request.path == "/token" {
+            if state.stall_token.load(Ordering::SeqCst) {
+                state.token_started.notify_one();
+                // Read until the timed-out client closes; never send a token response.
+                let mut byte = [0_u8; 1];
+                let _ = stream.read(&mut byte).await;
+                return;
+            }
             let status = state.token_status;
             let body = if status == 200 {
                 serde_json::json!({
@@ -1670,6 +1688,62 @@ mod tests {
         let mut session = test_gateway_session()?;
         let result = close_session(&config, &mut session, "connection-a", false).await;
         assert!(matches!(result, Err(GatewayError::Authority)));
+        assert!(authority.close_requests().await.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stalled_token_heartbeat_fails_closed_and_stops_target() -> Result<(), GatewayError> {
+        let authority = MockAuthority::start(200, vec![])
+            .await
+            .map_err(|_| GatewayError::Configuration)?;
+        let config = test_gateway_config(&authority).await?;
+        authority.state.stall_token.store(true, Ordering::SeqCst);
+        let mut session = test_gateway_session()?;
+        let mut child = Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|_| GatewayError::Target)?;
+        let mut signals = GatewaySignals::new()?;
+        let outcome = {
+            let run = run_target(
+                &config,
+                &mut session,
+                "connection-a",
+                &mut child,
+                &mut signals,
+                Duration::from_secs(15),
+            );
+            tokio::pin!(run);
+            tokio::select! {
+                () = authority.state.token_started.notified() => {},
+                _ = &mut run => return Err(GatewayError::Authority),
+            }
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(5)).await;
+            // Guard only: legacy code has no deadline and must fail instead of hanging the test.
+            tokio::time::timeout(Duration::from_secs(1), &mut run).await
+        };
+        if outcome.is_err() {
+            stop_target(&mut child).await?;
+        }
+        assert!(
+            outcome.is_ok(),
+            "stalled token fetch outlived the heartbeat deadline; target stayed running"
+        );
+        let (result, stopped) = outcome.map_err(|_| GatewayError::Authority)?;
+        assert!(matches!(result, Err(GatewayError::Transport)));
+        assert!(
+            stopped,
+            "heartbeat timeout must enter the real target-stop path"
+        );
+        assert!(
+            child
+                .try_wait()
+                .map_err(|_| GatewayError::Target)?
+                .is_some()
+        );
         assert!(authority.close_requests().await.is_empty());
         Ok(())
     }

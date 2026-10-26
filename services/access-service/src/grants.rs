@@ -958,7 +958,7 @@ async fn load_gateway_session_candidate(
             AND k.revoked_at IS NULL AND pm.state='active' AND pm.object_role IN ('editor','manager','owner') AND (pm.expires_at IS NULL OR pm.expires_at>$4) \
             AND pm.role=CASE g.contract->>'subjectKind' WHEN 'owner' THEN 'student' WHEN 'course_teacher' THEN 'teacher' ELSE '' END \
             AND (g.course_id IS NULL OR (cm.state='active' AND (cm.expires_at IS NULL OR cm.expires_at>$4))) \
-          FOR SHARE OF g,eg,k,pm",
+          FOR SHARE OF g,eg,k",
     )
     .bind(alias)
     .bind(key_id)
@@ -978,14 +978,15 @@ async fn load_gateway_session_candidate(
     .map_err(|_| ApiError::internal("LW_ACCESS_STORE_CORRUPT"))?;
     let course_membership_expires_at = match candidate.get::<Option<Uuid>, _>("course_id") {
         Some(course_id) => {
-            lock_course_membership(tx, course_id, actor_id, subject_kind, now).await?
+            load_course_membership(tx, course_id, actor_id, subject_kind, now).await?
         }
         None => None,
     };
     Ok((candidate, course_membership_expires_at))
 }
 
-async fn lock_course_membership(
+/// Reads the Control-owned course membership using Access's read-only cross-schema grant.
+async fn load_course_membership(
     tx: &mut Transaction<'_, Postgres>,
     course_id: Uuid,
     actor_id: Uuid,
@@ -998,8 +999,7 @@ async fn lock_course_membership(
     };
     let row = sqlx::query(
         "SELECT state,expires_at FROM control.course_memberships \
-         WHERE course_id=$1 AND actor_id=$2 AND role=$3 \
-         FOR SHARE",
+         WHERE course_id=$1 AND actor_id=$2 AND role=$3",
     )
     .bind(course_id)
     .bind(actor_id)
@@ -2749,6 +2749,10 @@ fn parse_grant_state(v: &str) -> Result<AccessGrantState, ApiError> {
         _ => Err(ApiError::internal("LW_ACCESS_STORE_CORRUPT")),
     }
 }
+
+#[cfg(test)]
+#[path = "gateway_membership_tests.rs"]
+mod gateway_membership_tests;
 
 #[cfg(test)]
 mod project_scope_tests {

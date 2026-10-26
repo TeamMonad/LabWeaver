@@ -21,6 +21,168 @@ use testcontainers_modules::postgres::Postgres;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+#[path = "../support/production_roles.rs"]
+mod production_roles;
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn restricted_control_runtime_revokes_project_and_course_memberships() -> TestResult {
+    let roles = production_roles::ProductionRoles::start().await?;
+    let provisioner = roles.provisioner.clone();
+    let control_runtime = roles.control.clone();
+    let access_runtime = roles.access.clone();
+    let service = ControlService::new(
+        control_runtime.clone(),
+        Arc::new(FixtureObjects { fail_second: false }),
+        control_config()?,
+    )?;
+    let now = UtcTimestamp::from_utc(
+        sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
+            .fetch_one(&provisioner)
+            .await?,
+    )?;
+    let owner = actor(
+        &provisioner,
+        "restricted-owner",
+        vec![PlatformRole::Student],
+        now,
+    )
+    .await?;
+    let project_member = actor(
+        &provisioner,
+        "restricted-project-member",
+        vec![PlatformRole::Student],
+        now,
+    )
+    .await?;
+    let project_id = project(&service, &owner, now, "restricted-runtime-project").await?;
+    let membership = service
+        .add_project_membership(
+            project_id,
+            owner.actor_id,
+            false,
+            &ResolvedProjectMembershipRequest {
+                actor_id: project_member.actor_id,
+                role: PlatformRole::Student,
+                object_role: ProjectObjectRole::Editor,
+                expires_at: None,
+            },
+            &IdempotencyKey::parse("restricted-runtime-add-project-member")?,
+            now,
+        )
+        .await?;
+    // The original unqualified lock must remain denied under Control's read-only grant on access.actors.
+    let unsafe_project_lock = sqlx::query(
+        "SELECT pm.course_id,pm.project_id,pm.actor_id,pm.role,pm.object_role,pm.state,pm.revision,pm.expires_at, \
+                a.username,a.display_name \
+         FROM control.project_memberships pm \
+         JOIN access.actors a ON a.actor_id=pm.actor_id \
+         WHERE pm.project_id=$1 AND pm.actor_id=$2 AND pm.state='active' FOR UPDATE",
+    )
+    .bind(project_id.as_uuid())
+    .bind(project_member.actor_id.as_uuid())
+    .fetch_optional(&control_runtime)
+    .await;
+    let unsafe_lock_error = unsafe_project_lock.err().ok_or_else(|| {
+        std::io::Error::other("Control runtime unexpectedly acquired an Access actor row lock")
+    })?;
+    let database_message = unsafe_lock_error
+        .as_database_error()
+        .map_or_else(String::new, |error| error.message().to_owned());
+    assert!(
+        database_message.contains("permission denied for table actors"),
+        "expected the existing read-only Access grant to reject the joined row lock: {database_message}\n{}",
+        roles.database_errors().await?
+    );
+    let project_revoke = service
+        .remove_project_membership(
+            project_id,
+            project_member.actor_id,
+            owner.actor_id,
+            false,
+            &removal(membership.revision),
+            &IdempotencyKey::parse("restricted-runtime-remove-project-member")?,
+            now,
+        )
+        .await;
+
+    let teacher = actor(
+        &provisioner,
+        "restricted-course-teacher",
+        vec![PlatformRole::Teacher],
+        now,
+    )
+    .await?;
+    let course_member = actor(
+        &provisioner,
+        "restricted-course-member",
+        vec![PlatformRole::Student],
+        now,
+    )
+    .await?;
+    let course_id = CourseId::new();
+    instructor(&provisioner, course_id, &teacher).await?;
+    sqlx::query("INSERT INTO control.course_memberships (course_id,actor_id,role,object_role,state,revision) VALUES ($1,$2,'student','participant','active',1)")
+        .bind(course_id.as_uuid())
+        .bind(course_member.actor_id.as_uuid())
+        .execute(&provisioner)
+        .await?;
+    let course_revoke = service
+        .remove_course_membership(
+            &teacher,
+            course_id,
+            course_member.actor_id,
+            &removal(Revision::new(1)?),
+            &IdempotencyKey::parse("restricted-runtime-remove-course-member")?,
+        )
+        .await;
+
+    let project_visibility: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM control.project_memberships pm \
+         WHERE pm.project_id=$1 AND pm.actor_id=$2 AND pm.state='revoked')",
+    )
+    .bind(project_id.as_uuid())
+    .bind(project_member.actor_id.as_uuid())
+    .fetch_one(&access_runtime)
+    .await?;
+    assert!(
+        project_visibility,
+        "Access must see project membership revoked state"
+    );
+
+    let project_revoke = project_revoke?;
+    let course_revoke = course_revoke?;
+    assert_eq!(project_revoke.state, contracts::MembershipState::Revoked);
+    assert_eq!(course_revoke.state, contracts::MembershipState::Revoked);
+    let project_state: String = sqlx::query_scalar(
+        "SELECT state FROM control.project_memberships WHERE project_id=$1 AND actor_id=$2",
+    )
+    .bind(project_id.as_uuid())
+    .bind(project_member.actor_id.as_uuid())
+    .fetch_one(&provisioner)
+    .await?;
+    let course_state: String = sqlx::query_scalar(
+        "SELECT state FROM control.course_memberships WHERE course_id=$1 AND actor_id=$2",
+    )
+    .bind(course_id.as_uuid())
+    .bind(course_member.actor_id.as_uuid())
+    .fetch_one(&provisioner)
+    .await?;
+    assert_eq!(project_state, "revoked");
+    assert_eq!(course_state, "revoked");
+
+    let current_access_role: String = sqlx::query_scalar("SELECT current_user")
+        .fetch_one(&access_runtime)
+        .await?;
+    assert_eq!(current_access_role, Domain::Access.runtime_role());
+
+    let current_role: String = sqlx::query_scalar("SELECT current_user")
+        .fetch_one(&control_runtime)
+        .await?;
+    assert_eq!(current_role, Domain::Control.runtime_role());
+    Ok(())
+}
+
 async fn fixture() -> TestResult<(
     ContainerAsync<Postgres>,
     PgPool,
