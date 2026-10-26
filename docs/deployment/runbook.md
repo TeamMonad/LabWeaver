@@ -144,6 +144,8 @@ cargo xtask identity-foundation --env v1 --infra --yes --action verify
 
 教师按姓名或用户名搜索组织账号，依赖 Access 服务账户在 `realm-management` 下的 `query-users`、`view-users` 角色及对应 client scope 映射。应用镜像部署不会自动更新身份基础层。已有环境升级涉及服务权限时，应执行已审核的身份配置 reconcile；目录查询不需要 `manage-users` 或 realm 管理员权限。页面出现 `LW_ACCESS_DIRECTORY_UNAVAILABLE` 时检查这两项映射及服务令牌刷新，再从教师页面重试搜索，不能直接写项目成员记录来跳过故障。
 
+目录上游故障继续返回 `503 LW_ACCESS_DIRECTORY_UNAVAILABLE`，对应的 `auth.request.rejected` 结构化日志保留 `failure_stage`、`error_kind`、可用时的上游 `http_status` 和 `retryable`。令牌阶段失败不伪造目录 HTTP 状态；Keycloak `403` 记录为 `directory.response` / `http_forbidden` / `retryable=false`。日志不包含令牌、Authorization header、查询用户名或响应正文。此类拒绝需要修复上文服务账户角色与 client scope 两项映射，而非扩大 client 权限或授予 `manage-users`。
+
 #### Keycloak 副本与节点维护
 
 身份数据库仍为三个 CNPG 实例；Keycloak 应用固定两个副本，以便单节点维护期间在剩余两个 host 上替换一个 Pod。`identity_keycloak_replicas` 是受校验的部署输入，不支持用 3、字符串或其他值覆盖。不要在三副本部署失去第三台 host 后靠反复 reconcile 推进更新；该输入明确被拒绝，而不是将它静默降为两个副本。
