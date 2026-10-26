@@ -25,6 +25,7 @@ dependencies = [
 name = "access-service"
 version = "0.1.0"
 dependencies = [
+ "agent-service",
  "artifact-store",
  "async-nats",
  "auth",
@@ -43,6 +44,7 @@ dependencies = [
  "rand 0.9.5",
  "rcgen",
  "reqwest",
+ "resource-service",
  "rustls 0.23.42",
  "rustls-pemfile 2.2.0",
  "scraper",
@@ -1436,6 +1438,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 name = "contracts"
 version = "0.1.0"
 dependencies = [
+ "form_urlencoded",
  "jsonschema",
  "schemars 1.2.1",
  "serde",
