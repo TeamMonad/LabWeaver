@@ -2032,8 +2032,6 @@ fn git_output<const N: usize>(root: &Path, arguments: [&str; N]) -> Result<Strin
 mod tests {
     #[cfg(target_os = "linux")]
     use std::fs;
-    #[cfg(target_os = "linux")]
-    use std::os::unix::fs::PermissionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
@@ -2082,22 +2080,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn deploy_tool_validation_does_not_probe_a_buildkit_daemon() -> Result<(), String> {
-        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let buildx = root.path().join("docker-buildx");
-        let helm = root.path().join("helm");
-        fs::write(
-            &buildx,
-            "#!/bin/sh\n[ \"$1\" = \"version\" ] || exit 42\necho 'github.com/docker/buildx v0.35.0'\n",
-        )
-        .map_err(|error| error.to_string())?;
-        fs::write(&helm, "#!/bin/sh\necho 'v3.21.3'\n").map_err(|error| error.to_string())?;
-        for path in [&buildx, &helm] {
-            let mut permissions = fs::metadata(path)
-                .map_err(|error| error.to_string())?
-                .permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(path, permissions).map_err(|error| error.to_string())?;
-        }
+        // Checked-in executables have no runtime writer for another test's
+        // fork child to inherit; closing our own writer alone is insufficient.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/deploy-tools");
         let lock = VersionLock {
             platform_images: PlatformImageLock {
                 platform: "linux/amd64".to_owned(),
@@ -2122,11 +2107,8 @@ mod tests {
                 buildkit_rootless: String::new(),
             },
         };
-        let result = verify_cli_identities_with_path(
-            &lock,
-            "verify deploy tool identity",
-            Some(root.path()),
-        );
+        let result =
+            verify_cli_identities_with_path(&lock, "verify deploy tool identity", Some(&root));
         result.map_err(|error| error.to_string())
     }
 
