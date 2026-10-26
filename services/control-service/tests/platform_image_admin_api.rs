@@ -3229,3 +3229,107 @@ async fn abandoned_multipart_uploads_abort_and_accepted_completion_survives_expi
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn committed_manual_release_replays_after_environment_transport_is_unavailable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, _postgres) = import_database().await?;
+    let control_config = config()?;
+    let control = ControlService::new(
+        pool.clone(),
+        Arc::new(PlatformImageObjects::new(Vec::new())),
+        control_config.clone(),
+    )?;
+    let actor = ActorId::new();
+    let now = import_now()?;
+    let project = control
+        .create_project(
+            actor,
+            PlatformRole::Teacher,
+            &contracts::CreateProjectRequest {
+                name: "manual publication retry".to_owned(),
+                description: None,
+                course_id: None,
+            },
+            &IdempotencyKey::parse("manual-replay-project")?,
+            now,
+        )
+        .await?;
+    let mut image = platform_image_entry(
+        "manual-replay-image",
+        PlatformImageKind::Container,
+        &format!("sha256:{}", "a".repeat(64)),
+        now,
+    );
+    image.source_reference = "harbor.internal/labweaver-system/manual-replay-image:v1".to_owned();
+    let options: contracts::manual_templates::ManualTemplateRuntimeOptions =
+        serde_json::from_value(json!({"providers":[{
+            "binding":"container-primary-v1","label":"容器环境","description":"平台配置中的运行位置","runtimeKind":"container","storageClasses":[]
+        }]}))?;
+    let spec = serde_json::from_value(json!({
+        "apiVersion":"environment.labweaver.io/v1","kind":"EnvironmentSpec","name":"无模型模板","class":"work",
+        "resources":{"cpuMillicores":1000,"memoryBytes":1_073_741_824_u64,"storageBytes":10_737_418_240_u64},
+        "network":{"mode":"deny_all"},"entries":[{"name":"web","protocol":"http","servicePort":8080}],
+        "security":{"publicExposurePolicy":"deny","securityProfileBinding":"restricted-v1"},
+        "runtime":{"kind":"container","provider_binding":"container-primary-v1","service_port":8080},
+        "retention":{"policyId":control_config.retention_policy_id,"policyRevision":1,"class":"run_evidence","disposition":"delete","retainUntil":UtcTimestamp::from_utc(now.get()+Duration::hours(12))?}
+    }))?;
+    let request = CreateEnvironmentTemplateReleaseRequest {
+        project_id: project.id,
+        course_id: None,
+        candidate_id: None,
+        candidate_revision: None,
+        runtime_kind: RuntimeKind::Container,
+        approval_id: None,
+        manual: Some(Box::new(contracts::http::ManualWorkTemplateRequest {
+            platform_image_id: image.catalog_id,
+            platform_image_generation: image.repin_generation,
+            template_family_id: "manual-replay".to_owned(),
+            description: "无模型重试".to_owned(),
+            spec,
+            reason: "审核并确认发布".to_owned(),
+            confirmed: true,
+        })),
+    };
+    let key = IdempotencyKey::parse("lost-manual-release-response")?;
+    let committed = control
+        .create_project_work_release(
+            project.id,
+            &request,
+            actor,
+            false,
+            &key,
+            now,
+            "manual-release-replay",
+            std::slice::from_ref(&image),
+            &options,
+        )
+        .await?;
+    let (ca, _leaf, _private, jwk) = tls_material()?;
+    let temporary = tempfile::tempdir()?;
+    let ca_path = temporary.path().join("unavailable-environment-ca.pem");
+    std::fs::write(&ca_path, ca)?;
+    let authority = spawn_authority(jwk).await?;
+    let token_client = Arc::new(service_token_client(&authority.issuer).await?);
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base_url = format!("https://localhost:{}/", listener.local_addr()?.port()).parse()?;
+    drop(listener);
+    let environment = control_service::clients::EnvironmentClient::new_authenticated(
+        service_config(&base_url, &ca_path),
+        token_client,
+    )?;
+    assert!(matches!(
+        environment
+            .manual_template_runtime_options(&reqwest::header::HeaderMap::new())
+            .await,
+        Err(control_service::clients::DownstreamError::Unavailable)
+    ));
+    let replay = control
+        .replay_project_work_release(project.id, &request, actor, false, &key)
+        .await?;
+    assert_eq!(replay, Some(committed));
+    let counts: (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM control.environment_template_releases),(SELECT count(*) FROM control.outbox_events WHERE subject=$1)")
+        .bind(contracts::events::subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED).fetch_one(&pool).await?;
+    assert_eq!(counts, (1, 1));
+    Ok(())
+}

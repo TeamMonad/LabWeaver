@@ -1935,6 +1935,42 @@ impl KubeVirtProviderConfiguration {
             .iter()
             .find(|entry| entry.binding == binding)
     }
+
+    /// Resolves the exact base disk the runtime uses, including seeded-disk precedence.
+    pub fn resolve_base_disk(
+        &self,
+        base_disk: &VirtualMachineBaseDisk,
+        format: VirtualMachineDiskFormat,
+    ) -> Result<ResolvedVmBaseDisk, ReleaseProjectionError> {
+        if let Some(seeded) = self.base_disk_binding(&base_disk.binding) {
+            if seeded.source_registry_digest != base_disk.source_registry_digest
+                || seeded.capacity_bytes != base_disk.capacity_bytes
+                || seeded.format != format
+            {
+                return Err(ReleaseProjectionError::SecurityPostureInvalid);
+            }
+            return Ok(ResolvedVmBaseDisk {
+                binding: seeded.clone(),
+                identity: KubeVirtBaseDiskIdentity::ReviewedDiskSha256,
+            });
+        }
+        let Some(policy) = self.runtime_vm_base.as_ref() else {
+            return Err(ReleaseProjectionError::SecurityPostureInvalid);
+        };
+        if base_disk.validate().is_err() {
+            return Err(ReleaseProjectionError::VmBaseImportFailed);
+        }
+        if base_disk.capacity_bytes > policy.max_capacity_bytes {
+            return Err(ReleaseProjectionError::VmBaseCapacityExceeded);
+        }
+        let binding = policy
+            .runtime_binding(base_disk, format)
+            .ok_or(ReleaseProjectionError::VmBaseImportFailed)?;
+        Ok(ResolvedVmBaseDisk {
+            binding,
+            identity: KubeVirtBaseDiskIdentity::RuntimeRegistryDigest,
+        })
+    }
 }
 
 /// Environment-owned durable VM identity projection, independent from executor memory.
@@ -2388,21 +2424,15 @@ where
         base_disk: &VirtualMachineBaseDisk,
         format: VirtualMachineDiskFormat,
     ) -> Result<ResolvedVmBaseDisk, ReleaseProjectionError> {
-        if let Some(seeded) = self.configuration.base_disk_binding(&base_disk.binding) {
-            return Ok(ResolvedVmBaseDisk {
-                binding: seeded.clone(),
-                identity: KubeVirtBaseDiskIdentity::ReviewedDiskSha256,
-            });
+        let resolved = self.configuration.resolve_base_disk(base_disk, format)?;
+        if resolved.identity == KubeVirtBaseDiskIdentity::ReviewedDiskSha256 {
+            return Ok(resolved);
         }
-        let Some(policy) = self.configuration.runtime_vm_base.as_ref() else {
-            return Err(ReleaseProjectionError::SecurityPostureInvalid);
-        };
-        if base_disk.validate().is_err() {
-            return Err(ReleaseProjectionError::VmBaseImportFailed);
-        }
-        if base_disk.capacity_bytes > policy.max_capacity_bytes {
-            return Err(ReleaseProjectionError::VmBaseCapacityExceeded);
-        }
+        let policy = self
+            .configuration
+            .runtime_vm_base
+            .as_ref()
+            .ok_or(ReleaseProjectionError::SecurityPostureInvalid)?;
         let mut admitted = self
             .runtime_bases
             .lock()
@@ -2413,14 +2443,8 @@ where
         {
             return Err(ReleaseProjectionError::VmBaseImportFailed);
         }
-        let binding = policy
-            .runtime_binding(base_disk, format)
-            .ok_or(ReleaseProjectionError::VmBaseImportFailed)?;
         admitted.insert(identity);
-        Ok(ResolvedVmBaseDisk {
-            binding,
-            identity: KubeVirtBaseDiskIdentity::RuntimeRegistryDigest,
-        })
+        Ok(resolved)
     }
 
     #[allow(
@@ -3435,6 +3459,83 @@ const fn configuration_invalid() -> ProviderFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn manual_catalog_disk_uses_seeded_first_identity_and_runtime_fallback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let source = "docker://registry.invalid/base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned();
+        let seeded = KubeVirtBaseDiskBinding::new(
+            "seeded-base".to_owned(),
+            source.clone(),
+            "b".repeat(64),
+            10_737_418_240,
+            VirtualMachineDiskFormat::Qcow2,
+            "vm-rwo".to_owned(),
+            "local-path".to_owned(),
+            "labweaver-system".to_owned(),
+            "seeded-disk".to_owned(),
+            "lab".to_owned(),
+            22,
+        )?;
+        let runtime = RuntimeVmBasePolicy::new(
+            "vm-rwo".to_owned(),
+            "local-path".to_owned(),
+            "labweaver-system".to_owned(),
+            "lab".to_owned(),
+            22,
+            8,
+            137_438_953_472,
+        )?;
+        let configuration = KubeVirtProviderConfiguration {
+            trust_revision: Revision::new(1)?,
+            base_disks: vec![seeded.clone()],
+            runtime_vm_base: Some(runtime),
+            vm_vgpu_licensing: None,
+            ssh: KubeVirtSshBootstrap {
+                gateway_namespace: "labweaver-system".to_owned(),
+                gateway_pod_label: "gateway".to_owned(),
+                collector_namespace: "labweaver-system".to_owned(),
+                collector_pod_label: "collector".to_owned(),
+                evaluation_namespace: None,
+                evaluation_pod_label: None,
+                user_ca_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDIhz2GK/XCUj4i6Q5yQJNL1MKDXETe1aM1lHYMGt2SQ".to_owned(),
+            },
+            resource_budget: KubeVirtResourceBudget::new(1, 1, 1, 1, 1, 1)?,
+        };
+        let matching = VirtualMachineBaseDisk {
+            binding: "seeded-base".to_owned(),
+            source_registry_digest: source,
+            capacity_bytes: seeded.capacity_bytes,
+        };
+        let resolved =
+            configuration.resolve_base_disk(&matching, VirtualMachineDiskFormat::Qcow2)?;
+        assert_eq!(
+            resolved.identity,
+            KubeVirtBaseDiskIdentity::ReviewedDiskSha256
+        );
+        assert_eq!(resolved.binding.disk_sha256, "b".repeat(64));
+        let mismatch = VirtualMachineBaseDisk {
+            capacity_bytes: matching.capacity_bytes + 1,
+            ..matching.clone()
+        };
+        assert!(
+            configuration
+                .resolve_base_disk(&mismatch, VirtualMachineDiskFormat::Qcow2)
+                .is_err(),
+            "seeded binding collision must reject a different catalog disk identity"
+        );
+        let dynamic = VirtualMachineBaseDisk {
+            binding: "catalog-base".to_owned(),
+            source_registry_digest: "docker://registry.invalid/other@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+            capacity_bytes: 1_073_741_824,
+        };
+        let resolved =
+            configuration.resolve_base_disk(&dynamic, VirtualMachineDiskFormat::Qcow2)?;
+        assert_eq!(
+            resolved.identity,
+            KubeVirtBaseDiskIdentity::RuntimeRegistryDigest
+        );
+        Ok(())
+    }
 
     struct UnstartedBackend(std::sync::atomic::AtomicUsize);
 

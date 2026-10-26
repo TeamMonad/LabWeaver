@@ -1066,7 +1066,8 @@ fn manual_template_runtime_options(
 {
     use contracts::authoring::RuntimeKind;
     use contracts::manual_templates::{
-        ManualTemplateProviderOption, ManualTemplateRuntimeOptions, ManualTemplateStorageOption,
+        ManualTemplateProviderOption, ManualTemplateRuntimeOptions, ManualTemplateSeededDiskOption,
+        ManualTemplateStorageOption,
     };
     let mut providers = Vec::new();
     for binding in bindings {
@@ -1101,6 +1102,20 @@ fn manual_template_runtime_options(
                                 storage.max_capacity_bytes / 1_073_741_824
                             ),
                             max_capacity_bytes: storage.max_capacity_bytes,
+                            seeded_disks: binding
+                                .base_disks
+                                .as_deref()
+                                .unwrap_or_default()
+                                .iter()
+                                .map(|disk| ManualTemplateSeededDiskOption {
+                                    binding: disk.binding.clone(),
+                                    disk_sha256: disk.disk_sha256.clone(),
+                                    capacity_bytes: disk.capacity_bytes,
+                                    source_registry_digest: disk.source_registry_digest.clone(),
+                                    format: disk.format,
+                                    storage_class_binding: disk.storage_class_binding.clone(),
+                                })
+                                .collect(),
                         }],
                     )
                 }
@@ -1229,6 +1244,13 @@ mod deployment_contract_tests {
         assert_eq!(disk.binding, "vm-rwo-primary-v1");
         assert!(disk.description.contains("campus-rbd"));
         assert_eq!(disk.max_capacity_bytes, 137_438_953_472);
+        assert_eq!(disk.seeded_disks.len(), 2);
+        assert!(disk.seeded_disks.iter().any(|seeded| {
+            seeded.binding == "ubuntu-24.04-v1"
+                && seeded.disk_sha256
+                    == "ffe6203da54deeb6db5d2a98a83f9ec8e55f149d3f7ba622e1abe5fa966ee3d6"
+                && seeded.capacity_bytes == 10_737_418_240
+        }));
         bindings.retain(|binding| binding.provider_kind.as_deref() != Some("kubevirt"));
         let options =
             super::manual_template_runtime_options(&bindings).expect("container-only options");

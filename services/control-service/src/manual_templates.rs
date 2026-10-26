@@ -198,6 +198,30 @@ impl ControlService {
                 // Environment's loaded provider catalog authorizes placement; the selected
                 // active image is the disk authority. Do not consult Control's Agent-only VM
                 // catalog copy for manual publication.
+                if let Some(seeded) = runtime_options
+                    .providers
+                    .iter()
+                    .find(|provider| provider.binding == *provider_binding)
+                    .and_then(|provider| {
+                        provider
+                            .storage_classes
+                            .iter()
+                            .find(|storage| storage.binding == *storage_class_binding)
+                    })
+                    .and_then(|storage| {
+                        storage
+                            .seeded_disks
+                            .iter()
+                            .find(|disk| disk.binding == base_disk.binding)
+                    })
+                    && (image.disk_sha256.as_deref() != Some(seeded.disk_sha256.as_str())
+                        || image.capacity_bytes != Some(seeded.capacity_bytes)
+                        || base_disk.source_registry_digest != seeded.source_registry_digest
+                        || image.format != Some(seeded.format)
+                        || *storage_class_binding != seeded.storage_class_binding)
+                {
+                    return Err(ControlError::ManualTemplateOptionInvalid);
+                }
                 let format = image.format.ok_or(ControlError::ArtifactMismatch)?;
                 let reference = image.source_reference.split('@').next().unwrap_or_default();
                 let repository = reference

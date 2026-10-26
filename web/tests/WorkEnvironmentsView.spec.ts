@@ -123,7 +123,7 @@ const disabledImage = { ...containerImage, catalogId: '0197f0e0-0000-7000-8000-0
 const manualOptions = {
   runtime: { providers: [
     { binding: 'kubernetes-work', label: '校园教学容器', description: '工作区使用持久存储。', runtimeKind: 'container', storageClasses: [] },
-    { binding: 'kubevirt-primary-v1', label: '校园教学虚拟机', description: '独立虚拟机磁盘。', runtimeKind: 'virtual_machine', storageClasses: [{ binding: 'vm-rwo-primary-v1', label: '教学持久磁盘', description: '最大 128 GiB。', maxCapacityBytes: 128 * 1024 ** 3 }] },
+    { binding: 'kubevirt-primary-v1', label: '校园教学虚拟机', description: '独立虚拟机磁盘。', runtimeKind: 'virtual_machine', storageClasses: [{ binding: 'vm-rwo-primary-v1', label: '教学持久磁盘', description: '最大 128 GiB。', maxCapacityBytes: 128 * 1024 ** 3, seededDisks: [] }] },
   ] },
   retention: { policyId: '0197f0e0-0000-7000-8000-000000000099', policyRevision: 1, label: '校园材料保留策略', description: '最长保留 365 天。', maxRetentionSeconds: 31536000 },
 }

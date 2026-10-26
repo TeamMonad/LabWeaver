@@ -8,8 +8,78 @@ fn manual_runtime_options() -> TestResult<contracts::manual_templates::ManualTem
 {
     Ok(serde_json::from_value(serde_json::json!({"providers":[
         {"binding":"container-primary-v1","label":"教学容器","description":"配置中的容器位置","runtimeKind":"container","storageClasses":[]},
-        {"binding":"kubevirt-primary-v1","label":"教学虚拟机","description":"配置中的虚拟机位置","runtimeKind":"virtual_machine","storageClasses":[{"binding":"vm-rwo-primary-v1","label":"教学磁盘","description":"最大 128 GiB","maxCapacityBytes":137_438_953_472_u64}]}
+        {"binding":"kubevirt-primary-v1","label":"教学虚拟机","description":"配置中的虚拟机位置","runtimeKind":"virtual_machine","storageClasses":[{"binding":"vm-rwo-primary-v1","label":"教学磁盘","description":"最大 128 GiB","maxCapacityBytes":137_438_953_472_u64,"seededDisks":[]}]}
     ]}))?)
+}
+
+fn assert_environment_disk_resolution(
+    release: &EnvironmentTemplateRelease,
+    seeded: Option<&contracts::manual_templates::ManualTemplateSeededDiskOption>,
+) -> TestResult {
+    use environment_service::{
+        KubeVirtBaseDiskBinding, KubeVirtBaseDiskIdentity, KubeVirtProviderConfiguration,
+        KubeVirtResourceBudget, KubeVirtSshBootstrap, RuntimeVmBasePolicy,
+    };
+    let ImageArtifact::VirtualMachine {
+        base_disk, format, ..
+    } = &release.artifact
+    else {
+        return Err("expected VM artifact".into());
+    };
+    let seed = seeded
+        .map(|seed| {
+            KubeVirtBaseDiskBinding::new(
+                seed.binding.clone(),
+                seed.source_registry_digest.clone(),
+                seed.disk_sha256.clone(),
+                seed.capacity_bytes,
+                seed.format,
+                seed.storage_class_binding.clone(),
+                "local-path".to_owned(),
+                "labweaver-system".to_owned(),
+                "reviewed-base".to_owned(),
+                "lab".to_owned(),
+                22,
+            )
+        })
+        .transpose()?;
+    let configuration = KubeVirtProviderConfiguration {
+        trust_revision: Revision::new(1)?,
+        base_disks: seed.into_iter().collect(),
+        runtime_vm_base: Some(RuntimeVmBasePolicy::new(
+            "vm-rwo-primary-v1".to_owned(),
+            "local-path".to_owned(),
+            "labweaver-system".to_owned(),
+            "lab".to_owned(),
+            22,
+            8,
+            137_438_953_472,
+        )?),
+        vm_vgpu_licensing: None,
+        ssh: KubeVirtSshBootstrap::new(
+            "labweaver-system".to_owned(),
+            "gateway".to_owned(),
+            "labweaver-system".to_owned(),
+            "collector".to_owned(),
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDIhz2GK/XCUj4i6Q5yQJNL1MKDXETe1aM1lHYMGt2SQ",
+        )?,
+        resource_budget: KubeVirtResourceBudget::new(1, 1, 1, 1, 1, 1)?,
+    };
+    let resolved = configuration.resolve_base_disk(base_disk, *format)?;
+    assert_eq!(
+        resolved.binding.source_registry_digest,
+        base_disk.source_registry_digest
+    );
+    assert_eq!(resolved.binding.capacity_bytes, base_disk.capacity_bytes);
+    assert_eq!(
+        resolved.identity,
+        if seeded.is_some() {
+            KubeVirtBaseDiskIdentity::ReviewedDiskSha256
+        } else {
+            KubeVirtBaseDiskIdentity::RuntimeRegistryDigest
+        }
+    );
+    Ok(())
 }
 
 fn manual_spec(kind: RuntimeKind, image: &PlatformImageEntry) -> TestResult<EnvironmentSpec> {
@@ -460,6 +530,10 @@ async fn ordinary_capability_publication_requires_platform_range_and_current_sco
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one database fixture checks authority, rejects forged choices without effects, and resolves accepted disk identities through Environment"
+)]
 #[tokio::test]
 async fn manual_options_require_publication_authority_and_reject_forged_choices() -> TestResult {
     let container = Postgres::default().with_tag("17.5-alpine").start().await?;
@@ -513,6 +587,40 @@ async fn manual_options_require_publication_authority_and_reject_forged_choices(
         options.retention.max_retention_seconds,
         control_config()?.retention_seconds
     );
+    let mut colliding = manual_runtime_options()?;
+    colliding.providers[1].storage_classes[0].seeded_disks.push(
+        contracts::manual_templates::ManualTemplateSeededDiskOption {
+            binding: fixture.image.binding.clone(),
+            disk_sha256: "a".repeat(64),
+            capacity_bytes: fixture
+                .image
+                .capacity_bytes
+                .ok_or("VM catalog image capacity")?,
+            source_registry_digest: format!(
+                "docker://harbor.internal/labweaver-system/manual@{}",
+                fixture.image.resolved_digest
+            ),
+            format: contracts::supply_chain::VirtualMachineDiskFormat::Qcow2,
+            storage_class_binding: "vm-rwo-primary-v1".to_owned(),
+        },
+    );
+    assert!(matches!(
+        fixture
+            .service
+            .create_project_work_release(
+                fixture.project.id,
+                &fixture.request,
+                owner,
+                false,
+                &IdempotencyKey::parse("seeded-image-conflict")?,
+                fixture.now,
+                "seeded-image-conflict",
+                std::slice::from_ref(&fixture.image),
+                &colliding,
+            )
+            .await,
+        Err(ControlError::ManualTemplateOptionInvalid)
+    ));
     for (index, pointer, value) in [
         (
             0,
@@ -556,8 +664,41 @@ async fn manual_options_require_publication_authority_and_reject_forged_choices(
     let counts: (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM control.environment_template_releases),(SELECT count(*) FROM control.outbox_events WHERE subject=$1)")
         .bind(contracts::events::subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED).fetch_one(&pool).await?;
     assert_eq!(counts, (0, 0));
-    fixture
+    colliding.providers[1].storage_classes[0].seeded_disks[0].disk_sha256 = "b".repeat(64);
+    let release = fixture
+        .service
+        .create_project_work_release(
+            fixture.project.id,
+            &fixture.request,
+            owner,
+            false,
+            &IdempotencyKey::parse("seeded-image-matches")?,
+            fixture.now,
+            "seeded-image-matches",
+            std::slice::from_ref(&fixture.image),
+            &colliding,
+        )
+        .await?;
+    assert_environment_disk_resolution(
+        &release,
+        Some(&colliding.providers[1].storage_classes[0].seeded_disks[0]),
+    )?;
+    assert_eq!(
+        fixture
+            .service
+            .replay_project_work_release(
+                fixture.project.id,
+                &fixture.request,
+                owner,
+                false,
+                &IdempotencyKey::parse("seeded-image-matches")?,
+            )
+            .await?,
+        Some(release)
+    );
+    let unseeded = fixture
         .publish(owner, "valid-options", &fixture.request)
         .await?;
+    assert_environment_disk_resolution(&unseeded, None)?;
     Ok(())
 }

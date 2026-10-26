@@ -5935,6 +5935,66 @@ impl ControlService {
         ))
     }
 
+    /// Looks up an already committed release before fetching external publication options.
+    pub async fn replay_project_work_release(
+        &self,
+        project_id: ProjectId,
+        request: &CreateEnvironmentTemplateReleaseRequest,
+        actor_id: ActorId,
+        platform_admin: bool,
+        idempotency_key: &IdempotencyKey,
+    ) -> Result<Option<EnvironmentTemplateRelease>, ControlError> {
+        if request.project_id != project_id {
+            return Err(ControlError::ProjectMismatch);
+        }
+        let mut transaction = self.pool.begin().await.map_err(db)?;
+        advisory_project_lock(&mut transaction, project_id).await?;
+        let project = project_from_tx(&mut transaction, project_id).await?;
+        if project.state == ProjectState::Archived || project.course_id != request.course_id {
+            return Err(ControlError::ProjectMismatch);
+        }
+        if !platform_admin
+            && project.owner_actor_id != actor_id
+            && !object_authorization::permits_in_transaction(
+                &mut transaction,
+                project_id,
+                actor_id,
+                contracts::object_authorization::ObjectAction::ManageMembers,
+            )
+            .await?
+        {
+            return Err(ControlError::ProjectGovernanceDenied);
+        }
+        transaction.rollback().await.map_err(db)?;
+        let request_hash = canonical_hash(&json!({
+            "projectId": project_id, "request": request, "actorId": actor_id
+        }))?;
+        let decision = IdempotencyStore::lookup(
+            &self.pool,
+            Domain::Control,
+            CREATE_WORK_RELEASE,
+            idempotency_key.as_str(),
+            request_hash,
+        )
+        .await
+        .map_err(|_| ControlError::PersistenceFailed)?;
+        match decision {
+            Some(IdempotencyDecision::Replay(value)) => {
+                let release: EnvironmentTemplateRelease = serde_json::from_value(value)
+                    .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+                release
+                    .validate()
+                    .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
+                Ok(Some(release))
+            }
+            Some(IdempotencyDecision::Conflict) => Err(ControlError::IdempotencyConflict),
+            Some(IdempotencyDecision::InProgress | IdempotencyDecision::Reserved) => {
+                Err(ControlError::OperationInProgress)
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Publishes an immutable Work release from authoritative project projections only.
     ///
     /// Experiment releases are published by the authoring-approval consumer after the complete

@@ -10355,11 +10355,24 @@ export type ManualTemplateRuntimeOptions = {
     providers: Array<ManualTemplateProviderOption>;
 };
 
+export type ManualTemplateSeededDiskOption = {
+    binding: string;
+    capacityBytes: number;
+    diskSha256: string;
+    format: ManualTemplateOptionsSchemaVirtualMachineDiskFormat;
+    sourceRegistryDigest: string;
+    storageClassBinding: string;
+};
+
 export type ManualTemplateStorageOption = {
     binding: string;
     description: string;
     label: string;
     maxCapacityBytes: number;
+    /**
+     * Deployment-seeded disks take precedence over dynamic catalog entries with the same binding.
+     */
+    seededDisks: Array<ManualTemplateSeededDiskOption>;
 };
 
 /**
@@ -10376,6 +10389,11 @@ export type ManualTemplateOptionsSchemaRevision = number;
  * Runtime kind shared by candidates, releases, and instances.
  */
 export type ManualTemplateOptionsSchemaRuntimeKind = 'container' | 'virtual_machine';
+
+/**
+ * Supported VM base-disk encodings.
+ */
+export type ManualTemplateOptionsSchemaVirtualMachineDiskFormat = 'qcow2' | 'raw';
 
 /**
  * PlatformImageCatalogView

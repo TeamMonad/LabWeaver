@@ -108,6 +108,12 @@ selector. Do not present it as a security guarantee or create a parallel profile
 Execution posture is governed by the approved security specification and applied platform runtime
 policy (#204/#207). Control's existing VM base catalog remains needed for Agent candidate
 artifact resolution; manual publication no longer consults its copied provider/storage bindings.
+For virtual-machine catalog images, Environment also projects the loaded `baseDisks[]` binding,
+reviewed raw-disk SHA-256 and logical capacity. Environment resolves these seeded bindings before
+the dynamic runtime-base policy. A catalog image whose binding collides with a seeded disk is
+publishable only if its reviewed SHA-256 and capacity match the seeded identity; otherwise Control
+rejects publication with `LW_MANUAL_TEMPLATE_OPTION_INVALID`. Unseeded catalog images continue
+through Environment's actual runtime-base resolution path.
 
 
 ## One-shot workload runtime prerequisites

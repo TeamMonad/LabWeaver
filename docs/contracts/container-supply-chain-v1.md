@@ -84,6 +84,16 @@ no release or Outbox event commits. Accepted command replay retains its original
 `securityProfileBinding` remains a non-empty label and is not an executable security profile.
 No selectable profile catalog is claimed for it.
 
+For VM disks, Environment's current `baseDisks[]` are included in the runtime option projection
+with their reviewed disk SHA-256, capacity, source digest, format and storage binding. Seeded
+bindings take precedence over a dynamic catalog disk of the same binding; Control refuses a
+same-name catalog image unless those facts match. An unseeded catalog disk remains subject to
+Environment's runtime-base resolver.
+After current caller/object authorization, a completed publication key is looked up in Control's
+ledger before any Agent catalog or Environment options read. A lost successful response therefore
+replays the original release decision even if either downstream is now unavailable. New keys still
+require the current authoritative catalogs and the transaction's reservation/validation fences.
+
 This one human command records `manualApproval` and publishes through the existing release
 table, transactional idempotency ledger, Outbox and Environment projection. It does not create
 an Agent run, candidate, build request or project model policy. Imported Container artifacts use

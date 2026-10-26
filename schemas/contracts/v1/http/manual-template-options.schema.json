@@ -76,6 +76,40 @@
       ],
       "type": "object"
     },
+    "ManualTemplateSeededDiskOption": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "type": "string"
+        },
+        "capacityBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "diskSha256": {
+          "type": "string"
+        },
+        "format": {
+          "$ref": "#/$defs/VirtualMachineDiskFormat"
+        },
+        "sourceRegistryDigest": {
+          "type": "string"
+        },
+        "storageClassBinding": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "binding",
+        "diskSha256",
+        "capacityBytes",
+        "sourceRegistryDigest",
+        "format",
+        "storageClassBinding"
+      ],
+      "type": "object"
+    },
     "ManualTemplateStorageOption": {
       "additionalProperties": false,
       "properties": {
@@ -92,13 +126,21 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "seededDisks": {
+          "description": "Deployment-seeded disks take precedence over dynamic catalog entries with the same binding.",
+          "items": {
+            "$ref": "#/$defs/ManualTemplateSeededDiskOption"
+          },
+          "type": "array"
         }
       },
       "required": [
         "binding",
         "label",
         "description",
-        "maxCapacityBytes"
+        "maxCapacityBytes",
+        "seededDisks"
       ],
       "type": "object"
     },
@@ -117,6 +159,14 @@
       "enum": [
         "container",
         "virtual_machine"
+      ],
+      "type": "string"
+    },
+    "VirtualMachineDiskFormat": {
+      "description": "Supported VM base-disk encodings.",
+      "enum": [
+        "qcow2",
+        "raw"
       ],
       "type": "string"
     }

@@ -2485,6 +2485,20 @@ async fn create_project_work_release(
         project_id,
     )
     .await?;
+    let key = idempotency(&headers)?;
+    if let Some(release) = state
+        .control
+        .replay_project_work_release(
+            project_id,
+            &request,
+            decision.actor.actor_id,
+            decision.actor.roles.contains(&PlatformRole::PlatformAdmin),
+            &key,
+        )
+        .await?
+    {
+        return accepted_work_release(project_id, &release);
+    }
     let catalog = if request.manual.is_some() {
         state.agent.list_platform_images(&headers).await?.entries
     } else {
@@ -2505,7 +2519,6 @@ async fn create_project_work_release(
     } else {
         contracts::manual_templates::ManualTemplateRuntimeOptions::default()
     };
-    let key = idempotency(&headers)?;
     let published_at = now()?;
     let trace_id = trace_id(&headers);
     let release = state
@@ -2522,6 +2535,13 @@ async fn create_project_work_release(
             &runtime_options,
         )
         .await?;
+    accepted_work_release(project_id, &release)
+}
+
+fn accepted_work_release(
+    project_id: ProjectId,
+    release: &contracts::supply_chain::EnvironmentTemplateRelease,
+) -> Result<Response, ApiError> {
     Ok(Json(OperationAccepted {
         operation_id: OperationId::new(),
         revision: Revision::new(release.version)

@@ -28,8 +28,20 @@ pub struct ManualTemplateStorageOption {
     pub label: String,
     pub description: String,
     pub max_capacity_bytes: u64,
+    /// Deployment-seeded disks take precedence over dynamic catalog entries with the same binding.
+    pub seeded_disks: Vec<ManualTemplateSeededDiskOption>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManualTemplateSeededDiskOption {
+    pub binding: String,
+    pub disk_sha256: String,
+    pub capacity_bytes: u64,
+    pub source_registry_digest: String,
+    pub format: crate::supply_chain::VirtualMachineDiskFormat,
+    pub storage_class_binding: String,
+}
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManualTemplateRetentionOption {
