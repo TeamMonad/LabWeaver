@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { reactive } from 'vue'
 import { routeLocationKey, routerKey } from 'vue-router'
 import SoftwareConfigView from '@/views/researcher/SoftwareConfigView.vue'
+import { preloadProjectCatalog, resetProjectCatalog } from './projectCatalog'
 import {
   approveProjectWorkConfigurationRun,
   createProjectWorkConfigurationRun,
@@ -220,6 +221,7 @@ describe('SoftwareConfigView', () => {
     vi.mocked(createProjectWorkConfigurationRun).mockResolvedValue({ data: run as never, error: undefined as never })
     vi.mocked(getProjectAgentRun).mockResolvedValue({ data: run as never, error: undefined as never })
     vi.mocked(getProjectWorkConfigurationPlan).mockResolvedValue({ data: planView as never, error: undefined as never })
+    resetProjectCatalog()
   })
 
   afterEach(() => {
@@ -778,6 +780,8 @@ describe('SoftwareConfigView', () => {
 
   it('replaces an invalid route project with a project returned by the list', async () => {
     vi.mocked(listProjects).mockResolvedValue({ data: { items: [project], nextCursor: null } as never, error: undefined as never })
+    // The shell opens the page only after the list is read.
+    await preloadProjectCatalog()
     const replace = vi.fn()
     const wrapper = mount(SoftwareConfigView, {
       global: {
@@ -796,6 +800,7 @@ describe('SoftwareConfigView', () => {
 
   it('clears a route project when the confirmed project list is empty', async () => {
     vi.mocked(listProjects).mockResolvedValue({ data: { items: [], nextCursor: null } as never, error: undefined as never })
+    await preloadProjectCatalog()
     const replace = vi.fn()
     const wrapper = mount(SoftwareConfigView, {
       global: {

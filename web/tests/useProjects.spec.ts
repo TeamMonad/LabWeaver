@@ -1,13 +1,16 @@
-import { effectScope, ref } from 'vue'
+import { defineComponent, effectScope, ref } from 'vue'
+import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { useOrganizationDirectoryUsers, useProjectMemberships } from '@/composables/useProjects'
+import { useOrganizationDirectoryUsers, useProjectMemberships, useProjects } from '@/composables/useProjects'
+import { resetProjectCatalog } from './projectCatalog'
 
 const listProjectMemberships = vi.hoisted(() => vi.fn())
 const listOrganizationUsers = vi.hoisted(() => vi.fn())
+const listProjects = vi.hoisted(() => vi.fn())
 
 vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
-  return { ...actual, listProjectMemberships, listOrganizationUsers }
+  return { ...actual, listProjectMemberships, listOrganizationUsers, listProjects }
 })
 
 function result(items: unknown[], nextCursor: string | null = null) {
@@ -21,6 +24,55 @@ function membership(actorId: string) {
 afterEach(() => {
   listProjectMemberships.mockReset()
   listOrganizationUsers.mockReset()
+  listProjects.mockReset()
+})
+
+describe('useProjects shared catalog', () => {
+  const Consumer = defineComponent({
+    setup() {
+      useProjects()
+      return () => null
+    },
+  })
+  const project = { id: 'project-1', name: '项目', state: 'active', revision: 1, ownerActorId: 'actor-1', createdAt: '', updatedAt: '' }
+
+  it('reads an unread catalog once and does not reload it when more consumers mount', async () => {
+    resetProjectCatalog()
+    listProjects.mockResolvedValue(result([project]))
+    const first = mount(Consumer)
+    // A second consumer mounting while the first read is in flight joins it.
+    const second = mount(Consumer)
+    await flushPromises()
+    expect(listProjects).toHaveBeenCalledTimes(1)
+    expect(useProjects().projects).toEqual({ kind: 'success', data: [project] })
+
+    // A consumer mounting on a loaded catalog keeps it loaded instead of returning it to `loading`.
+    const third = mount(Consumer)
+    expect(useProjects().projects.kind).toBe('success')
+    await flushPromises()
+    expect(listProjects).toHaveBeenCalledTimes(1)
+
+    // An explicit refresh still reads the list again.
+    await useProjects().load()
+    expect(listProjects).toHaveBeenCalledTimes(2)
+    for (const wrapper of [first, second, third]) wrapper.unmount()
+  })
+
+  it('reads the catalog again when a consumer mounts after a failed read', async () => {
+    resetProjectCatalog()
+    listProjects.mockResolvedValueOnce({ data: undefined, error: { status: 503, diagnosticCode: 'LW_HTTP_SERVICE_UNAVAILABLE', detail: '项目服务暂时不可用', retryable: true } })
+    const first = mount(Consumer)
+    await flushPromises()
+    expect(useProjects().projects.kind).toBe('error')
+
+    listProjects.mockResolvedValueOnce(result([project]))
+    const second = mount(Consumer)
+    await flushPromises()
+    expect(listProjects).toHaveBeenCalledTimes(2)
+    expect(useProjects().projects).toEqual({ kind: 'success', data: [project] })
+    first.unmount()
+    second.unmount()
+  })
 })
 
 describe('useProjectMemberships', () => {

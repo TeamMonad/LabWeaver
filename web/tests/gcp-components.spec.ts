@@ -9,6 +9,7 @@ import GcpFilterBar from '@/components/common/GcpFilterBar.vue'
 import GcpProjectSelector from '@/components/layout/GcpProjectSelector.vue'
 import { createProject, listProjects } from '@/generated/contracts'
 import { useProjects } from '@/composables/useProjects'
+import { resetProjectCatalog } from './projectCatalog'
 
 const projects = [
   {
@@ -64,6 +65,7 @@ describe('GCP Console Components', () => {
     vi.resetAllMocks()
     vi.mocked(listProjects).mockResolvedValue({ data: { items: projects, nextCursor: null }, error: undefined as never })
     window.localStorage.clear()
+    resetProjectCatalog()
   })
 
   describe('GcpStatusPill', () => {

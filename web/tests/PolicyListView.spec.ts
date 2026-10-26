@@ -4,6 +4,7 @@ import { defineComponent, onMounted } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import PolicyListView from '@/views/admin/PolicyListView.vue'
 import { useProjects } from '@/composables/useProjects'
+import { resetProjectCatalog } from './projectCatalog'
 import {
   createProjectLlmPolicy,
   getActiveProjectLlmPolicy,
@@ -63,6 +64,7 @@ describe('PolicyListView', () => {
     vi.resetAllMocks()
     vi.mocked(listProjects).mockResolvedValue({ data: { items: [project], nextCursor: null } as never, error: undefined as never })
     vi.mocked(getProjectLlmPolicyOptions).mockResolvedValue({ data: options as never, error: undefined as never })
+    resetProjectCatalog()
   })
 
   afterEach(() => {

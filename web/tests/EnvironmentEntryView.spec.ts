@@ -35,6 +35,7 @@ import {
 } from '@/generated/contracts'
 import { rememberSubmission } from '@/utils/trackedSubmissions'
 import { makeDiagnostic } from '@/types/async'
+import { resetProjectCatalog } from './projectCatalog'
 
 vi.mock('@/generated/contracts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/generated/contracts')>()
@@ -293,6 +294,7 @@ describe('EnvironmentEntryView', () => {
     vi.mocked(window.localStorage.setItem).mockImplementation((key, value) => { stored.set(key, value) })
     vi.mocked(window.localStorage.removeItem).mockImplementation((key) => { stored.delete(key) })
     signIn('student-1')
+    resetProjectCatalog()
   })
 
   afterEach(() => {
