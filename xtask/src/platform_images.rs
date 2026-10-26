@@ -1263,6 +1263,9 @@ fn package_download_command(url: &str, path: &Path, bypass_proxy: bool) -> Comma
         // Allow the ~83 MB archive to finish even on a ~29 KiB/s link.
         "--max-time",
         "3600",
+        // Bound retry delays (including Retry-After), not the running attempt.
+        "--retry-max-time",
+        "7200",
     ]);
     if bypass_proxy {
         command.args(["--noproxy", "*"]);
@@ -2598,7 +2601,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn package_downloads_bound_connections_stalls_and_slow_progress() {
+    fn package_downloads_bound_connections_stalls_slow_progress_and_retry_budget() {
         for bypass_proxy in [false, true] {
             let path = Path::new("package.tgz.part");
             let command =
@@ -2615,6 +2618,7 @@ mod tests {
                 ("--speed-time", "60"),
                 ("--max-time", "3600"),
                 ("--retry", "3"),
+                ("--retry-max-time", "7200"),
                 ("--output", "package.tgz.part"),
             ] {
                 assert!(
