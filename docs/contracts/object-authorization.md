@@ -1,6 +1,6 @@
 # 对象动作与成员授权
 
-Control 保存课程成员和项目成员。Access 保存身份、BFF 会话、AccessGrant 和连接状态。Access 直接读取 Control 的当前成员事实，不保存成员副本。
+Control 保存课程成员和项目成员。Access 保存身份、BFF 会话、AccessGrant 和连接状态。Access 直接读取 Control 的当前成员事实，不保存成员副本。跨域读取仅授予 `SELECT`：只有 Control 锁定并写入成员记录，Access 锁定自己的记录并在读取成员事实时授权。
 
 `Teacher`、`Student` 和 `PlatformAdmin` 表示已验证的平台身份。项目成员的 `objectRole` 表示该项目中的职责。教师身份不能提高只读成员的项目权限。
 
