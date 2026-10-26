@@ -1666,7 +1666,10 @@ mod tests {
             FreezeCoordinatorError::AuthoringAdmission(AuthoringAdmissionClientError::Unavailable),
             FreezeCoordinatorError::AuthoringAdmission(AuthoringAdmissionClientError::Transport),
             FreezeCoordinatorError::AuthoringAdmission(AuthoringAdmissionClientError::Token(
-                ServiceTokenClientError::TokenExchange,
+                ServiceTokenClientError::TokenExchange(auth::ServiceTokenExchangeFailure {
+                    kind: auth::ServiceTokenFailureKind::Rejected,
+                    http_status: Some(401),
+                }),
             )),
         ] {
             assert!(!error.is_systemic());

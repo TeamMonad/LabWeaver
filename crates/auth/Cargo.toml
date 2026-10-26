@@ -17,6 +17,7 @@ metrics.workspace = true
 openidconnect.workspace = true
 rand.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -40,7 +41,6 @@ scraper.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
-rustls.workspace = true
 rustls-pemfile.workspace = true
 
 [lints]

@@ -63,7 +63,7 @@ pub use roles::{RoleClaimError, RoleMappings, extract_platform_roles};
 pub use service_auth::{
     ServiceAuthConfig, ServiceAuthConfigError, ServiceAuthError, ServiceIdentity,
     ServiceTokenClaims, ServiceTokenClient, ServiceTokenClientConfig, ServiceTokenClientError,
-    ServiceTokenVerifier,
+    ServiceTokenExchangeFailure, ServiceTokenFailureKind, ServiceTokenVerifier,
 };
 
 /// Typed failure at the authentication/authorization boundary.

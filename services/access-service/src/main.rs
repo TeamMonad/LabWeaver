@@ -1756,6 +1756,7 @@ struct ApiError {
     status: StatusCode,
     diagnostic: &'static str,
     body: Option<serde_json::Value>,
+    directory_failure: Option<directory::DirectoryFailure>,
 }
 
 impl ApiError {
@@ -1764,6 +1765,7 @@ impl ApiError {
             status: StatusCode::BAD_REQUEST,
             diagnostic,
             body: None,
+            directory_failure: None,
         }
     }
     fn unauthorized(diagnostic: &'static str) -> Self {
@@ -1771,6 +1773,7 @@ impl ApiError {
             status: StatusCode::UNAUTHORIZED,
             diagnostic,
             body: None,
+            directory_failure: None,
         }
     }
     fn unavailable(diagnostic: &'static str) -> Self {
@@ -1778,6 +1781,7 @@ impl ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             diagnostic,
             body: None,
+            directory_failure: None,
         }
     }
     fn forbidden(diagnostic: &'static str) -> Self {
@@ -1785,6 +1789,7 @@ impl ApiError {
             status: StatusCode::FORBIDDEN,
             diagnostic,
             body: None,
+            directory_failure: None,
         }
     }
     fn internal(diagnostic: &'static str) -> Self {
@@ -1792,6 +1797,7 @@ impl ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             diagnostic,
             body: None,
+            directory_failure: None,
         }
     }
     fn conflict(diagnostic: &'static str) -> Self {
@@ -1799,6 +1805,7 @@ impl ApiError {
             status: StatusCode::CONFLICT,
             diagnostic,
             body: None,
+            directory_failure: None,
         }
     }
     fn precondition(diagnostic: &'static str) -> Self {
@@ -1806,6 +1813,7 @@ impl ApiError {
             status: StatusCode::PRECONDITION_FAILED,
             diagnostic,
             body: None,
+            directory_failure: None,
         }
     }
     pub(crate) fn precondition_with_body(
@@ -1816,6 +1824,7 @@ impl ApiError {
             status: StatusCode::PRECONDITION_FAILED,
             diagnostic,
             body: Some(body),
+            directory_failure: None,
         }
     }
     fn unprocessable(diagnostic: &'static str) -> Self {
@@ -1823,6 +1832,7 @@ impl ApiError {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             diagnostic,
             body: None,
+            directory_failure: None,
         }
     }
     fn not_found(diagnostic: &'static str) -> Self {
@@ -1830,19 +1840,34 @@ impl ApiError {
             status: StatusCode::NOT_FOUND,
             diagnostic,
             body: None,
+            directory_failure: None,
         }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let retryable = matches!(
-            self.status,
-            StatusCode::SERVICE_UNAVAILABLE
-                | StatusCode::GATEWAY_TIMEOUT
-                | StatusCode::TOO_MANY_REQUESTS
+        let retryable = self.directory_failure.map_or_else(
+            || {
+                matches!(
+                    self.status,
+                    StatusCode::SERVICE_UNAVAILABLE
+                        | StatusCode::GATEWAY_TIMEOUT
+                        | StatusCode::TOO_MANY_REQUESTS
+                )
+            },
+            |failure| failure.retryable,
         );
-        if self.status.is_server_error() && !retryable {
+        let error_kind = self
+            .directory_failure
+            .map_or("request_rejected", |failure| failure.error_kind);
+        let failure_stage = self
+            .directory_failure
+            .map_or("auth.request.finalize", |failure| failure.stage);
+        let http_status = self
+            .directory_failure
+            .and_then(|failure| failure.http_status);
+        if self.status.is_server_error() && !retryable && self.directory_failure.is_none() {
             tracing::error!(
                 event = "auth.request.failed",
                 component = "api-error-boundary",
@@ -1863,8 +1888,9 @@ impl IntoResponse for ApiError {
                 outcome = "rejected",
                 duration_ms = 0_u64,
                 diagnostic_code = self.diagnostic,
-                error_kind = "request_rejected",
-                failure_stage = "auth.request.finalize",
+                error_kind,
+                failure_stage,
+                http_status,
                 retryable,
                 safe_detail = "request_rejected",
             );
@@ -1913,6 +1939,10 @@ impl From<directory::DirectoryError> for ApiError {
             directory::DirectoryError::Unavailable => {
                 Self::unavailable("LW_ACCESS_DIRECTORY_UNAVAILABLE")
             }
+            directory::DirectoryError::Upstream(failure) => Self {
+                directory_failure: Some(failure),
+                ..Self::unavailable("LW_ACCESS_DIRECTORY_UNAVAILABLE")
+            },
             directory::DirectoryError::UserNotFound => {
                 Self::not_found("LW_ACCESS_DIRECTORY_USER_NOT_FOUND")
             }
@@ -2004,6 +2034,7 @@ impl From<auth::CsrfError> for ApiError {
             status: StatusCode::FORBIDDEN,
             diagnostic: "LW_AUTH_CSRF_REJECTED",
             body: None,
+            directory_failure: None,
         }
     }
 }

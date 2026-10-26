@@ -45,6 +45,7 @@ const REQUIRED_PERMISSION: &str = "access.read";
 struct AuthorityState {
     issuer: String,
     key: Arc<RwLock<Arc<SigningMaterial>>>,
+    token_endpoint_override: Arc<RwLock<Option<String>>>,
 }
 
 struct SigningMaterial {
@@ -284,6 +285,83 @@ async fn client_discovers_and_exchanges_over_a_private_ca() -> Result<(), Box<dy
     Ok(())
 }
 
+#[tokio::test]
+async fn token_exchange_preserves_tls_and_connect_classes_without_raw_errors()
+-> Result<(), Box<dyn std::error::Error>> {
+    let ca = test_ca()?;
+    let (certificate, key) = leaf_certificate(&ca)?;
+    let tls = spawn_tls_authority(signing_material("tls")?, &certificate, &key).await?;
+    let authority = spawn_authority(signing_material("discovery")?).await?;
+    *authority.state.token_endpoint_override.write().await = Some(format!("{}/token", tls.issuer));
+    let client = build_token_client(&authority.issuer).await?;
+    let error = client
+        .access_token()
+        .await
+        .err()
+        .ok_or("expected untrusted token TLS rejection")?;
+    assert_eq!(
+        error,
+        auth::ServiceTokenClientError::TokenExchange(auth::ServiceTokenExchangeFailure {
+            kind: auth::ServiceTokenFailureKind::Tls,
+            http_status: None,
+        })
+    );
+
+    let closed = TcpListener::bind("127.0.0.1:0").await?;
+    let address = closed.local_addr()?;
+    drop(closed);
+    *authority.state.token_endpoint_override.write().await =
+        Some(format!("http://{address}/token"));
+    let client = build_token_client(&authority.issuer).await?;
+    let error = client
+        .access_token()
+        .await
+        .err()
+        .ok_or("expected token connection failure")?;
+    assert_eq!(
+        error,
+        auth::ServiceTokenClientError::TokenExchange(auth::ServiceTokenExchangeFailure {
+            kind: auth::ServiceTokenFailureKind::Connect,
+            http_status: None,
+        })
+    );
+    for kind in [
+        auth::ServiceTokenFailureKind::Rejected,
+        auth::ServiceTokenFailureKind::Tls,
+        auth::ServiceTokenFailureKind::Decode,
+    ] {
+        assert!(!kind.retryable());
+    }
+    for kind in [
+        auth::ServiceTokenFailureKind::Timeout,
+        auth::ServiceTokenFailureKind::Connect,
+        auth::ServiceTokenFailureKind::Upstream5xx,
+    ] {
+        assert!(kind.retryable());
+    }
+    Ok(())
+}
+
+async fn build_token_client(
+    issuer: &str,
+) -> Result<ServiceTokenClient, Box<dyn std::error::Error>> {
+    let config = ServiceTokenClientConfig::new(
+        issuer,
+        CLIENT_ID.to_owned(),
+        CLIENT_SECRET.to_owned(),
+        AUDIENCE.to_owned(),
+        BTreeSet::new(),
+        30,
+        TransportSecurityMode::InsecureTestOnly,
+    )?;
+    // Permit HTTP discovery, but do not disable validation of the HTTPS token endpoint.
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    Ok(ServiceTokenClient::discover(config, http).await?)
+}
+
 async fn build_verifier(
     issuer: &str,
     required_permissions: BTreeSet<String>,
@@ -450,6 +528,7 @@ async fn spawn_authority_with_server(
     let state = AuthorityState {
         issuer: issuer.clone(),
         key: Arc::new(RwLock::new(Arc::new(key))),
+        token_endpoint_override: Arc::new(RwLock::new(None)),
     };
     let router = Router::new()
         .route(
@@ -484,10 +563,16 @@ async fn spawn_authority_with_server(
 
 async fn discovery(State(state): State<AuthorityState>) -> Json<Value> {
     let issuer = state.issuer.clone();
+    let token_endpoint = state
+        .token_endpoint_override
+        .read()
+        .await
+        .clone()
+        .unwrap_or_else(|| format!("{}/token", state.issuer));
     Json(json!({
         "issuer": issuer,
         "authorization_endpoint": format!("{}/authorize", state.issuer),
-        "token_endpoint": format!("{}/token", state.issuer),
+        "token_endpoint": token_endpoint,
         "jwks_uri": format!("{}/jwks", state.issuer),
         "response_types_supported": ["code"],
         "subject_types_supported": ["public"],
