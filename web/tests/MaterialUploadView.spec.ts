@@ -3,6 +3,7 @@ import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import MaterialUploadView from '@/views/teacher/MaterialUploadView.vue'
+import { resetProjectCatalog } from './projectCatalog'
 import {
   createProjectAgentRun,
   getActiveProjectLlmPolicy,
@@ -126,6 +127,7 @@ describe('MaterialUploadView', () => {
       data: { items: [], nextCursor: null } as never,
       error: undefined as never,
     })
+    resetProjectCatalog()
   })
 
   it('shows a project-context diagnostic when no accessible project is returned', async () => {

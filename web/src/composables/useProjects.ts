@@ -288,8 +288,15 @@ export function useProjects() {
     }
   }
 
+  // The catalog is shared module state, so a consumer mounting reads it only
+  // when nothing has been read yet or the last read failed. Reloading a
+  // loading or loaded catalog on mount would let a component that exists
+  // because the catalog is loaded (a project-scoped panel) put it back to
+  // `loading`, unmount itself, and mount again, and reload, when the read
+  // settles. Refreshes stay explicit: `load`, `locate` and a new session.
   onMounted(() => {
-    void loadProjects()
+    const { kind } = projects.value
+    if (kind === 'idle' || kind === 'error') void loadProjects()
   })
 
   return reactive({
