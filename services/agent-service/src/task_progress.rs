@@ -5,9 +5,9 @@ use contracts::authoring::{
     AgentAttempt, AgentAttemptState, AgentRunTaskProgress, AgentTrackKind, AgentTrackTaskProgress,
 };
 use contracts::execution::{TaskAttemptPhase, TaskAttemptProgress};
-use contracts::http::PageQuery;
+use contracts::http::TaskProgressQuery;
 use contracts::resource::{ResourceRequest, ResourceRequestState};
-use contracts::{AgentRunId, TaskRunId};
+use contracts::{ActorId, AgentRunId, TaskRunId};
 use sqlx::Row;
 use task_execution::resource::{ResourceClient, ResourceClientError};
 
@@ -39,6 +39,16 @@ struct SandboxProgress {
     request_id: Option<contracts::ResourceRequestId>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct HistoryPosition(u32, u64, AgentTrackKind);
+
+#[derive(PartialEq)]
+struct ProgressEntry {
+    track: AgentTrackKind,
+    attempt: AgentAttempt,
+    sandbox: Option<SandboxProgress>,
+}
+
 impl PostgresAgentRunStore {
     /// Keeps the latest business attempt on every page; history never replaces it.
     #[allow(
@@ -48,16 +58,53 @@ impl PostgresAgentRunStore {
     pub async fn task_progress(
         &self,
         run_id: AgentRunId,
+        actor_id: ActorId,
         resource: Option<&ResourceClient>,
-        query: &PageQuery,
+        query: &TaskProgressQuery,
     ) -> Result<AgentRunTaskProgress, TaskProgressError> {
-        let (page, page_size, offset) = query
-            .normalized()
+        query
+            .validate()
             .map_err(|_| TaskProgressError::PageInvalid)?;
+        let limit = query.limit.unwrap_or(50);
         for _ in 0..3 {
             let run = self.load(run_id).await?;
+            let scope = (
+                "agent-task-progress",
+                actor_id,
+                run.project_id,
+                run.course_id,
+                run_id,
+            );
+            let after: Option<HistoryPosition> = query
+                .cursor
+                .as_deref()
+                .map(|value| {
+                    persistence_sqlx::decode_cursor(
+                        "agent",
+                        self.cursor_signing_key_current.as_slice(),
+                        self.cursor_signing_key_previous
+                            .as_deref()
+                            .map(Vec::as_slice),
+                        &scope,
+                        value,
+                    )
+                    .map_err(|_| TaskProgressError::PageInvalid)
+                })
+                .transpose()?;
             let executing_work = self.executing_work(run_id, run.plan.as_ref()).await?;
-            let sandboxes = self.sandbox_progress(run_id).await?;
+            let current_rows = self
+                .progress_entries(run_id, run.project_id, executing_work, true, None, limit)
+                .await?;
+            let past = self
+                .progress_entries(
+                    run_id,
+                    run.project_id,
+                    executing_work,
+                    false,
+                    after.as_ref(),
+                    limit,
+                )
+                .await?;
             let actor: Option<uuid::Uuid> = sqlx::query_scalar(
                 "SELECT actor_id FROM agent.agent_run_dispatches WHERE run_id=$1",
             )
@@ -67,92 +114,93 @@ impl PostgresAgentRunStore {
             .map_err(|_| AgentRunStoreError::PersistenceFailed)?
             .flatten();
             let mut current = Vec::new();
-            let mut history = Vec::new();
-            for track in &run.tracks {
-                for attempt in &track.attempts {
-                    let generations: Vec<_> = sandboxes
-                        .iter()
-                        .filter(|saved| {
-                            saved.track == track.kind && saved.attempt == attempt.number
-                        })
-                        .collect();
-                    let mut is_current = track
-                        .attempts
-                        .last()
-                        .is_some_and(|last| last.number == attempt.number);
-                    if is_current
-                        && executing_work
-                        && track.kind == AgentTrackKind::WorkConfiguration
-                        && attempt.state == AgentAttemptState::Running
-                    {
-                        let mut entry = projection(track.kind, attempt, None);
-                        entry.progress.phase = TaskAttemptPhase::Executing;
-                        entry
-                            .progress
-                            .next_steps
-                            .push("getProjectWorkConfigurationPlan".to_owned());
-                        current.push(entry);
-                        if generations.is_empty() {
-                            continue;
-                        }
-                        is_current = false;
-                    }
-                    if generations.is_empty() {
-                        let mut entry = projection(track.kind, attempt, None);
-                        if is_current {
-                            current.push(entry);
-                        } else {
-                            entry.progress.next_steps.clear();
-                            history.push(entry);
-                        }
-                    } else {
-                        for (position, saved) in generations.iter().enumerate() {
-                            let mut entry = projection(track.kind, attempt, Some(saved));
-                            if is_current && position == 0 {
-                                if saved.state != "released"
-                                    && let Some(request) =
-                                        current_resource(resource, run.project_id, actor, saved)
-                                            .await?
-                                {
-                                    apply_resource(&mut entry.progress, &request, saved);
-                                }
-                                current.push(entry);
-                            } else {
-                                // Earlier invocations of the same business attempt have their own
-                                // durable outcome. A later invocation cannot overwrite it.
-                                if saved.state == "released" {
-                                    entry.progress.phase = if saved.diagnostic.is_some() {
-                                        TaskAttemptPhase::Failed
-                                    } else {
-                                        TaskAttemptPhase::Succeeded
-                                    };
-                                }
-                                entry.progress.next_steps.clear();
-                                history.push(entry);
-                            }
-                        }
-                    }
+            for entry in &current_rows {
+                let mut projected = projection(entry.track, &entry.attempt, entry.sandbox.as_ref());
+                if let Some(saved) = entry
+                    .sandbox
+                    .as_ref()
+                    .filter(|saved| saved.state != "released")
+                    && let Some(request) =
+                        current_resource(resource, run.project_id, actor, saved).await?
+                {
+                    apply_resource(&mut projected.progress, &request, saved);
                 }
+                current.push(projected);
+            }
+            if executing_work
+                && let Some(attempt) = run
+                    .tracks
+                    .iter()
+                    .find(|track| track.kind == AgentTrackKind::WorkConfiguration)
+                    .and_then(|track| track.attempts.last())
+                    .filter(|attempt| attempt.state == AgentAttemptState::Running)
+            {
+                let mut entry = projection(AgentTrackKind::WorkConfiguration, attempt, None);
+                entry.progress.phase = TaskAttemptPhase::Executing;
+                entry
+                    .progress
+                    .next_steps
+                    .push("getProjectWorkConfigurationPlan".to_owned());
+                current.push(entry);
             }
             if self.load(run_id).await?.revision != run.revision
-                || self.sandbox_progress(run_id).await? != sandboxes
                 || self.executing_work(run_id, run.plan.as_ref()).await? != executing_work
+                || self
+                    .progress_entries(run_id, run.project_id, executing_work, true, None, limit)
+                    .await?
+                    != current_rows
+                || self
+                    .progress_entries(
+                        run_id,
+                        run.project_id,
+                        executing_work,
+                        false,
+                        after.as_ref(),
+                        limit,
+                    )
+                    .await?
+                    != past
             {
                 continue;
             }
-            history.sort_by_key(|entry| {
-                std::cmp::Reverse((
-                    entry.progress.attempt,
-                    entry.progress.execution_generation.unwrap_or(0),
-                    entry.track,
-                ))
-            });
-            let offset = usize::try_from(offset).map_err(|_| TaskProgressError::PageInvalid)?;
-            let has_more = history.len() > offset.saturating_add(usize::from(page_size));
-            let history = history
+            let next_cursor = if past.len() > usize::from(limit) {
+                let last = &past[usize::from(limit) - 1];
+                Some(
+                    persistence_sqlx::encode_cursor(
+                        "agent",
+                        self.cursor_signing_key_current.as_slice(),
+                        &scope,
+                        HistoryPosition(
+                            last.attempt.number,
+                            last.sandbox.as_ref().map_or(0, |saved| saved.generation),
+                            last.track,
+                        ),
+                    )
+                    .map_err(|_| TaskProgressError::PageInvalid)?,
+                )
+            } else {
+                None
+            };
+            let history = past
                 .into_iter()
-                .skip(offset)
-                .take(usize::from(page_size))
+                .take(usize::from(limit))
+                .map(|entry| {
+                    let mut projected =
+                        projection(entry.track, &entry.attempt, entry.sandbox.as_ref());
+                    if let Some(saved) = entry
+                        .sandbox
+                        .as_ref()
+                        .filter(|saved| saved.state == "released")
+                    {
+                        projected.progress.phase = if saved.diagnostic.is_some() {
+                            TaskAttemptPhase::Failed
+                        } else {
+                            TaskAttemptPhase::Succeeded
+                        };
+                    }
+                    projected.progress.next_steps.clear();
+                    projected
+                })
                 .collect();
             return Ok(AgentRunTaskProgress {
                 run_id,
@@ -161,55 +209,101 @@ impl PostgresAgentRunStore {
                 state: run.state,
                 current,
                 history,
-                page,
-                page_size,
-                has_more,
+                next_cursor,
             });
         }
         Err(TaskProgressError::Changed)
     }
 
-    async fn sandbox_progress(
+    #[allow(clippy::too_many_arguments)]
+    async fn progress_entries(
         &self,
         run_id: AgentRunId,
-    ) -> Result<Vec<SandboxProgress>, AgentRunStoreError> {
+        project_id: contracts::ProjectId,
+        executing_work: bool,
+        current: bool,
+        after: Option<&HistoryPosition>,
+        limit: u16,
+    ) -> Result<Vec<ProgressEntry>, AgentRunStoreError> {
         let rows = sqlx::query(
-            "SELECT track,attempt_number,execution_generation,task_run_id,
-            state,diagnostic_code,state IN ('submitted','terminal') AS submitted,
-            (binding->>'resourceRequestId')::uuid AS resource_request_id
-            FROM agent.authoring_sandbox_attempts WHERE run_id=$1
-            ORDER BY track,attempt_number DESC,execution_generation DESC",
-        )
-        .bind(run_id.as_uuid())
-        .fetch_all(self.pool())
-        .await
-        .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+            "WITH entries AS (
+                SELECT t->>'kind' AS track, a AS attempt_contract,
+                    (a->>'number')::bigint AS attempt_number,
+                    CASE t->>'kind' WHEN 'environment' THEN 0 WHEN 'evaluation' THEN 1 ELSE 2 END AS track_order,
+                    s.execution_generation,s.task_run_id,s.state,s.diagnostic_code,
+                    s.state IN ('submitted','terminal') AS submitted,
+                    (s.binding->>'resourceRequestId')::uuid AS resource_request_id,
+                    $3 AND t->>'kind'='work_configuration' AND a->>'state'='running' AS executing,
+                    row_number() OVER (PARTITION BY t->>'kind' ORDER BY (a->>'number')::bigint DESC,s.execution_generation DESC NULLS LAST) AS rank
+                FROM agent.agent_runs r
+                CROSS JOIN LATERAL jsonb_array_elements(r.contract->'tracks') t
+                CROSS JOIN LATERAL jsonb_array_elements(t->'attempts') a
+                LEFT JOIN agent.authoring_sandbox_attempts s ON s.run_id=r.run_id AND s.track=t->>'kind' AND s.attempt_number=(a->>'number')::bigint
+                WHERE r.run_id=$1 AND r.project_id=$2
+            ) SELECT * FROM entries
+            WHERE CASE WHEN $4 THEN rank=1 AND NOT executing ELSE (rank<>1 OR executing) AND (NOT executing OR task_run_id IS NOT NULL) END
+                AND ($5::bigint IS NULL OR (attempt_number,COALESCE(execution_generation,0),track_order)<($5,$6,$7))
+            ORDER BY CASE WHEN $4 THEN track_order END ASC,attempt_number DESC,COALESCE(execution_generation,0) DESC,track_order DESC
+            LIMIT CASE WHEN $4 THEN NULL ELSE $8 END",
+        ).bind(run_id.as_uuid()).bind(project_id.as_uuid()).bind(executing_work).bind(current)
+            .bind(after.map(|key| i64::from(key.0)))
+            .bind(after.map(|key| i64::try_from(key.1)).transpose().map_err(|_| AgentRunStoreError::InvalidContract)?)
+            .bind(after.map(|key| match key.2 { AgentTrackKind::Environment => 0_i32, AgentTrackKind::Evaluation => 1, AgentTrackKind::WorkConfiguration => 2 }))
+            .bind(i64::from(limit)+1).fetch_all(self.pool()).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
         rows.into_iter()
-            .map(|row| -> Result<SandboxProgress, sqlx::Error> {
-                Ok(SandboxProgress {
-                    track: serde_json::from_value(serde_json::Value::String(row.try_get("track")?))
-                        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
-                    attempt: u32::try_from(row.try_get::<i64, _>("attempt_number")?)
-                        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
-                    generation: u64::try_from(row.try_get::<i64, _>("execution_generation")?)
-                        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
-                    task_run_id: row
-                        .try_get::<uuid::Uuid, _>("task_run_id")?
-                        .to_string()
-                        .parse()
-                        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
-                    state: row.try_get("state")?,
-                    diagnostic: row.try_get("diagnostic_code")?,
-                    submitted: row.try_get("submitted")?,
-                    request_id: row
-                        .try_get::<Option<uuid::Uuid>, _>("resource_request_id")?
-                        .map(|id| id.to_string().parse())
-                        .transpose()
-                        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+            .map(|row| {
+                let track = serde_json::from_value(serde_json::Value::String(
+                    row.try_get("track")
+                        .map_err(|_| AgentRunStoreError::PersistenceFailed)?,
+                ))
+                .map_err(|_| AgentRunStoreError::InvalidContract)?;
+                let attempt: AgentAttempt = serde_json::from_value(
+                    row.try_get("attempt_contract")
+                        .map_err(|_| AgentRunStoreError::PersistenceFailed)?,
+                )
+                .map_err(|_| AgentRunStoreError::InvalidContract)?;
+                let task: Option<uuid::Uuid> = row
+                    .try_get("task_run_id")
+                    .map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+                let sandbox = task
+                    .map(|task| -> Result<SandboxProgress, AgentRunStoreError> {
+                        Ok(SandboxProgress {
+                            track,
+                            attempt: attempt.number,
+                            generation: u64::try_from(
+                                row.try_get::<i64, _>("execution_generation")
+                                    .map_err(|_| AgentRunStoreError::PersistenceFailed)?,
+                            )
+                            .map_err(|_| AgentRunStoreError::InvalidContract)?,
+                            task_run_id: task
+                                .to_string()
+                                .parse()
+                                .map_err(|_| AgentRunStoreError::InvalidContract)?,
+                            state: row
+                                .try_get("state")
+                                .map_err(|_| AgentRunStoreError::PersistenceFailed)?,
+                            diagnostic: row
+                                .try_get("diagnostic_code")
+                                .map_err(|_| AgentRunStoreError::PersistenceFailed)?,
+                            submitted: row
+                                .try_get("submitted")
+                                .map_err(|_| AgentRunStoreError::PersistenceFailed)?,
+                            request_id: row
+                                .try_get::<Option<uuid::Uuid>, _>("resource_request_id")
+                                .map_err(|_| AgentRunStoreError::PersistenceFailed)?
+                                .map(|id| id.to_string().parse())
+                                .transpose()
+                                .map_err(|_| AgentRunStoreError::InvalidContract)?,
+                        })
+                    })
+                    .transpose()?;
+                Ok(ProgressEntry {
+                    track,
+                    attempt,
+                    sandbox,
                 })
             })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| AgentRunStoreError::PersistenceFailed)
+            .collect()
     }
 
     async fn executing_work(

@@ -3,6 +3,7 @@ import { getProjectAgentTaskProgress, listEnvironments, listProjectAgentRuns, li
 import type { AgentRunHistoryItem, AgentRunTaskProgress, EnvironmentSummary, ResourceRequestSchema } from '@/generated/contracts'
 import { diagnosticFromError, extractProblemDetails, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
 import { collectCursorPages } from '@/utils/cursorPagination'
+import { collectTaskProgress } from '@/utils/taskProgress'
 
 /** Section state; `hidden` means the server denied this read for the account, so the section is not shown. */
 export type InProgressSection<T> = AsyncState<T[]> | { kind: 'hidden' }
@@ -106,8 +107,7 @@ export function useProjectInProgress(projectId: Ref<string | null>) {
 
   async function readAgentProgress(id: string, runId: string): Promise<AgentRunProgressState> {
     try {
-      // Only the current attempt is shown here; history stays on the run's own page.
-      const result = await getProjectAgentTaskProgress({ path: { projectId: id, runId }, query: { page: 1, pageSize: 1 } })
+      const result = await collectTaskProgress((cursor) => getProjectAgentTaskProgress({ path: { projectId: id, runId }, query: { limit: 100, ...(cursor ? { cursor } : {}) } }))
       if (!result.data) return progressError(result.error)
       if (result.data.projectId !== id || result.data.runId !== runId) {
         return {

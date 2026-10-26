@@ -17,8 +17,8 @@ use contracts::http::{
     InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
     InternalImageArtifactResolution, InternalPlatformImageDisableRequest,
     InternalPlatformImageImportCancelRequest, InternalPlatformImageImportEnqueueRequest,
-    InternalPlatformImageRegistrationRequest, InternalPlatformImageRepinRequest, PageQuery,
-    PlatformImageCatalog,
+    InternalPlatformImageRegistrationRequest, InternalPlatformImageRepinRequest,
+    PlatformImageCatalog, TaskProgressQuery,
 };
 use contracts::{
     AgentRunId, ArtifactId, DiagnosticCode, ImageArtifactId, PlatformImageId, ProblemDetails,
@@ -227,12 +227,22 @@ async fn get_task_progress(
     State(state): State<Arc<AgentApiState>>,
     caller: Option<Extension<auth::ServiceIdentity>>,
     Path(run_id): Path<AgentRunId>,
-    Query(query): Query<PageQuery>,
+    Query(query): Query<TaskProgressQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, AgentApiError> {
     require_control(caller)?;
+    let actor_id = headers
+        .get("x-labweaver-actor-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<contracts::ActorId>().ok())
+        .ok_or(AgentApiError {
+            status: StatusCode::BAD_REQUEST,
+            diagnostic: "LW_TASK_PROGRESS_PAGE_INVALID",
+            retryable: false,
+        })?;
     let progress = state
         .store
-        .task_progress(run_id, state.resource.as_ref(), &query)
+        .task_progress(run_id, actor_id, state.resource.as_ref(), &query)
         .await
         .map_err(AgentApiError::from)?;
     Ok((
@@ -1073,5 +1083,17 @@ impl IntoResponse for AgentApiError {
             );
         }
         (self.status, Json(problem)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod cursor_error_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_task_cursor_is_http_400() {
+        let response = AgentApiError::from(crate::task_progress::TaskProgressError::PageInvalid)
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

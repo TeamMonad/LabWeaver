@@ -188,12 +188,17 @@
     },
     "runId": {
       "$ref": "#/$defs/AgentRunId"
+    },
+    "truncated": {
+      "description": "True when older unexpired details were omitted from this bounded diagnostic view.",
+      "type": "boolean"
     }
   },
   "required": [
     "runId",
     "projectId",
-    "items"
+    "items",
+    "truncated"
   ],
   "title": "AgentRunDiagnostics",
   "type": "object"

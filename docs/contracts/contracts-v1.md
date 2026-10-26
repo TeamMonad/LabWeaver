@@ -22,13 +22,19 @@ Project 是 Work、资源申请和费用的必选归属，Course 为可选教学
 
 学生从 Freeze 接受响应取得 submissionId 后，可用 `GET /api/v1/projects/{projectId}/me/evaluation-tasks/submissions/{submissionId}` 查询最近创建的所属评测 Run，返回同一进度 DTO。异步任务尚未创建时返回 404；其他项目或其他 actor 的提交也返回 404。该查询不创建任务，重试同一 URI 即可刷新。
 
-响应以 `current` 返回每个 track/step 的当前尝试，以 `history` 分页返回旧尝试。`page` 从 1 开始，`pageSize` 为 1 至 100，默认 25；`hasMore` 仅描述历史页。换页不能把旧失败显示为当前进度。Agent 的同一业务尝试可能包含多个执行代次，旧代次留在历史；Evaluation 未领取的步骤以 attempt 0 表示，尚无 TaskRunId。
+响应以 `current` 返回每个 track/step 的当前尝试，以 `history` 分页返回旧尝试。查询只接受 `cursor` 与 `limit`（默认 50，范围 1–100），删除 `page`、`pageSize` 和 `hasMore`，不保留 offset 兼容入口。响应 `nextCursor=null` 表示历史末页；续页保留各 track/step 的当前尝试，不能把旧失败显示为当前进度。Agent 的同一业务尝试可能包含多个执行代次，旧代次留在历史；Evaluation 未领取的步骤以 attempt 0 表示，尚无 TaskRunId。
+
+游标沿用服务端 HMAC-SHA256、规范化 base64url JSON 和 current/previous 密钥轮换，签名覆盖版本、key ID、端点、actor、项目、run、该 run 的权威 course_id（包括 `null`），以及提交查询的 submissionId。跨范围或篡改返回 400 / `LW_TASK_PROGRESS_PAGE_INVALID`。每次请求重新验证当前会话与项目权限，Evaluation 在签发/验证边界时核对已签名课程与run记录，并在 SQL `LIMIT` 前限定项目、actor 和 run；游标不授予访问权限。Agent 按不可变 `(attempt, executionGeneration, track)` 降序，Evaluation 按 PG 原始精度 `(created_at, step_run_id, attempt)` 降序读取 `limit+1`；不回查仍存活的上一页末项。删除锚点不阻断续页，边界之前的新历史需刷新首页。这是当前事实的 keyset 遍历，不是跨 HTTP 数据库快照；提交关联了较新的 run 时旧续页失败，重新从首页读取。
+
+Web 进度消费者通过共享 cursor helper 读完所有历史页，再发布本次完整读取；缺失/空串/非法类型或重复 `nextCursor` 失败关闭，不把部分历史计作完整历史。保留的上一份成功进度仍明确为旧读取，读取失败不会冒充新进度。
 
 Work 配置脚本执行沿用现有环境和 Agent 已保存的执行意图；进度显示该阶段，但不补造新的 sandbox TaskRunId。生成阶段的旧执行代次保留在历史。
 
 `phase` 来自业务检查点和 Resource 权威事实，区分等待批准、分配、执行和待清理。`diagnosticCode` 保留当前阻塞或失败原因；`taskRunId` 和 `resourceRequestId` 关联真实记录。`nextSteps` 只列已有操作 ID，客户端仍按项目、角色及服务端状态检查使用；没有公共入口的 Evaluation 取消/重试不会以可用按钮列出。
 
 进度读取不返回命令、凭据、评分输入、分数或 Kubernetes 对象。Resource 绑定缺失或暂时不可用返回 503 / `LW_TASK_PROGRESS_RESOURCE_UNAVAILABLE`，不返回旧失败作为新进度。读取时 owner 改变则有界重读，仍不稳定时返回 409 / `LW_TASK_PROGRESS_CHANGED`。响应使用 `Cache-Control: no-store`，事件用于提示刷新，不能替代权威查询。
+
+跨课程、有课与无课的边界重用作为无效游标以 HTTP 400 拒绝。Evaluation 的 Resource 响应项目或申请者身份不符返回 HTTP 409 / `LW_TASK_PROGRESS_IDENTITY_MISMATCH`；三轮重读后 run revision 或尝试集合仍变化返回 HTTP 409 / `LW_TASK_PROGRESS_CHANGED`。这些下游身份和并发读冲突不是游标边界错误。
 
 这两个接口读取指定任务，不新增全项目任务聚合。项目 AgentRun 与 Resource 项目申请列表使用下文的稳定游标，并保留各领域的权威状态。客户端不能把单页或可见项数量当作全项目完整任务数。
 

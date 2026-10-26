@@ -49,6 +49,8 @@ mod runtime_origin_tests;
 mod state_query_tests;
 #[path = "../tests/support/mod.rs"]
 pub(super) mod support;
+#[path = "task_progress_cursor_tests.rs"]
+mod task_progress_cursor_tests;
 
 const ORIGIN: &str = "https://portal.example.invalid";
 const AUDIENCE: &str = "labweaver-control";
@@ -762,6 +764,23 @@ async fn state_with_environment(
             get(upstream_console),
         )
         .with_state(authority.clone());
+    let cursor_authority = Authority {
+        issuer: format!("{base}realms/cursor"),
+        ..authority.clone()
+    };
+    let router = router.merge(
+        Router::new()
+            .route(
+                "/realms/cursor/.well-known/openid-configuration",
+                get(discovery),
+            )
+            .route("/realms/cursor/jwks", get(jwks))
+            .route(
+                "/realms/cursor/token",
+                post(task_progress_cursor_tests::token),
+            )
+            .with_state(cursor_authority),
+    );
     let control_server_config = Arc::clone(&server_config);
     tasks.0.push(tokio::spawn(async move {
         let _ = http_transport::serve_tls(listener, router, control_server_config).await;

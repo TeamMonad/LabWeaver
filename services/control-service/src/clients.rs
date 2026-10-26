@@ -29,7 +29,8 @@ use contracts::http::{
     InternalPlatformImageImportCancelRequest, InternalPlatformImageImportEnqueueRequest,
     InternalPlatformImageImportJobStatus, InternalPlatformImageRegistrationRequest,
     InternalPlatformImageRepinRequest, InternalPublishEvaluationReleaseRequest,
-    InternalWithdrawEvaluationReleaseRequest, PageQuery, PlatformImageCatalog, PlatformImageEntry,
+    InternalWithdrawEvaluationReleaseRequest, PlatformImageCatalog, PlatformImageEntry,
+    TaskProgressQuery,
 };
 use contracts::{
     AgentRunId, AuthorizationDecision, AuthorizationDecisionRequest, BuildRequestId,
@@ -218,7 +219,8 @@ impl AgentClient {
     pub async fn task_progress(
         &self,
         run_id: AgentRunId,
-        query: &PageQuery,
+        actor_id: contracts::ActorId,
+        query: &TaskProgressQuery,
     ) -> Result<AgentRunTaskProgress, DownstreamError> {
         send_json(
             self.client
@@ -226,6 +228,7 @@ impl AgentClient {
                     self.config
                         .endpoint(&format!("internal/v1/agent-runs/{run_id}/task-progress"))?,
                 )
+                .header("x-labweaver-actor-id", actor_id.to_string())
                 .query(query),
             &self.service_token_client,
             self.token_target,

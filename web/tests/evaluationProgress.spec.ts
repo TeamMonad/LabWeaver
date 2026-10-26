@@ -16,9 +16,7 @@ function progress(steps: Array<Partial<TaskAttemptProgress>>, extra: Partial<Eva
     state: 'running',
     current: steps.map((step, index) => ({ stepRunId: `step-${index}`, progress: attempt(step) })),
     history: [],
-    page: 1,
-    pageSize: 20,
-    hasMore: false,
+    nextCursor: null,
     ...extra,
   }
 }
@@ -57,7 +55,7 @@ describe('readEvaluationTask', () => {
   it('counts earlier attempts without letting them decide the current stage', () => {
     const reading = readEvaluationTask(progress(
       [{ phase: 'executing', attempt: 2, resourceRequestId: 'request-2', resourceState: 'active' }],
-      { history: [{ stepRunId: 'step-0', progress: attempt({ phase: 'failed', attempt: 1, diagnosticCode: 'LW_OJ_JOB_FAILED' }) }], hasMore: true },
+      { history: [{ stepRunId: 'step-0', progress: attempt({ phase: 'failed', attempt: 1, diagnosticCode: 'LW_OJ_JOB_FAILED' }) }], nextCursor: 'older' },
     ))
     expect(reading).toMatchObject({ stage: 'running', status: 'current', attempt: 2, earlierAttempts: { count: 1, more: true }, reason: null })
   })

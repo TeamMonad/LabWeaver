@@ -152,10 +152,12 @@ impl PostgresAgentRunStore {
         run_id: AgentRunId,
     ) -> Result<AgentRunDiagnostics, AgentRunStoreError> {
         let run = self.load(run_id).await?;
-        let rows = sqlx::query("SELECT detail FROM agent.model_diagnostics WHERE run_id=$1 AND expires_at>clock_timestamp() ORDER BY created_at DESC,track,attempt DESC LIMIT 100")
+        let rows = sqlx::query("SELECT detail FROM agent.model_diagnostics WHERE run_id=$1 AND expires_at>clock_timestamp() ORDER BY created_at DESC,track,attempt DESC LIMIT 101")
             .bind(run_id.as_uuid()).fetch_all(self.pool()).await.map_err(|_| AgentRunStoreError::PersistenceFailed)?;
+        let truncated = rows.len() > 100;
         let items = rows
             .into_iter()
+            .take(100)
             .map(|row| {
                 serde_json::from_value(
                     row.try_get("detail")
@@ -169,6 +171,7 @@ impl PostgresAgentRunStore {
             project_id: run.project_id,
             course_id: run.course_id,
             items,
+            truncated,
         })
     }
 

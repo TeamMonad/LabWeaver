@@ -430,7 +430,7 @@ async fn get_student_submission_task_progress(
     State(state): State<EvaluationApiState>,
     principal: Option<Extension<auth::ServiceIdentity>>,
     Path((project_id, submission_id)): Path<(contracts::ProjectId, FrozenSubmissionId)>,
-    Query(query): Query<contracts::http::PageQuery>,
+    Query(query): Query<contracts::http::TaskProgressQuery>,
     headers: HeaderMap,
 ) -> Result<Response, EvaluationApiError> {
     require_access(principal)?;
@@ -470,7 +470,7 @@ async fn get_student_task_progress(
     State(state): State<EvaluationApiState>,
     principal: Option<Extension<auth::ServiceIdentity>>,
     Path((project_id, run_id)): Path<(contracts::ProjectId, EvaluationRunId)>,
-    Query(query): Query<contracts::http::PageQuery>,
+    Query(query): Query<contracts::http::TaskProgressQuery>,
     headers: HeaderMap,
 ) -> Result<Response, EvaluationApiError> {
     require_access(principal)?;
@@ -1181,6 +1181,28 @@ mod tests {
             .into_response();
 
         assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn task_cursor_errors_are_bad_requests_but_resource_identity_and_read_races_are_conflicts() {
+        use crate::task_progress::EvaluationTaskProgressError;
+        assert_eq!(
+            EvaluationApiError::TaskProgress(EvaluationTaskProgressError::PageInvalid)
+                .into_response()
+                .status(),
+            axum::http::StatusCode::BAD_REQUEST
+        );
+        for error in [
+            EvaluationTaskProgressError::IdentityMismatch,
+            EvaluationTaskProgressError::Changed,
+        ] {
+            assert_eq!(
+                EvaluationApiError::TaskProgress(error)
+                    .into_response()
+                    .status(),
+                axum::http::StatusCode::CONFLICT
+            );
+        }
     }
 
     #[test]

@@ -5,7 +5,7 @@ use contracts::evaluation::{
     EvaluationRun, EvaluationRunTaskProgress, EvaluationStepRunState, EvaluationStepTaskProgress,
 };
 use contracts::execution::{TaskAttemptPhase, TaskAttemptProgress};
-use contracts::http::PageQuery;
+use contracts::http::TaskProgressQuery;
 use contracts::resource::ResourceRequestState;
 use contracts::{ActorId, EvaluationRunId, EvaluationStepRunId, ProjectId, TaskRunId};
 use sqlx::Row;
@@ -30,6 +30,7 @@ pub enum EvaluationTaskProgressError {
 #[derive(Clone, Debug, PartialEq)]
 struct AttemptProgress {
     step_run_id: EvaluationStepRunId,
+    created_at: time::OffsetDateTime,
     attempt: u32,
     task_run_id: TaskRunId,
     state: String,
@@ -40,6 +41,9 @@ struct AttemptProgress {
     request_id: Option<contracts::ResourceRequestId>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct HistoryPosition(time::OffsetDateTime, uuid::Uuid, i32);
+
 impl PgEvaluationControlStore {
     /// Resolves the most recently created owned run after an asynchronous freeze dispatch.
     pub async fn task_progress_for_submission(
@@ -48,10 +52,10 @@ impl PgEvaluationControlStore {
         actor_id: ActorId,
         submission_id: contracts::FrozenSubmissionId,
         resource: Option<&ResourceClient>,
-        query: &PageQuery,
+        query: &TaskProgressQuery,
     ) -> Result<contracts::evaluation::EvaluationRunTaskProgress, EvaluationTaskProgressError> {
         query
-            .normalized()
+            .validate()
             .map_err(|_| EvaluationTaskProgressError::PageInvalid)?;
         let run_id: uuid::Uuid = sqlx::query_scalar(
             "SELECT run_id FROM evaluation.evaluation_runs
@@ -65,7 +69,7 @@ impl PgEvaluationControlStore {
         .await
         .map_err(EvaluationControlStoreError::from)?
         .ok_or(EvaluationControlStoreError::RunNotFound)?;
-        self.task_progress(
+        self.task_progress_scoped(
             project_id,
             actor_id,
             run_id
@@ -74,6 +78,7 @@ impl PgEvaluationControlStore {
                 .map_err(|_| EvaluationControlStoreError::ContractInvalid)?,
             resource,
             query,
+            Some(submission_id),
         )
         .await
     }
@@ -85,19 +90,77 @@ impl PgEvaluationControlStore {
         actor_id: ActorId,
         run_id: EvaluationRunId,
         resource: Option<&ResourceClient>,
-        query: &PageQuery,
+        query: &TaskProgressQuery,
     ) -> Result<EvaluationRunTaskProgress, EvaluationTaskProgressError> {
-        let (page, page_size, offset) = query
-            .normalized()
+        self.task_progress_scoped(project_id, actor_id, run_id, resource, query, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    async fn task_progress_scoped(
+        &self,
+        project_id: ProjectId,
+        actor_id: ActorId,
+        run_id: EvaluationRunId,
+        resource: Option<&ResourceClient>,
+        query: &TaskProgressQuery,
+        submission_id: Option<contracts::FrozenSubmissionId>,
+    ) -> Result<EvaluationRunTaskProgress, EvaluationTaskProgressError> {
+        query
+            .validate()
             .map_err(|_| EvaluationTaskProgressError::PageInvalid)?;
+        if self.cursor_signing_key_current.is_empty() {
+            return Err(EvaluationTaskProgressError::Store(
+                EvaluationControlStoreError::ContractInvalid,
+            ));
+        }
+        // Read only the immutable course binding here so even a cross-actor cursor
+        // is rejected as an invalid scope before the actor-owned attempt query.
+        let course_id: Option<uuid::Uuid> =
+            sqlx::query_scalar("SELECT course_id FROM evaluation.evaluation_runs WHERE run_id=$1")
+                .bind(run_id.as_uuid())
+                .fetch_optional(self.pool())
+                .await
+                .map_err(EvaluationControlStoreError::from)?
+                .ok_or(EvaluationControlStoreError::RunNotFound)?;
+        let scope = (
+            "evaluation-task-progress",
+            project_id,
+            actor_id,
+            run_id,
+            course_id,
+            submission_id,
+        );
+        let after: Option<HistoryPosition> = query
+            .cursor
+            .as_deref()
+            .map(|value| {
+                persistence_sqlx::decode_cursor(
+                    "evaluation",
+                    self.cursor_signing_key_current.as_slice(),
+                    self.cursor_signing_key_previous
+                        .as_deref()
+                        .map(Vec::as_slice),
+                    &scope,
+                    value,
+                )
+                .map_err(|_| EvaluationTaskProgressError::PageInvalid)
+            })
+            .transpose()?;
+        let limit = query.limit.unwrap_or(50);
         for _ in 0..3 {
             let run = self
                 .owned_progress_run(project_id, actor_id, run_id)
                 .await?;
+            if run.course_id.map(contracts::CourseId::as_uuid) != course_id {
+                return Err(EvaluationTaskProgressError::PageInvalid);
+            }
             let release = self.load_release(run.release_id).await?;
-            let attempts = self.progress_attempts(run_id, true, 0, 0).await?;
+            let attempts = self
+                .progress_attempts(project_id, actor_id, run_id, true, None, limit)
+                .await?;
             let past = self
-                .progress_attempts(run_id, false, i64::from(page_size) + 1, i64::from(offset))
+                .progress_attempts(project_id, actor_id, run_id, false, after.as_ref(), limit)
                 .await?;
             let mut current = Vec::new();
             for step in &run.steps {
@@ -150,18 +213,39 @@ impl PgEvaluationControlStore {
                 .await?
                 .revision
                 != run.revision
-                || self.progress_attempts(run_id, true, 0, 0).await? != attempts
                 || self
-                    .progress_attempts(run_id, false, i64::from(page_size) + 1, i64::from(offset))
+                    .progress_attempts(project_id, actor_id, run_id, true, None, limit)
+                    .await?
+                    != attempts
+                || self
+                    .progress_attempts(project_id, actor_id, run_id, false, after.as_ref(), limit)
                     .await?
                     != past
             {
                 continue;
             }
-            let has_more = past.len() > usize::from(page_size);
+            let next_cursor = if past.len() > usize::from(limit) {
+                let last = &past[usize::from(limit) - 1];
+                Some(
+                    persistence_sqlx::encode_cursor(
+                        "evaluation",
+                        self.cursor_signing_key_current.as_slice(),
+                        &scope,
+                        HistoryPosition(
+                            last.created_at,
+                            last.step_run_id.as_uuid(),
+                            i32::try_from(last.attempt)
+                                .map_err(|_| EvaluationTaskProgressError::PageInvalid)?,
+                        ),
+                    )
+                    .map_err(|_| EvaluationTaskProgressError::PageInvalid)?,
+                )
+            } else {
+                None
+            };
             let history = past
                 .into_iter()
-                .take(usize::from(page_size))
+                .take(usize::from(limit))
                 .map(|saved| projection(&saved))
                 .collect();
             return Ok(EvaluationRunTaskProgress {
@@ -171,9 +255,7 @@ impl PgEvaluationControlStore {
                 state: run.state,
                 current,
                 history,
-                page,
-                page_size,
-                has_more,
+                next_cursor,
             });
         }
         Err(EvaluationTaskProgressError::Changed)
@@ -204,25 +286,34 @@ impl PgEvaluationControlStore {
         Ok(run)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn progress_attempts(
         &self,
+        project_id: ProjectId,
+        actor_id: ActorId,
         run_id: EvaluationRunId,
         current: bool,
-        limit: i64,
-        offset: i64,
+        after: Option<&HistoryPosition>,
+        limit: u16,
     ) -> Result<Vec<AttemptProgress>, EvaluationControlStoreError> {
-        let rows = sqlx::query("SELECT a.step_run_id,a.attempt,a.task_run_id,a.state,
+        let rows = sqlx::query("SELECT a.step_run_id,a.attempt,a.task_run_id,a.state,a.created_at,
             a.cleanup_verified,a.diagnostic_code,a.execution_resources IS NOT NULL AS has_intent,
             COALESCE(jsonb_array_length(a.execution_resources->'objects')>0,false) AS submitted,
             (a.execution_resources->'admission'->>'resourceRequestId')::uuid AS resource_request_id
             FROM evaluation.evaluation_step_attempts a
             JOIN evaluation.evaluation_step_runs s ON s.step_run_id=a.step_run_id
-            WHERE s.run_id=$1 AND (($2 AND a.attempt=s.current_attempt) OR (NOT $2 AND a.attempt<s.current_attempt))
-            ORDER BY a.created_at DESC,a.step_run_id,a.attempt DESC LIMIT NULLIF($3,0) OFFSET $4")
-            .bind(run_id.as_uuid()).bind(current).bind(limit).bind(offset).fetch_all(self.pool()).await?;
+            JOIN evaluation.evaluation_runs r ON r.run_id=s.run_id
+            WHERE r.run_id=$1 AND r.project_id=$2 AND r.actor_id=$3
+                AND (($4 AND a.attempt=s.current_attempt) OR (NOT $4 AND a.attempt<s.current_attempt))
+                AND ($5::timestamptz IS NULL OR (a.created_at,a.step_run_id,a.attempt)<($5,$6,$7))
+            ORDER BY a.created_at DESC,a.step_run_id DESC,a.attempt DESC LIMIT CASE WHEN $4 THEN NULL ELSE $8 END")
+            .bind(run_id.as_uuid()).bind(project_id.as_uuid()).bind(actor_id.as_uuid()).bind(current)
+            .bind(after.map(|key| key.0)).bind(after.map(|key| key.1)).bind(after.map(|key| key.2))
+            .bind(i64::from(limit)+1).fetch_all(self.pool()).await?;
         rows.into_iter()
             .map(|row| {
                 Ok(AttemptProgress {
+                    created_at: row.try_get("created_at")?,
                     step_run_id: row
                         .try_get::<uuid::Uuid, _>("step_run_id")?
                         .to_string()

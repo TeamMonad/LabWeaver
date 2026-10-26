@@ -149,6 +149,7 @@
     ],
     "evaluation-service-secrets": [
       "database-url",
+      "cursor-signing-key-current",
       "minio-access-key",
       "minio-ca.pem",
       "minio-secret-key",
@@ -199,6 +200,7 @@
   },
   "optionalSecrets": {
     "agent-service-secrets": ["cursor-signing-key-previous"],
-    "control-service-secrets": ["cursor-signing-key-previous"]
+    "control-service-secrets": ["cursor-signing-key-previous"],
+    "evaluation-service-secrets": ["cursor-signing-key-previous"]
   }
 }

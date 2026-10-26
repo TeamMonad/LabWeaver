@@ -4,6 +4,8 @@
     reason = "the integration fixture uses fixed valid contract identities"
 )]
 
+#[path = "cases/attempt_pagination.rs"]
+mod attempt_pagination;
 mod support;
 
 use std::time::Duration;
@@ -984,13 +986,13 @@ async fn worker_lease_fencing_retry_and_cleanup_are_authoritative()
 )]
 async fn task_progress_keeps_current_attempt_on_every_page_and_checks_owner_first()
 -> Result<(), Box<dyn std::error::Error>> {
-    use contracts::{execution::TaskAttemptPhase, http::PageQuery};
+    use contracts::{execution::TaskAttemptPhase, http::TaskProgressQuery};
     use evaluation_service::task_progress::EvaluationTaskProgressError;
     let fixture = TestContext::start(single_score_spec()?).await?;
     let run = fixture.create_seeded_run("trace-task-progress").await?;
-    let query = PageQuery {
-        page: Some(1),
-        page_size: Some(1),
+    let query = TaskProgressQuery {
+        cursor: None,
+        limit: Some(1),
     };
     let mut lease = fixture
         .store
@@ -1073,7 +1075,7 @@ async fn task_progress_keeps_current_attempt_on_every_page_and_checks_owner_firs
     assert_eq!(first.history[0].progress.attempt, 2);
     assert_eq!(first.history[0].progress.phase, TaskAttemptPhase::Failed);
     assert!(first.history[0].progress.diagnostic_code.is_some());
-    assert!(first.has_more);
+    assert!(first.next_cursor.is_some());
     let second = fixture
         .store
         .task_progress(
@@ -1081,30 +1083,15 @@ async fn task_progress_keeps_current_attempt_on_every_page_and_checks_owner_firs
             fixture.actor_id,
             run.id,
             None,
-            &PageQuery {
-                page: Some(2),
-                ..query
+            &TaskProgressQuery {
+                cursor: first.next_cursor.clone(),
+                ..query.clone()
             },
         )
         .await?;
     assert_eq!(second.current, first.current);
     assert_eq!(second.history[0].progress.attempt, 1);
-    assert!(!second.has_more);
-    let empty = fixture
-        .store
-        .task_progress(
-            fixture.project_id,
-            fixture.actor_id,
-            run.id,
-            None,
-            &PageQuery {
-                page: Some(3),
-                ..query
-            },
-        )
-        .await?;
-    assert_eq!(empty.current, first.current);
-    assert!(empty.history.is_empty());
+    assert!(second.next_cursor.is_none());
     let linked = fixture
         .store
         .task_progress_for_submission(
@@ -1159,9 +1146,9 @@ async fn task_progress_keeps_current_attempt_on_every_page_and_checks_owner_firs
                 fixture.actor_id,
                 run.id,
                 None,
-                &PageQuery {
-                    page: Some(0),
-                    ..query
+                &TaskProgressQuery {
+                    limit: Some(0),
+                    ..query.clone()
                 }
             )
             .await,
@@ -2135,9 +2122,9 @@ async fn advisory_failure_follows_declared_cleanup_semantics()
             fixture.actor_id,
             run.id,
             None,
-            &contracts::http::PageQuery {
-                page: Some(1),
-                page_size: Some(1),
+            &contracts::http::TaskProgressQuery {
+                cursor: None,
+                limit: Some(1),
             },
         )
         .await?;
@@ -2383,7 +2370,8 @@ impl TestContext {
             .connect(&database_url)
             .await?;
         support::apply_evaluation_migrations(&pool).await?;
-        let store = PgEvaluationControlStore::new(pool.clone());
+        let store =
+            PgEvaluationControlStore::new(pool.clone()).with_cursor_signing_keys(vec![7; 32], None);
         let project_id = ProjectId::new();
         let course_id = CourseId::new();
         let actor_id = ActorId::new();

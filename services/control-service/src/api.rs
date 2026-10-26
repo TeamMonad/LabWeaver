@@ -41,11 +41,11 @@ use contracts::http::{
     InternalApproveWorkConfigurationRequest, InternalCreateAgentRunRequest,
     InternalPlatformImageDisableRequest, InternalPlatformImageRegistrationRequest,
     InternalPlatformImageRepinRequest, InternalWithdrawEvaluationReleaseRequest, OperationAccepted,
-    PageQuery, PlatformImageCatalogView, PlatformImageEntry, PlatformImageEntryView,
+    PlatformImageCatalogView, PlatformImageEntry, PlatformImageEntryView,
     RegisterPlatformImageRequest, RemoveProjectMembershipRequest, RepinPlatformImageRequest,
-    ResolvedProjectMembershipRequest, StrongEtag, WithdrawEnvironmentTemplateReleaseRequest,
-    WithdrawEvaluationReleaseRequest, WorkConfigurationAdmissionQuery, WorkConfigurationPlanView,
-    resolve_sse_resume,
+    ResolvedProjectMembershipRequest, StrongEtag, TaskProgressQuery,
+    WithdrawEnvironmentTemplateReleaseRequest, WithdrawEvaluationReleaseRequest,
+    WorkConfigurationAdmissionQuery, WorkConfigurationPlanView, resolve_sse_resume,
 };
 use contracts::{
     ActorId, AgentRunId, AuthorizationDecisionRequest, AuthorizationScope, BffSessionId,
@@ -1344,7 +1344,7 @@ async fn get_project_agent_task_progress(
     State(state): State<Arc<ApiState>>,
     Extension(principal): Extension<GatewayPrincipal>,
     Path((project_id, run_id)): Path<(ProjectId, AgentRunId)>,
-    Query(query): Query<PageQuery>,
+    Query(query): Query<TaskProgressQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     authorize_project(
@@ -1356,10 +1356,11 @@ async fn get_project_agent_task_progress(
     )
     .await?;
     query
-        .normalized()
+        .validate()
         .map_err(|_| ApiError::bad_request("LW_TASK_PROGRESS_PAGE_INVALID"))?;
     let run = current_project_agent_run(&state, project_id, run_id).await?;
-    let progress = state.agent.task_progress(run_id, &query).await?;
+    let actor_id = parse_header::<ActorId>(&headers, ACTOR_HEADER)?;
+    let progress = state.agent.task_progress(run_id, actor_id, &query).await?;
     if progress.run_id != run_id
         || progress.project_id != project_id
         || progress.revision != run.revision

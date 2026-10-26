@@ -1580,9 +1580,12 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 | "getInternalAgentTaskProgress"
         ) {
             parameters.extend([
-                json!({"name":"page","in":"query","required":false,"schema":{"type":"integer","minimum":1,"default":1}}),
-                json!({"name":"pageSize","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":25}}),
+                json!({"name":"cursor","in":"query","required":false,"schema":{"type":"string","minLength":1,"maxLength":1024,"pattern":"^[A-Za-z0-9_.~-]+$"}}),
+                json!({"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":50}}),
             ]);
+        }
+        if operation.operation_id == "getInternalAgentTaskProgress" {
+            parameters.push(json!({"name":"x-labweaver-actor-id","in":"header","required":true,"schema":{"type":"string","format":"uuid"}}));
         }
         if operation.operation_id == "getInternalAuthoringPublicationAdmission" {
             parameters.extend([

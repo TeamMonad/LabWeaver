@@ -16,6 +16,9 @@ use rcgen::KeyPair;
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, sync::oneshot};
 
+mod support;
+#[path = "support/task_progress_http.rs"]
+mod task_progress_http;
 const AUDIENCE: &str = "labweaver-agent";
 const CONTROL_CLIENT_ID: &str = "labweaver-control";
 const EVALUATION_CLIENT_ID: &str = "labweaver-evaluation";

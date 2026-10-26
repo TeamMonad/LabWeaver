@@ -3,6 +3,8 @@
 
 mod catalog;
 mod coordinator;
+mod cursor;
+pub use cursor::{CursorError, decode_cursor, encode_cursor};
 mod ledger;
 mod schema;
 mod sha256;

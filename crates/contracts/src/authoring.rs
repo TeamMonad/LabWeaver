@@ -1023,9 +1023,7 @@ pub struct AgentRunTaskProgress {
     pub state: AgentRunState,
     pub current: Vec<AgentTrackTaskProgress>,
     pub history: Vec<AgentTrackTaskProgress>,
-    pub page: u32,
-    pub page_size: u16,
-    pub has_more: bool,
+    pub next_cursor: Option<String>,
 }
 
 /// An Agent track's business identity and its actual execution progress.

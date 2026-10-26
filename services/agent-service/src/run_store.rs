@@ -252,8 +252,8 @@ pub fn container_execution_request_value(
 #[derive(Clone, Debug)]
 pub struct PostgresAgentRunStore {
     pool: PgPool,
-    cursor_signing_key_current: Arc<Vec<u8>>,
-    cursor_signing_key_previous: Option<Arc<Vec<u8>>>,
+    pub(crate) cursor_signing_key_current: Arc<Vec<u8>>,
+    pub(crate) cursor_signing_key_previous: Option<Arc<Vec<u8>>>,
 }
 
 const AGENT_HISTORY_CURSOR_VERSION: u8 = 2;

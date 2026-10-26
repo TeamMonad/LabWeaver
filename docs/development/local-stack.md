@@ -27,6 +27,8 @@ python tools/local_dev.py down
 
 以 `up` 输出的实际访问地址为准，不假设固定端口。生成的运行配置和凭据保存在 Git 忽略的项目目录中，不应提交或分享。
 
+本地输入只生成每个服务的 `cursor-signing-key-current`，不生成 previous，也没有本地游标签名密钥轮换开关。普通 Pod 重启继续使用已挂载的当前 Secret；重新生成本地输入或重建一次性环境不保证保留旧游标，旧游标失效后从首页重新读取。需要验证轮换时使用加密 Bundle/Helm 的 current/previous 挂载流程，不把独立生成的一把密钥当作 previous。相关验证入口是 `tests/ansible/test_deployment_bundle.py::DeploymentBundleTests.test_cursor_keys_are_required_and_optional_rotation_secret_is_rendered`，以及 Agent/Evaluation 的真实 PG 游标 current/previous 回归。
+
 本地 Keycloak 使用独立 PVC 保存开发数据库，Pod 或 Docker 重启后保留账号、角色和签名密钥。单实例部署采用 `Recreate`，避免两个进程同时访问数据库。该存储随 `down` 删除，不用于长期身份管理；不要只重建身份数据库而保留依赖原账号身份的业务数据库。
 
 本地 realm 从 `deploy/ansible/roles/identity_foundation/defaults/main.yml` 读取服务身份与角色策略。Access 服务账户的组织用户目录权限复用 `identity_service_realm_role_assignments`，同时导入 `realm-management` 的 `query-users` / `view-users` 授权和 client scope mappings；保持 `fullScopeAllowed=false`，不授予管理用户或管理 realm 的权限。Keycloak 保留已有 realm 时不会通过重新导入覆盖这些角色；仅更新代码或重启 Pod 不会修复既有开发数据库中的缺失授权，需由该环境的负责人安排全新开发栈验收，不应在共享验收期间清空或修改身份库。

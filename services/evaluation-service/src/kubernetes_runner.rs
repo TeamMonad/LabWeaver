@@ -4384,9 +4384,9 @@ mod probe_recovery_tests {
                 fixture.run.actor_id,
                 fixture.run.id,
                 Some(&runner.resource),
-                &contracts::http::PageQuery {
-                    page: Some(1),
-                    page_size: Some(1),
+                &contracts::http::TaskProgressQuery {
+                    cursor: None,
+                    limit: Some(1),
                 },
             )
             .await?;
@@ -5451,7 +5451,8 @@ mod probe_recovery_tests {
                 .connect(&database_url)
                 .await?;
             apply_evaluation_migrations(&pool).await?;
-            let store = PgEvaluationControlStore::new(pool.clone());
+            let store = PgEvaluationControlStore::new(pool.clone())
+                .with_cursor_signing_keys(vec![7; 32], None);
             let project_id = contracts::ProjectId::new();
             let course_id = CourseId::new();
             let actor_id = ActorId::new();

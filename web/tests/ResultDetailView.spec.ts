@@ -33,7 +33,7 @@ function runProgress(phase: string, extra: Record<string, unknown> = {}, attempt
     data: {
       runId: 'run-x', projectId: 'project-1', revision: 2, state: 'running',
       current: [{ stepRunId: 'step-1', progress: { attempt: 1, phase, nextSteps: ['getOwnProjectEvaluationTaskProgress'], ...attempt } }],
-      history: [], page: 1, pageSize: 20, hasMore: false, ...extra,
+      history: [], nextCursor: null, ...extra,
     },
     error: undefined,
   } as never
@@ -306,7 +306,7 @@ describe('ResultDetailView', () => {
       const wrapper = await mountRun({ projectId: 'project-1', submissionId: 'submission-x' })
       await flushPromises()
       await vi.waitFor(() => expect(wrapper.find('[data-testid="evaluation-in-progress"]').exists()).toBe(true))
-      expect(getOwnProjectEvaluationTaskProgress).toHaveBeenCalledWith({ path: { projectId: 'project-1', runId: 'run-x' } })
+      expect(getOwnProjectEvaluationTaskProgress).toHaveBeenCalledWith({ path: { projectId: 'project-1', runId: 'run-x' }, query: { limit: 100 } })
       expect(wrapper.text()).toContain('评测执行中')
       expect(wrapper.text()).toContain('评测结束前不显示分数')
       expect(wrapper.get('[aria-current="step"]').attributes('data-stage')).toBe('running')

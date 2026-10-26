@@ -8562,20 +8562,21 @@
           },
           {
             "in": "query",
-            "name": "page",
+            "name": "cursor",
             "required": false,
             "schema": {
-              "default": 1,
-              "minimum": 1,
-              "type": "integer"
+              "maxLength": 1024,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_.~-]+$",
+              "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "pageSize",
+            "name": "limit",
             "required": false,
             "schema": {
-              "default": 25,
+              "default": 50,
               "maximum": 100,
               "minimum": 1,
               "type": "integer"
@@ -12538,20 +12539,21 @@
           },
           {
             "in": "query",
-            "name": "page",
+            "name": "cursor",
             "required": false,
             "schema": {
-              "default": 1,
-              "minimum": 1,
-              "type": "integer"
+              "maxLength": 1024,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_.~-]+$",
+              "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "pageSize",
+            "name": "limit",
             "required": false,
             "schema": {
-              "default": 25,
+              "default": 50,
               "maximum": 100,
               "minimum": 1,
               "type": "integer"
@@ -12662,20 +12664,21 @@
           },
           {
             "in": "query",
-            "name": "page",
+            "name": "cursor",
             "required": false,
             "schema": {
-              "default": 1,
-              "minimum": 1,
-              "type": "integer"
+              "maxLength": 1024,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_.~-]+$",
+              "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "pageSize",
+            "name": "limit",
             "required": false,
             "schema": {
-              "default": 25,
+              "default": 50,
               "maximum": 100,
               "minimum": 1,
               "type": "integer"

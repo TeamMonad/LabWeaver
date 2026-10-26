@@ -4492,6 +4492,7 @@ name = "persistence-sqlx"
 version = "0.1.0"
 dependencies = [
  "auth",
+ "base64 0.22.1",
  "contracts",
  "log",
  "schemars 1.2.1",
@@ -4501,6 +4502,7 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "sqlx",
+ "subtle",
  "testcontainers",
  "testcontainers-modules",
  "thiserror 2.0.18",

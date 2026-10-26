@@ -545,23 +545,33 @@
           },
           {
             "in": "query",
-            "name": "page",
+            "name": "cursor",
             "required": false,
             "schema": {
-              "default": 1,
+              "maxLength": 1024,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_.~-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
               "minimum": 1,
               "type": "integer"
             }
           },
           {
-            "in": "query",
-            "name": "pageSize",
-            "required": false,
+            "in": "header",
+            "name": "x-labweaver-actor-id",
+            "required": true,
             "schema": {
-              "default": 25,
-              "maximum": 100,
-              "minimum": 1,
-              "type": "integer"
+              "format": "uuid",
+              "type": "string"
             }
           }
         ],

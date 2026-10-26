@@ -1863,10 +1863,11 @@ async fn postgres_work_configuration_lifecycle_fences_generation_approval_and_ex
     let progress = store
         .task_progress(
             approved.id,
+            actor_id,
             None,
-            &contracts::http::PageQuery {
-                page: Some(1),
-                page_size: Some(1),
+            &contracts::http::TaskProgressQuery {
+                cursor: None,
+                limit: Some(1),
             },
         )
         .await?;
@@ -3018,12 +3019,12 @@ async fn assert_failed_authoring_retry_dispatch_executes(
         contracts::authoring::AgentAttemptState::Succeeded
     );
     assert_eq!(success_process.commands().len(), 1);
-    let progress_query = contracts::http::PageQuery {
-        page: Some(1),
-        page_size: Some(1),
+    let progress_query = contracts::http::TaskProgressQuery {
+        cursor: None,
+        limit: Some(1),
     };
     let progress = store
-        .task_progress(result.run.id, None, &progress_query)
+        .task_progress(result.run.id, command.actor_id, None, &progress_query)
         .await?;
     let current = progress
         .current
@@ -3043,18 +3044,7 @@ async fn assert_failed_authoring_retry_dispatch_executes(
         contracts::execution::TaskAttemptPhase::Failed
     );
     assert!(progress.history[0].progress.diagnostic_code.is_some());
-    let later = store
-        .task_progress(
-            result.run.id,
-            None,
-            &contracts::http::PageQuery {
-                page: Some(2),
-                page_size: Some(1),
-            },
-        )
-        .await?;
-    assert!(later.history.is_empty());
-    assert_eq!(later.current, progress.current);
+    assert!(progress.next_cursor.is_none());
     assert!(
         store
             .claim_dispatch(Duration::from_secs(1))

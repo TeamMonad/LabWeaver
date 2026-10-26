@@ -15,6 +15,8 @@ use testcontainers_modules::postgres::Postgres;
 
 mod support;
 use support::apply_agent_migrations;
+#[path = "support/attempt_pagination.rs"]
+mod attempt_pagination;
 
 #[tokio::test]
 async fn revisioned_mutation_rejects_cross_course_before_writing_state()
