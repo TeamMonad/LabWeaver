@@ -260,6 +260,10 @@ export type AgentRunDiagnosticsSchema = {
     items: Array<AgentRunDiagnostic>;
     projectId: AgentRunDiagnosticsSchemaProjectId;
     runId: AgentRunId;
+    /**
+     * True when older unexpired details were omitted from this bounded diagnostic view.
+     */
+    truncated: boolean;
 };
 
 /**
@@ -449,10 +453,8 @@ export type AgentRunHistoryPageSchemaUtcTimestamp = string;
  */
 export type AgentRunTaskProgressSchema = {
     current: Array<AgentTrackTaskProgress>;
-    hasMore: boolean;
     history: Array<AgentTrackTaskProgress>;
-    page: number;
-    pageSize: number;
+    nextCursor?: string | null;
     projectId: AgentRunTaskProgressSchemaProjectId;
     revision: AgentRunTaskProgressSchemaRevision;
     runId: AgentRunTaskProgressSchemaAgentRunId;
@@ -3905,10 +3907,8 @@ export type EvaluationReleaseSchemaUtcTimestamp = string;
  */
 export type EvaluationRunTaskProgressSchema = {
     current: Array<EvaluationStepTaskProgress>;
-    hasMore: boolean;
     history: Array<EvaluationStepTaskProgress>;
-    page: number;
-    pageSize: number;
+    nextCursor?: string | null;
     projectId: EvaluationRunTaskProgressSchemaProjectId;
     revision: EvaluationRunTaskProgressSchemaRevision;
     runId: EvaluationRunId;
@@ -19130,8 +19130,8 @@ export type GetProjectAgentTaskProgressData = {
         runId: string;
     };
     query?: {
-        page?: number;
-        pageSize?: number;
+        cursor?: string;
+        limit?: number;
     };
     url: '/api/v1/projects/{projectId}/agent-runs/{runId}/task-progress';
 };
@@ -21499,8 +21499,8 @@ export type GetOwnProjectEvaluationTaskForSubmissionData = {
         submissionId: string;
     };
     query?: {
-        page?: number;
-        pageSize?: number;
+        cursor?: string;
+        limit?: number;
     };
     url: '/api/v1/projects/{projectId}/me/evaluation-tasks/submissions/{submissionId}';
 };
@@ -21570,8 +21570,8 @@ export type GetOwnProjectEvaluationTaskProgressData = {
         runId: string;
     };
     query?: {
-        page?: number;
-        pageSize?: number;
+        cursor?: string;
+        limit?: number;
     };
     url: '/api/v1/projects/{projectId}/me/evaluation-tasks/{runId}';
 };

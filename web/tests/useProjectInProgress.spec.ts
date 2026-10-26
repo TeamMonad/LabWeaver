@@ -22,7 +22,7 @@ function openRun(projectId: string, id: string) {
 
 function progressFor(options: ProgressOptions, phase = 'executing') {
   return {
-    projectId: options.path.projectId, runId: options.path.runId, page: 1, pageSize: 1, hasMore: false, revision: 1, state: 'running',
+    projectId: options.path.projectId, runId: options.path.runId, nextCursor: null, revision: 1, state: 'running',
     current: [{ track: 'work_configuration', progress: { attempt: 1, phase, nextSteps: [] } }],
     history: [],
   }

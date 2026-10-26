@@ -34,7 +34,7 @@ function taskProgress(phase: string, extra: Record<string, unknown> = {}, attemp
     data: {
       runId: 'run-new', projectId: 'project-b', revision: 2, state: 'running',
       current: [{ stepRunId: 'step-1', progress: { attempt: 1, phase, nextSteps: ['getOwnProjectEvaluationTaskProgress'], ...attempt } }],
-      history: [], page: 1, pageSize: 20, hasMore: false, ...extra,
+      history: [], nextCursor: null, ...extra,
     },
     error: undefined,
   } as never
@@ -180,7 +180,7 @@ describe('ResultListView', () => {
       const card = () => wrapper.get('[data-submission-id="submission-new"]')
       expect(card().classes()).toContain('result-card--highlight')
       await vi.waitFor(() => expect(card().text()).toContain('等待资源审批'))
-      expect(getOwnProjectEvaluationTaskForSubmission).toHaveBeenCalledWith({ path: { projectId: 'project-b', submissionId: 'submission-new' } })
+      expect(getOwnProjectEvaluationTaskForSubmission).toHaveBeenCalledWith({ path: { projectId: 'project-b', submissionId: 'submission-new' }, query: { limit: 100 } })
       expect(card().text()).toContain('量子隧穿实验')
       expect(card().get('[data-stage="submitted"]').classes()).toContain('submission-progress__stage--done')
       expect(card().get('[data-stage="queued"]').classes()).toContain('submission-progress__stage--done')

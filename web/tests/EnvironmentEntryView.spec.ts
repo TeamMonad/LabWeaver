@@ -1640,7 +1640,7 @@ describe('EnvironmentEntryView', () => {
   function runProgress(state: string, phase: string, extra: Record<string, unknown> = {}) {
     return {
       data: {
-        runId: 'run-1', projectId: 'project-1', revision: 2, state, page: 1, pageSize: 20, hasMore: false, history: [],
+        runId: 'run-1', projectId: 'project-1', revision: 2, state, nextCursor: null, history: [],
         current: [{ stepRunId: 'step-1', progress: { attempt: 1, phase, nextSteps: [], ...extra } }],
       },
       error: undefined,
@@ -1677,6 +1677,7 @@ describe('EnvironmentEntryView', () => {
     await vi.waitFor(() => expect(tracking.text()).toContain('平台还没有为它创建评测'))
     expect(getOwnProjectEvaluationTaskForSubmission).toHaveBeenCalledWith({
       path: { projectId: 'project-1', submissionId: '00000000-0000-7000-8000-000000000001' },
+      query: { limit: 100 },
     })
     expect(tracking.get('[aria-current="step"]').attributes('data-stage')).toBe('queued')
     expect(tracking.get('a').attributes('href')).toBe('/student/results?projectId=project-1&submissionId=00000000-0000-7000-8000-000000000001')

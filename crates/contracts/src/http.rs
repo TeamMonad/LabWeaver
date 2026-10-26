@@ -1830,6 +1830,8 @@ pub struct AgentRunDiagnostics {
     pub project_id: ProjectId,
     pub course_id: Option<CourseId>,
     pub items: Vec<AgentRunDiagnostic>,
+    /// True when older unexpired details were omitted from this bounded diagnostic view.
+    pub truncated: bool,
 }
 
 /// Terminal or in-progress Agent result used to rebuild Control projections after replay.
@@ -2494,6 +2496,20 @@ pub struct ResourceListQuery {
 }
 
 impl ResourceListQuery {
+    pub fn validate(&self) -> Result<(), HttpContractError> {
+        validate_cursor_page(self.cursor.as_deref(), self.limit)
+    }
+}
+
+/// Stable task-attempt history continuation; current attempts remain on every page.
+#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskProgressQuery {
+    pub cursor: Option<String>,
+    pub limit: Option<u16>,
+}
+
+impl TaskProgressQuery {
     pub fn validate(&self) -> Result<(), HttpContractError> {
         validate_cursor_page(self.cursor.as_deref(), self.limit)
     }
@@ -5618,6 +5634,32 @@ mod tests {
         assert_eq!(query.normalized()?, (1, 25, 0));
         let query: PageQuery = serde_json::from_str(r#"{"page":2,"pageSize":10}"#)?;
         assert_eq!(query.normalized()?, (2, 10, 10));
+        Ok(())
+    }
+
+    #[test]
+    fn task_progress_query_rejects_offset_and_invalid_continuations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        TaskProgressQuery::default().validate()?;
+        for json in [r#"{"page":1}"#, r#"{"pageSize":20}"#, r#"{"offset":1}"#] {
+            assert!(serde_json::from_str::<TaskProgressQuery>(json).is_err());
+        }
+        for query in [
+            TaskProgressQuery {
+                cursor: Some(String::new()),
+                limit: None,
+            },
+            TaskProgressQuery {
+                cursor: None,
+                limit: Some(0),
+            },
+            TaskProgressQuery {
+                cursor: None,
+                limit: Some(101),
+            },
+        ] {
+            assert!(query.validate().is_err());
+        }
         Ok(())
     }
 

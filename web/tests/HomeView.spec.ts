@@ -53,7 +53,7 @@ const attempt = (phase: string, attemptNumber = 1) => ({ attempt: attemptNumber,
 /** A task-progress body for exactly the run that was asked for. */
 function progressFor(options: ProgressOptions, current: unknown[], history: unknown[] = []) {
   return {
-    projectId: options.path.projectId, runId: options.path.runId, page: 1, pageSize: 1, hasMore: false,
+    projectId: options.path.projectId, runId: options.path.runId, nextCursor: null,
     revision: 3, state: 'running', current, history,
   }
 }
@@ -179,7 +179,7 @@ describe('HomeView (current project in progress)', () => {
     const section = wrapper.get('[data-home-section="agent-runs"]')
 
     expect(getProjectAgentTaskProgress).toHaveBeenCalledTimes(3)
-    expect(getProjectAgentTaskProgress).toHaveBeenCalledWith({ path: { projectId: 'project-1', runId: 'run-review' }, query: { page: 1, pageSize: 1 } })
+    expect(getProjectAgentTaskProgress).toHaveBeenCalledWith({ path: { projectId: 'project-1', runId: 'run-review' }, query: { limit: 100 } })
     expect(vi.mocked(getProjectAgentTaskProgress).mock.calls.map(([options]) => options.path.runId)).not.toContain('run-done')
     expect(chipTexts(section.get('[data-run-id="run-review"]'))).toEqual(['环境 已完成 第 1 次尝试', '评测 等待人工审核 第 1 次尝试'])
     // Evaluation reports attempt 0 before its step is claimed; no attempt count is invented.
@@ -265,7 +265,7 @@ describe('HomeView (current project in progress)', () => {
     await flushPromises()
 
     expect(getProjectAgentTaskProgress).toHaveBeenCalledTimes(1)
-    expect(getProjectAgentTaskProgress).toHaveBeenCalledWith({ path: { projectId: 'project-1', runId: 'run-broken' }, query: { page: 1, pageSize: 1 } })
+    expect(getProjectAgentTaskProgress).toHaveBeenCalledWith({ path: { projectId: 'project-1', runId: 'run-broken' }, query: { limit: 100 } })
     expect(chipTexts(section.get('[data-run-id="run-broken"]'))).toEqual(['评测 等待人工审核 第 1 次尝试'])
     expect(wrapper.find('.diagnostic-banner').exists()).toBe(false)
     expect(listProjectAgentRuns).toHaveBeenCalledTimes(1)

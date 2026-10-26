@@ -75,11 +75,29 @@ struct NatsConfiguration {
     submission_quarantine_subject: String,
 }
 
+fn read_cursor_key(path: &Path) -> Result<Vec<u8>, EvaluationProcessError> {
+    if !path.is_absolute() {
+        return Err(EvaluationProcessError::ConfigurationInvalid);
+    }
+    let key = read_mounted_file(path, 16 * 1024)?;
+    if key.len() < 32 {
+        return Err(EvaluationProcessError::ConfigurationInvalid);
+    }
+    Ok(key)
+}
+
 #[allow(clippy::too_many_lines)]
 pub async fn run_evaluation_service() -> Result<(), EvaluationProcessError> {
     telemetry::init("evaluation-service")?;
     let configuration: EvaluationConfiguration = read_configuration()?;
     validate_configuration(&configuration)?;
+    let cursor_current =
+        read_cursor_key(&required_path("LABWEAVER_CURSOR_SIGNING_KEY_CURRENT_FILE")?)?;
+    let cursor_previous = match std::env::var("LABWEAVER_CURSOR_SIGNING_KEY_PREVIOUS_FILE") {
+        Ok(path) => Some(read_cursor_key(Path::new(&path))?),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(_) => return Err(EvaluationProcessError::ConfigurationInvalid),
+    };
     let tls = crate::http_transport::load_server_config(
         &configuration.api_tls.server_certificate_file,
         &configuration.api_tls.server_key_file,
@@ -157,7 +175,8 @@ pub async fn run_evaluation_service() -> Result<(), EvaluationProcessError> {
     let listener = tokio::net::TcpListener::bind(address).await?;
     let command_store = PgFreezeCommandStore::new(pool.clone());
     let freeze_store = PgFreezeStore::new(pool.clone());
-    let control_store = PgEvaluationControlStore::new(pool.clone());
+    let control_store = PgEvaluationControlStore::new(pool.clone())
+        .with_cursor_signing_keys(cursor_current, cursor_previous);
     let orphan_reconciler = OrphanReconciler::new(
         &configuration.execution,
         configuration
@@ -740,6 +759,19 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{EvaluationConfiguration, load_materializer_ca_bundle};
+
+    #[test]
+    fn cursor_secret_requires_readable_strong_key() -> Result<(), Box<dyn Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("cursor-key");
+        assert!(super::read_cursor_key(&path).is_err());
+        fs::write(&path, [7; 31])?;
+        assert!(super::read_cursor_key(&path).is_err());
+        fs::write(&path, [7; 32])?;
+        assert_eq!(super::read_cursor_key(&path)?, [7; 32]);
+        assert!(super::read_cursor_key(std::path::Path::new("relative")).is_err());
+        Ok(())
+    }
 
     fn store_config(ca_path: &std::path::Path) -> S3StoreConfig {
         S3StoreConfig {

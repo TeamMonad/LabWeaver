@@ -6,6 +6,7 @@ import {
 } from '@/generated/contracts'
 import { extractProblemDetails, makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
 import type { SubmissionTaskFact } from '@/utils/evaluationProgress'
+import { collectTaskProgress } from '@/utils/taskProgress'
 
 /**
  * Server reading of one evaluation task. A failed read keeps the last good
@@ -92,7 +93,7 @@ export function useSubmissionTasks(projectId: Ref<string | undefined>) {
   async function readOne(project: string, submissionId: string, current: number) {
     let response: ProgressResponse
     try {
-      response = await getOwnProjectEvaluationTaskForSubmission({ path: { projectId: project, submissionId } })
+      response = await collectTaskProgress((cursor) => getOwnProjectEvaluationTaskForSubmission({ path: { projectId: project, submissionId }, query: { limit: 100, ...(cursor ? { cursor } : {}) } }))
     } catch (error) {
       response = { error }
     }
@@ -136,7 +137,7 @@ export function useRunTask(projectId: Ref<string | undefined>, runId: Ref<string
   async function readOnce(project: string, run: string, current: number) {
     let response: ProgressResponse
     try {
-      response = await getOwnProjectEvaluationTaskProgress({ path: { projectId: project, runId: run } })
+      response = await collectTaskProgress((cursor) => getOwnProjectEvaluationTaskProgress({ path: { projectId: project, runId: run }, query: { limit: 100, ...(cursor ? { cursor } : {}) } }))
     } catch (error) {
       response = { error }
     }

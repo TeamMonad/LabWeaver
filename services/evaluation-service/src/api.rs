@@ -430,7 +430,7 @@ async fn get_student_submission_task_progress(
     State(state): State<EvaluationApiState>,
     principal: Option<Extension<auth::ServiceIdentity>>,
     Path((project_id, submission_id)): Path<(contracts::ProjectId, FrozenSubmissionId)>,
-    Query(query): Query<contracts::http::PageQuery>,
+    Query(query): Query<contracts::http::TaskProgressQuery>,
     headers: HeaderMap,
 ) -> Result<Response, EvaluationApiError> {
     require_access(principal)?;
@@ -470,7 +470,7 @@ async fn get_student_task_progress(
     State(state): State<EvaluationApiState>,
     principal: Option<Extension<auth::ServiceIdentity>>,
     Path((project_id, run_id)): Path<(contracts::ProjectId, EvaluationRunId)>,
-    Query(query): Query<contracts::http::PageQuery>,
+    Query(query): Query<contracts::http::TaskProgressQuery>,
     headers: HeaderMap,
 ) -> Result<Response, EvaluationApiError> {
     require_access(principal)?;

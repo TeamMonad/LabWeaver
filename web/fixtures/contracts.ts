@@ -651,7 +651,7 @@ export async function listProjectAgentRuns(_options?: FixtureOptions): Promise<F
 /** Home scene: the authoring run waits for review; Work configuration retried once and waits for resource approval. */
 export async function getProjectAgentTaskProgress(options?: FixtureOptions): Promise<FixtureResult<AgentRunTaskProgressSchema>> {
   const runId = options?.path?.runId
-  const base = { projectId: fixtureProjectId, page: 1, pageSize: 1, hasMore: false }
+  const base = { projectId: fixtureProjectId, nextCursor: null }
   if (activeScene.value.id === 'home-in-progress' && options?.path?.projectId === fixtureProjectId) {
     if (runId === 'agent-run-materials-04') {
       return fixtureResponse({ ...base, runId, revision: 9, state: 'awaiting_approval', history: [], current: [
@@ -660,7 +660,7 @@ export async function getProjectAgentTaskProgress(options?: FixtureOptions): Pro
       ] })
     }
     if (runId === 'agent-run-work-config-02') {
-      return fixtureResponse({ ...base, runId, revision: 4, state: 'running', hasMore: true, current: [
+      return fixtureResponse({ ...base, runId, revision: 4, state: 'running', current: [
         { track: 'work_configuration', progress: { attempt: 2, taskRunId: 'task-run-work-2', phase: 'waiting_resource_approval', resourceRequestId: 'resource-request-work-2', resourceState: 'reviewing', nextSteps: [] } },
       ], history: [
         { track: 'work_configuration', progress: { attempt: 1, executionGeneration: 1, taskRunId: 'task-run-work-1', phase: 'failed', diagnosticCode: 'LW_TASK_PLATFORM_FAILED', nextSteps: [] } },
@@ -1090,7 +1090,7 @@ function evaluationRunNotFound(runId: string): Promise<FixtureError> {
 /** A retried step waiting for resource approval; the first attempt failed on the platform side. */
 function runningEvaluationProgress(): EvaluationRunTaskProgressSchema {
   return {
-    runId: runningEvaluationRunId, projectId: fixtureProjectId, revision: 5, state: 'running', page: 1, pageSize: 20, hasMore: false,
+    runId: runningEvaluationRunId, projectId: fixtureProjectId, revision: 5, state: 'running', nextCursor: null,
     current: [
       { stepRunId: 'evaluation-step-gate', progress: { attempt: 1, executionGeneration: 1, taskRunId: 'task-run-gate-1', phase: 'succeeded', diagnosticCode: 'LW_OJ_ACCEPTED', nextSteps: [] } },
       {

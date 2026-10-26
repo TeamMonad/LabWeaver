@@ -60,6 +60,13 @@ key; verification accepts current and explicitly mounted previous keys. Once the
 removed, its cursors return HTTP 400 and clients must reload the first page. Key files never enter
 ConfigMaps, source control or logs. Do not override the mounted key path with an inline secret.
 
+Evaluation 任务历史采用同一密钥模式：为 `evaluation-service-secrets` 提供必需的
+`cursor-signing-key-current`（至少 32 个随机字节），以及轮换时可选的
+`cursor-signing-key-previous`；Helm 挂载、环境变量名和轮换步骤与 Control 相同，
+Bundle 的 workloadInputs 使用 `evaluation-service`。缺失、不可读或过短时，在连接外部服务前启动失败。
+所有 Evaluation 副本必须共享并在普通重启时保留密钥；本地 Kind 生成随机密钥。
+Agent 任务历史复用 Agent 已有的 current/previous Secret，不增加第二组密钥。
+
 For the bounded existing-namespace Container Work profile, see
 [Environment lifecycle](../../docs/contracts/environment-lifecycle-v1.md#既有-namespace-运行落点).
 `container-placement.json.example` contains synthetic identifiers. To include this profile in

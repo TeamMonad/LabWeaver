@@ -334,27 +334,30 @@ class DeploymentBundleTests(unittest.TestCase):
         self.assertFalse(missing.exists())
         self.clean_runtime()
 
-    def test_control_cursor_keys_are_required_and_optional_rotation_secret_is_rendered(self) -> None:
-        inputs = self.model["application"]["workloadInputs"]["control-service"]["env"]
-        self.assertEqual(inputs["LABWEAVER_CURSOR_SIGNING_KEY_CURRENT_FILE"], "/etc/labweaver/secrets/cursor-signing-key-current")
-        bindings = self.model["application"]["secrets"]["control-service-secrets"]
-        current = bindings.pop("cursor-signing-key-current")
-        self.save_model()
-        with self.assertRaisesRegex(bundle.BundleError, "LW_BUNDLE_MODEL_INVALID"):
-            bundle.load_bundle(self.root)
-        bindings["cursor-signing-key-current"] = current
-        previous = "secrets/runtime/control-service-secrets/cursor-signing-key-previous"
-        bindings["cursor-signing-key-previous"] = previous
-        write(self.root / previous, b"previous-signing-key-synthetic-123456")
-        inputs["LABWEAVER_CURSOR_SIGNING_KEY_PREVIOUS_FILE"] = "/etc/labweaver/secrets/cursor-signing-key-previous"
-        self.save_model()
-        output = self.private / "cursor-key-render"
-        bundle.derive_bundle(self.root, output)
-        objects = list(yaml.safe_load_all((output / "application.yaml").read_bytes()))
-        control = next(item for item in objects if item["kind"] == "Secret" and item["metadata"]["name"] == "control-service-secrets")
-        self.assertEqual(base64.b64decode(control["data"]["cursor-signing-key-previous"]), b"previous-signing-key-synthetic-123456")
-        values = yaml.safe_load((output / "helm-values.yaml").read_bytes())
-        self.assertEqual(values["workloadInputs"]["control-service"]["env"]["LABWEAVER_CURSOR_SIGNING_KEY_PREVIOUS_FILE"], inputs["LABWEAVER_CURSOR_SIGNING_KEY_PREVIOUS_FILE"])
+    def test_cursor_keys_are_required_and_optional_rotation_secret_is_rendered(self) -> None:
+        for service in ("control-service", "evaluation-service"):
+            with self.subTest(service=service):
+                inputs = self.model["application"]["workloadInputs"][service]["env"]
+                self.assertEqual(inputs["LABWEAVER_CURSOR_SIGNING_KEY_CURRENT_FILE"], "/etc/labweaver/secrets/cursor-signing-key-current")
+                name = f"{service}-secrets"
+                bindings = self.model["application"]["secrets"][name]
+                current = bindings.pop("cursor-signing-key-current")
+                self.save_model()
+                with self.assertRaisesRegex(bundle.BundleError, "LW_BUNDLE_MODEL_INVALID"):
+                    bundle.load_bundle(self.root)
+                bindings["cursor-signing-key-current"] = current
+                previous = f"secrets/runtime/{name}/cursor-signing-key-previous"
+                bindings["cursor-signing-key-previous"] = previous
+                write(self.root / previous, b"previous-signing-key-synthetic-123456")
+                inputs["LABWEAVER_CURSOR_SIGNING_KEY_PREVIOUS_FILE"] = "/etc/labweaver/secrets/cursor-signing-key-previous"
+                self.save_model()
+                output = self.private / f"cursor-key-render-{service}"
+                bundle.derive_bundle(self.root, output)
+                objects = list(yaml.safe_load_all((output / "application.yaml").read_bytes()))
+                secret = next(item for item in objects if item["kind"] == "Secret" and item["metadata"]["name"] == name)
+                self.assertEqual(base64.b64decode(secret["data"]["cursor-signing-key-previous"]), b"previous-signing-key-synthetic-123456")
+                values = yaml.safe_load((output / "helm-values.yaml").read_bytes())
+                self.assertEqual(values["workloadInputs"][service]["env"]["LABWEAVER_CURSOR_SIGNING_KEY_PREVIOUS_FILE"], inputs["LABWEAVER_CURSOR_SIGNING_KEY_PREVIOUS_FILE"])
 
     def test_workload_inputs_are_complete_single_source_with_existing_secret_objects(
         self,

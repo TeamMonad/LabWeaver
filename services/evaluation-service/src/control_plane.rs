@@ -365,6 +365,8 @@ fn valid_kubernetes_name(value: &str) -> bool {
 #[derive(Clone, Debug)]
 pub struct PgEvaluationControlStore {
     pool: PgPool,
+    pub(crate) cursor_signing_key_current: std::sync::Arc<Vec<u8>>,
+    pub(crate) cursor_signing_key_previous: Option<std::sync::Arc<Vec<u8>>>,
 }
 
 impl PgEvaluationControlStore {
@@ -372,8 +374,19 @@ impl PgEvaluationControlStore {
         &self.pool
     }
     #[must_use]
-    pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool) -> Self {
+        Self {
+            pool,
+            cursor_signing_key_current: std::sync::Arc::new(Vec::new()),
+            cursor_signing_key_previous: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_cursor_signing_keys(mut self, current: Vec<u8>, previous: Option<Vec<u8>>) -> Self {
+        self.cursor_signing_key_current = std::sync::Arc::new(current);
+        self.cursor_signing_key_previous = previous.map(std::sync::Arc::new);
+        self
     }
 
     pub async fn authority_now(&self) -> Result<UtcTimestamp, EvaluationControlStoreError> {

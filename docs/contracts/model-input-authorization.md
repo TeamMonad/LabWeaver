@@ -78,6 +78,8 @@ Claude 的 `PreToolUse`/`PostToolUse` hook 调用同一网关的 `/authorize` �
 
 `GET /api/v1/projects/{projectId}/agent-runs/{runId}/diagnostics`（SDK `getProjectAgentRunDiagnostics`）先检查当前 Project Browse，再核 Agent 权威 run 的 project/course 归属。接口返回 `AgentRunDiagnostics`，带 `Cache-Control: no-store`；它不是无需鉴别的导出链接。
 
+诊断是有界故障视图，不是完整历史导出：按 `created_at DESC, track, attempt DESC` 返回最近 100 条未到期记录，并显式返回 `truncated`。`true` 表示还有更早的未到期诊断未包含，不能把这 100 条当作完整记录；没有后续页。当前 Web 没有消费该 SDK 诊断列表的界面，因此不增加另一套诊断翻页 UI。通用任务进度历史使用独立的签名游标接口，不受该诊断上限影响。
+
 每条 `AgentRunDiagnostic` 包含中文原因与下一步、track/attempt、稳定诊断码、模型/运行绑定、精确材料和策略版本、已观测输入/输出摘要及用量、`createdAt`/`expiresAt`。准备失败时 `preparationFailed=true`，输入摘要和用量为 `null`；未发出的调用不会伪装成零费用或已执行。详细记录没有原始材料、provider 输出、stderr、cookie、令牌或私钥。运行错误的 Debug 输出也不包含 schema repair 正文。
 
 详细记录默认保留 30 天。读接口立即排除到期记录；Agent 每分钟有界物理删除到期 detail rows。清理不改写 Agent 用量/checkpoint、账本、成绩或业务候选。临时进程正常退出/取消时由 TempDir 回收，崩溃遗留的 `labweaver-claude-*` 目录只有具备本服务专用 marker 且超过 30 天才会删除。未标记目录、其他临时路径和用户持久盘不在扫描范围内。Sandbox 的结果、stderr 和临时材料沿现有 owner/fence 清理，仍用于结果验证的 writer 不作为“废弃日志”删除。

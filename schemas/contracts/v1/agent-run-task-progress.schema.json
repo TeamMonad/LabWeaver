@@ -175,25 +175,17 @@
       },
       "type": "array"
     },
-    "hasMore": {
-      "type": "boolean"
-    },
     "history": {
       "items": {
         "$ref": "#/$defs/AgentTrackTaskProgress"
       },
       "type": "array"
     },
-    "page": {
-      "format": "uint32",
-      "minimum": 0,
-      "type": "integer"
-    },
-    "pageSize": {
-      "format": "uint16",
-      "maximum": 65535,
-      "minimum": 0,
-      "type": "integer"
+    "nextCursor": {
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "projectId": {
       "$ref": "#/$defs/ProjectId"
@@ -214,10 +206,7 @@
     "revision",
     "state",
     "current",
-    "history",
-    "page",
-    "pageSize",
-    "hasMore"
+    "history"
   ],
   "title": "AgentRunTaskProgress",
   "type": "object"

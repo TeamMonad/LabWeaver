@@ -3609,7 +3609,7 @@ def make_app_input(
                                   "openssh-gateway":"access-service"}.get(service, service)
                 values[key]=clients[client_service]
             elif key in ("cursor-signing-key-current", "cursor-signing-key-previous"):
-                values[key] = (secrets.token_bytes(32) if service == "control-service"
+                values[key] = (secrets.token_bytes(32) if service in ("control-service", "evaluation-service")
                                else hashlib.sha256(f"labweaver:{service}:{key}".encode()).digest())
             elif key=="oidc-client-secret": values[key]=clients["web-service"]
             elif key=="resource-delegation-key": values[key]=base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()

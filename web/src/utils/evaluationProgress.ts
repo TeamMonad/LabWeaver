@@ -96,7 +96,7 @@ export function readEvaluationTask(progress: EvaluationRunTaskProgress): Evaluat
     diagnosticCode: null,
     step: null,
     attempt: null,
-    earlierAttempts: { count: progress.history.length, more: progress.hasMore },
+    earlierAttempts: { count: progress.history.length, more: progress.nextCursor !== null },
     approvalNotNeeded: false,
     terminal: false,
   } satisfies Partial<EvaluationTaskReading>

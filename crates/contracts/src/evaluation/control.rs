@@ -304,9 +304,7 @@ pub struct EvaluationRunTaskProgress {
     pub state: EvaluationRunState,
     pub current: Vec<EvaluationStepTaskProgress>,
     pub history: Vec<EvaluationStepTaskProgress>,
-    pub page: u32,
-    pub page_size: u16,
-    pub has_more: bool,
+    pub next_cursor: Option<String>,
 }
 
 /// A step identity and the progress of its real attempt, without private step contents.
