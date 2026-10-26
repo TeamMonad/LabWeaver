@@ -237,6 +237,10 @@ fn browser_routes() -> Router<Arc<AppState>> {
         )
         .merge(control_browser_router())
         .route(
+            "/api/v1/environments/{environment_id}/template-upgrade",
+            post(proxy::forward_environment),
+        )
+        .route(
             "/api/v1/environments/{environment_id}",
             axum::routing::any(proxy::forward_environment),
         )
@@ -303,7 +307,7 @@ fn resource_browser_router() -> Router<Arc<AppState>> {
         )
         .route(
             "/api/v1/resource-requests/{request_id}/{action}",
-            post(proxy::forward_resource),
+            get(proxy::forward_resource).post(proxy::forward_resource),
         )
         .route("/api/v1/resource-leases", get(proxy::forward_resource))
         .route(
@@ -533,6 +537,10 @@ fn project_browser_router() -> Router<Arc<AppState>> {
             get(proxy::forward_rubric_rules).post(proxy::forward_rubric_rules),
         )
         .route(
+            "/api/v1/projects/{project_id}/agent-capability",
+            get(proxy::forward_control),
+        )
+        .route(
             "/api/v1/projects/{project_id}/llm-egress-policy-options",
             axum::routing::any(proxy::forward_control),
         )
@@ -551,6 +559,10 @@ fn project_browser_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/projects/{project_id}/agent-runs/{run_id}",
             axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/agent-runs/{run_id}/diagnostics",
+            get(proxy::forward_control),
         )
         .route(
             "/api/v1/projects/{project_id}/agent-runs/{run_id}/task-progress",
@@ -603,6 +615,10 @@ fn project_browser_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/projects/{project_id}/authoring-approvals/{approval_id}",
             axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/template-images",
+            get(proxy::forward_project_template_images),
         )
         .route(
             "/api/v1/projects/{project_id}/environment-template-releases",

@@ -77,6 +77,54 @@ fn browser_router_on(state: Arc<AppState>, address: std::net::SocketAddr) -> Rou
     browser_router(Arc::new(state))
 }
 
+const ROUTE_MATCHED_HEADER: &str = "x-labweaver-test-route-matched";
+
+async fn mark_route_match(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let matched = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .is_some();
+    let mut response = next.run(request).await;
+    if matched {
+        response.headers_mut().insert(
+            ROUTE_MATCHED_HEADER,
+            axum::http::HeaderValue::from_static("true"),
+        );
+    }
+    response
+}
+
+fn contract_route_path(template: &str) -> String {
+    const VALUE: &str = "00000000-0000-7000-8000-000000000001";
+    let mut path = String::with_capacity(template.len());
+    let mut remainder = template;
+    while let Some(start) = remainder.find('{') {
+        path.push_str(&remainder[..start]);
+        let placeholder = &remainder[start..];
+        let Some(end) = placeholder.find('}') else {
+            path.push_str(placeholder);
+            return path;
+        };
+        path.push_str(VALUE);
+        remainder = &placeholder[end + 1..];
+    }
+    path.push_str(remainder);
+    path
+}
+
+fn contract_reqwest_method(method: contracts::http::Method) -> reqwest::Method {
+    match method {
+        contracts::http::Method::Get => reqwest::Method::GET,
+        contracts::http::Method::Post => reqwest::Method::POST,
+        contracts::http::Method::Put => reqwest::Method::PUT,
+        contracts::http::Method::Patch => reqwest::Method::PATCH,
+        contracts::http::Method::Delete => reqwest::Method::DELETE,
+    }
+}
+
 async fn assert_problem_response(
     response: reqwest::Response,
     status: StatusCode,
@@ -691,6 +739,10 @@ async fn state_with_environment(
             post(control),
         )
         .route("/api/v1/projects/{project_id}", any(control))
+        .route(
+            "/api/v1/projects/{project_id}/template-images",
+            get(control),
+        )
         .route("/api/v1/projects/{project_id}/members", any(control))
         .route(
             "/api/v1/projects/{project_id}/llm-egress-policies/active/rubric-rules",
@@ -1991,6 +2043,143 @@ async fn platform_admin_project_reads_reach_their_distinct_upstreams_without_mem
     assert!(!requests.iter().any(|request| {
         request["upstream"] == "environment" && request["actor"] == student.to_string()
     }));
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one live Access router scenario checks every public contract route and template-image membership enforcement"
+)]
+async fn public_contract_routes_are_registered_and_template_images_require_membership()
+-> Result<(), Box<dyn Error>> {
+    let container = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            container.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_access_migrations(&pool).await?;
+
+    let mut tasks = Tasks(Vec::new());
+    let member = Uuid::now_v7();
+    let non_member = Uuid::now_v7();
+    let (state, requests) = Box::pin(state(pool.clone(), member, &mut tasks)).await?;
+    let member_session = session(
+        &pool,
+        &state.key_ring,
+        member,
+        contracts::PlatformRole::Student,
+    )
+    .await?;
+    let non_member_session = session(
+        &pool,
+        &state.key_ring,
+        non_member,
+        contracts::PlatformRole::Student,
+    )
+    .await?;
+    let project_id = contracts::ProjectId::new();
+    sqlx::query(
+        "INSERT INTO control.project_memberships \
+         (course_id,project_id,actor_id,role,object_role,state,revision) \
+         VALUES (NULL,$1,$2,'student','viewer','active',1)",
+    )
+    .bind(project_id.as_uuid())
+    .bind(member)
+    .execute(&pool)
+    .await?;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let router = browser_router_on(Arc::clone(&state), listener.local_addr()?)
+        .layer(axum::middleware::from_fn(mark_route_match));
+    tasks.0.push(tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    }));
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let cookie_name = &state.deployment.browser.session_cookie_name;
+    let endpoint = format!("{base}/api/v1/projects/{project_id}/template-images");
+
+    let denied = client
+        .get(&endpoint)
+        .header(
+            header::COOKIE,
+            format!("{cookie_name}={}", non_member_session.session_id),
+        )
+        .send()
+        .await?;
+    let denied_problem =
+        assert_problem_response(denied, StatusCode::FORBIDDEN, "LW_AUTH_SCOPE_DENIED").await?;
+
+    let permitted = client
+        .get(&endpoint)
+        .header(
+            header::COOKIE,
+            format!("{cookie_name}={}", member_session.session_id),
+        )
+        .send()
+        .await?;
+    assert_eq!(permitted.status(), StatusCode::OK);
+    assert_eq!(
+        permitted
+            .headers()
+            .get(ROUTE_MATCHED_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some("true"),
+        "GET template-images must match an Access route"
+    );
+    let _ = permitted.bytes().await?;
+
+    let forwarded = requests.lock().await.clone();
+    assert_eq!(
+        forwarded.len(),
+        1,
+        "only the authorized request may forward"
+    );
+    assert_eq!(forwarded[0]["upstream"], "control");
+    assert_eq!(
+        forwarded[0]["path"],
+        format!("/api/v1/projects/{project_id}/template-images")
+    );
+    assert_eq!(forwarded[0]["method"], "GET");
+    assert_eq!(forwarded[0]["actor"], member.to_string());
+    assert!(!denied_problem.retryable);
+
+    let mut missing_routes = Vec::new();
+    for operation in contracts::http::OPERATIONS.iter().filter(|operation| {
+        operation.surface == contracts::http::ApiSurface::Public
+            && matches!(
+                operation.security,
+                contracts::http::Security::Oidc | contracts::http::Security::BffSession
+            )
+    }) {
+        let path = contract_route_path(operation.path);
+        let method = contract_reqwest_method(operation.method);
+        let response = client
+            .request(method.clone(), format!("{base}{path}"))
+            .send()
+            .await?;
+        let route_matched = response
+            .headers()
+            .get(ROUTE_MATCHED_HEADER)
+            .is_some_and(|value| value == "true");
+        let status = response.status();
+        let _ = response.bytes().await?;
+        if !route_matched || status == StatusCode::METHOD_NOT_ALLOWED {
+            missing_routes.push(format!(
+                "{} {} {} -> {status} (route_matched={route_matched})",
+                operation.operation_id, method, path
+            ));
+        }
+    }
+    assert!(
+        missing_routes.is_empty(),
+        "public contract operations must have a same-method Access route:\n{}",
+        missing_routes.join("\n")
+    );
     Ok(())
 }
 
