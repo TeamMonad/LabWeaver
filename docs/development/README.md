@@ -57,6 +57,12 @@ pnpm --dir web test
 
 按改动替换 Rust 包名。修改公共契约后重新生成 Schema、OpenAPI 和 Web SDK，不手改生成文件。契约、权限、持久化与计量变更扩大本地集成检查；遇到构建锁等待，不启动另一套竞争构建。
 
+### CLI 可执行测试夹具
+
+`xtask/tests/fixtures/deploy-tools/` 保存部署工具身份测试使用的固定脚本；Git 必须保留它们的可执行位。测试只读取和执行这些文件，不在测试进程中创建、覆盖或修改脚本。更新期望版本时同步修改夹具输出。
+
+不要在并行测试中先写临时可执行文件再启动它。其他测试的 fork 子进程可能继承仍可写的文件描述符；即使写入线程已同步并关闭自己的描述符，子进程关闭继承的描述符之前，执行该文件仍可能得到 Linux `ETXTBSY`（`Text file busy`）。预先检出的只读夹具消除这条写入窗口，不需要生产命令重试、测试串行化或要求所有进程启动路径共同持锁。
+
 ### CI 影响范围与分支
 
 Rust 工作流先运行 `ci-scope` 及其真实 Git 差异测试。仅根 README、`docs/` 下 Markdown，以及 `web/` 下已知的手写源文件、配置和静态资产，可以不运行 Rust 全仓检查。此时 `rust-gate` 和 `postgres-persistence-gate` 标记为 skipped，但不代表执行通过；`rust-merge-gate` 会在 `if: always()` 下汇总 scope 与两个 Rust job，作为合并依据。scope 失败、必需 Rust job 失败或取消都会使聚合 job 失败，只有 scope 成功且明确无需 Rust 时才成功。
