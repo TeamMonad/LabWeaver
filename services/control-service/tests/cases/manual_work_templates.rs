@@ -591,7 +591,7 @@ async fn manual_options_require_publication_authority_and_reject_forged_choices(
     colliding.providers[1].storage_classes[0].seeded_disks.push(
         contracts::manual_templates::ManualTemplateSeededDiskOption {
             binding: fixture.image.binding.clone(),
-            disk_sha256: "a".repeat(64),
+            disk_sha256: "b".repeat(64),
             capacity_bytes: fixture
                 .image
                 .capacity_bytes
@@ -604,23 +604,48 @@ async fn manual_options_require_publication_authority_and_reject_forged_choices(
             storage_class_binding: "vm-rwo-primary-v1".to_owned(),
         },
     );
-    assert!(matches!(
-        fixture
+    let seed = &colliding.providers[1].storage_classes[0].seeded_disks[0];
+    let mut conflicts = Vec::new();
+    let mut disk_hash = seed.clone();
+    disk_hash.disk_sha256 = "a".repeat(64);
+    conflicts.push(("disk_sha256", disk_hash));
+    let mut source = seed.clone();
+    source.source_registry_digest = format!(
+        "docker://harbor.internal/labweaver-system/manual@sha256:{}",
+        "c".repeat(64)
+    );
+    conflicts.push(("source_digest", source));
+    let mut capacity = seed.clone();
+    capacity.capacity_bytes += 1;
+    conflicts.push(("capacity", capacity));
+    let mut format = seed.clone();
+    format.format = contracts::supply_chain::VirtualMachineDiskFormat::Raw;
+    conflicts.push(("format", format));
+    let mut storage = seed.clone();
+    storage.storage_class_binding = "other-storage".to_owned();
+    conflicts.push(("storage_binding", storage));
+    for (field, conflict) in conflicts {
+        let mut options = colliding.clone();
+        options.providers[1].storage_classes[0].seeded_disks[0] = conflict;
+        let result = fixture
             .service
             .create_project_work_release(
                 fixture.project.id,
                 &fixture.request,
                 owner,
                 false,
-                &IdempotencyKey::parse("seeded-image-conflict")?,
+                &IdempotencyKey::parse(&format!("seeded-conflict-{field}"))?,
                 fixture.now,
                 "seeded-image-conflict",
                 std::slice::from_ref(&fixture.image),
-                &colliding,
+                &options,
             )
-            .await,
-        Err(ControlError::ManualTemplateOptionInvalid)
-    ));
+            .await;
+        assert!(
+            matches!(result, Err(ControlError::ManualTemplateOptionInvalid)),
+            "independent seeded identity conflict: {field}; got {result:?}"
+        );
+    }
     for (index, pointer, value) in [
         (
             0,
@@ -664,7 +689,6 @@ async fn manual_options_require_publication_authority_and_reject_forged_choices(
     let counts: (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM control.environment_template_releases),(SELECT count(*) FROM control.outbox_events WHERE subject=$1)")
         .bind(contracts::events::subjects::ENVIRONMENT_TEMPLATE_RELEASE_PUBLISHED).fetch_one(&pool).await?;
     assert_eq!(counts, (0, 0));
-    colliding.providers[1].storage_classes[0].seeded_disks[0].disk_sha256 = "b".repeat(64);
     let release = fixture
         .service
         .create_project_work_release(
