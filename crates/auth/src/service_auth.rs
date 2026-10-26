@@ -365,15 +365,33 @@ impl ServiceTokenClient {
             );
             ServiceTokenClientError::TokenEndpointInvalid
         })?;
+        let token_http = TokenHttp(&self.http);
         let response: CoreTokenResponse =
-            request.request_async(&self.http).await.map_err(|_| {
-                trace_service_auth_failure(
-                    "service_token_client.access_token",
-                    "token_exchange",
-                    "LW_AUTH_SERVICE_TOKEN_EXCHANGE_FAILED",
-                    true,
+            request.request_async(&token_http).await.map_err(|error| {
+                let failure = match error {
+                    openidconnect::RequestTokenError::Request(failure) => failure,
+                    openidconnect::RequestTokenError::Parse(..) => ServiceTokenExchangeFailure {
+                        kind: ServiceTokenFailureKind::Decode,
+                        http_status: Some(200),
+                    },
+                    _ => ServiceTokenExchangeFailure {
+                        kind: ServiceTokenFailureKind::Decode,
+                        http_status: None,
+                    },
+                };
+                tracing::warn!(
+                    event = "auth.service_token.failed",
+                    component = "service-auth",
+                    operation = "service_token_client.access_token",
+                    outcome = "failed",
+                    failure_stage = "token_exchange",
+                    diagnostic_code = "LW_AUTH_SERVICE_TOKEN_EXCHANGE_FAILED",
+                    error_kind = failure.kind.as_str(),
+                    http_status = failure.http_status,
+                    retryable = failure.kind.retryable(),
+                    safe_detail = "redacted",
                 );
-                ServiceTokenClientError::TokenExchange
+                ServiceTokenClientError::TokenExchange(failure)
             })?;
         if response.token_type() != &CoreTokenType::Bearer {
             trace_service_auth_failure(
@@ -411,7 +429,12 @@ impl ServiceTokenClient {
                 "LW_AUTH_SERVICE_TOKEN_EXCHANGE_FAILED",
                 false,
             );
-            return Err(ServiceTokenClientError::TokenExchange);
+            return Err(ServiceTokenClientError::TokenExchange(
+                ServiceTokenExchangeFailure {
+                    kind: ServiceTokenFailureKind::Decode,
+                    http_status: Some(200),
+                },
+            ));
         }
         if !token_has_audience(&value, audience) {
             trace_service_auth_failure(
@@ -795,6 +818,141 @@ pub enum ServiceAuthConfigError {
     InvalidRefreshSettings,
 }
 
+/// Closed failure classes for a client-credentials HTTP exchange.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServiceTokenFailureKind {
+    /// The upstream rejected the request, including invalid client credentials.
+    Rejected,
+    /// TLS authentication failed; retries cannot repair the trust configuration.
+    Tls,
+    /// The configured HTTP deadline elapsed.
+    Timeout,
+    /// A network connection could not be established.
+    Connect,
+    /// The upstream returned a server error.
+    Upstream5xx,
+    /// The upstream response or local request could not be decoded or constructed.
+    Decode,
+}
+
+impl ServiceTokenFailureKind {
+    /// A stable log value, never derived from upstream content.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Rejected => "rejected",
+            Self::Tls => "tls",
+            Self::Timeout => "timeout",
+            Self::Connect => "connect",
+            Self::Upstream5xx => "upstream_5xx",
+            Self::Decode => "decode",
+        }
+    }
+
+    /// Whether the same exchange may succeed without correcting its inputs.
+    #[must_use]
+    pub const fn retryable(self) -> bool {
+        matches!(self, Self::Timeout | Self::Connect | Self::Upstream5xx)
+    }
+}
+
+/// Only safe metadata survives the exchange boundary; no raw HTTP error or body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("LW_AUTH_SERVICE_TOKEN_EXCHANGE_FAILED")]
+pub struct ServiceTokenExchangeFailure {
+    /// Closed error classification.
+    pub kind: ServiceTokenFailureKind,
+    /// Actual upstream HTTP status, absent if no response was received.
+    pub http_status: Option<u16>,
+}
+
+impl ServiceTokenExchangeFailure {
+    fn transport(error: &reqwest::Error, http_status: Option<u16>) -> Self {
+        let mut source = std::error::Error::source(error);
+        let mut tls = false;
+        while let Some(cause) = source {
+            tls |= cause.is::<rustls::Error>();
+            // io::Error::source can skip the wrapped root error; inspect its
+            // typed payload rather than matching certificate/error text.
+            source = cause
+                .downcast_ref::<std::io::Error>()
+                .and_then(std::io::Error::get_ref)
+                .map(|inner| inner as &(dyn std::error::Error + 'static))
+                .or_else(|| cause.source());
+        }
+        let kind = if error.is_timeout() {
+            ServiceTokenFailureKind::Timeout
+        } else if tls {
+            ServiceTokenFailureKind::Tls
+        } else if error.is_connect() {
+            ServiceTokenFailureKind::Connect
+        } else {
+            ServiceTokenFailureKind::Decode
+        };
+        Self { kind, http_status }
+    }
+}
+
+struct TokenHttp<'a>(&'a reqwest::Client);
+
+impl<'c> openidconnect::AsyncHttpClient<'c> for TokenHttp<'_> {
+    type Error = ServiceTokenExchangeFailure;
+    type Future = std::pin::Pin<
+        Box<
+            dyn Future<Output = Result<openidconnect::HttpResponse, Self::Error>>
+                + Send
+                + Sync
+                + 'c,
+        >,
+    >;
+
+    fn call(&'c self, request: openidconnect::HttpRequest) -> Self::Future {
+        Box::pin(token_http_request(self.0, request))
+    }
+}
+
+async fn token_http_request(
+    http: &reqwest::Client,
+    request: openidconnect::HttpRequest,
+) -> Result<openidconnect::HttpResponse, ServiceTokenExchangeFailure> {
+    let decode = ServiceTokenExchangeFailure {
+        kind: ServiceTokenFailureKind::Decode,
+        http_status: None,
+    };
+    let request = reqwest::Request::try_from(request).map_err(|_| decode)?;
+    let response = http
+        .execute(request)
+        .await
+        .map_err(|error| ServiceTokenExchangeFailure::transport(&error, None))?;
+    let status = response.status();
+    if status != reqwest::StatusCode::OK {
+        return Err(ServiceTokenExchangeFailure {
+            kind: if status.is_server_error() {
+                ServiceTokenFailureKind::Upstream5xx
+            } else {
+                ServiceTokenFailureKind::Rejected
+            },
+            http_status: Some(status.as_u16()),
+        });
+    }
+    let mut builder = http::Response::builder()
+        .status(status)
+        .version(response.version());
+    for (name, value) in response.headers() {
+        builder = builder.header(name, value);
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| ServiceTokenExchangeFailure::transport(&error, Some(status.as_u16())))?;
+    builder
+        .body(bytes.to_vec())
+        .map_err(|_| ServiceTokenExchangeFailure {
+            kind: ServiceTokenFailureKind::Decode,
+            http_status: Some(status.as_u16()),
+        })
+}
+
 /// Errors raised while obtaining or attaching a service token.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ServiceTokenClientError {
@@ -821,7 +979,7 @@ pub enum ServiceTokenClientError {
     TokenEndpointInvalid,
     /// The authorization server rejected the client-credentials exchange.
     #[error("LW_AUTH_SERVICE_TOKEN_EXCHANGE_FAILED")]
-    TokenExchange,
+    TokenExchange(ServiceTokenExchangeFailure),
     /// The authorization server returned a non-bearer token.
     #[error("LW_AUTH_SERVICE_TOKEN_TYPE_REJECTED")]
     TokenTypeRejected,
