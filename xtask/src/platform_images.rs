@@ -1260,10 +1260,9 @@ fn package_download_command(url: &str, path: &Path, bypass_proxy: bool) -> Comma
         "1024",
         "--speed-time",
         "60",
+        // Allow the ~83 MB archive to finish even on a ~29 KiB/s link.
         "--max-time",
-        "600",
-        "--retry-max-time",
-        "900",
+        "3600",
     ]);
     if bypass_proxy {
         command.args(["--noproxy", "*"]);
@@ -2479,7 +2478,15 @@ mod tests {
     #[test]
     fn failed_claude_download_never_publishes_a_package() -> Result<(), String> {
         for existing in [false, true] {
-            for transfer_failed in [false, true] {
+            for transfer_failure in [
+                None,
+                Some(
+                    "curl: (28) Operation too slow. Less than 1024 bytes/sec transferred the last 60 seconds",
+                ),
+                Some(
+                    "curl: (28) Operation timed out after 3600000 milliseconds with partial bytes received",
+                ),
+            ] {
                 let root = tempfile::tempdir().map_err(|error| error.to_string())?;
                 let dir = root.path().join("containers");
                 fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
@@ -2496,18 +2503,25 @@ mod tests {
                         assert!(!final_path.exists());
                         fs::write(path, b"wrong\n")
                             .map_err(|error| io_error("write partial test package", error))?;
-                        if transfer_failed {
-                            Err(io_error(
-                                "test transfer failed",
-                                std::io::Error::other("stalled"),
-                            ))
+                        if let Some(detail) = transfer_failure {
+                            Err(AppError::ExternalCommand {
+                                role: "download test package",
+                                code: Some(28),
+                                detail: Some(detail.to_owned()),
+                            })
                         } else {
                             Ok(())
                         }
                     })
                     .expect_err("failed transfer or checksum must not publish a package");
                 assert_eq!(downloads, 1, "prepare must not loop on a bad download");
-                if !transfer_failed {
+                if let Some(detail) = transfer_failure {
+                    assert!(error.to_string().contains(detail));
+                    assert!(matches!(
+                        &error,
+                        AppError::ExternalCommand { code: Some(28), .. }
+                    ));
+                } else {
                     assert!(error.to_string().contains("LW_PACKAGE_INPUT_INVALID"));
                 }
                 assert!(!final_path.exists());
@@ -2521,7 +2535,15 @@ mod tests {
     #[test]
     fn failed_offline_download_never_publishes_a_package() -> Result<(), String> {
         for existing in [false, true] {
-            for transfer_failed in [false, true] {
+            for transfer_failure in [
+                None,
+                Some(
+                    "curl: (28) Operation too slow. Less than 1024 bytes/sec transferred the last 60 seconds",
+                ),
+                Some(
+                    "curl: (28) Operation timed out after 3600000 milliseconds with partial bytes received",
+                ),
+            ] {
                 let root = tempfile::tempdir().map_err(|error| error.to_string())?;
                 let dir = root.path().join("containers/debian-bookworm-pkgs");
                 fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
@@ -2545,11 +2567,12 @@ mod tests {
                         assert!(!final_path.exists());
                         fs::write(path, b"wrong\n")
                             .map_err(|error| io_error("write partial test package", error))?;
-                        if transfer_failed {
-                            Err(io_error(
-                                "test transfer failed",
-                                std::io::Error::other("stalled"),
-                            ))
+                        if let Some(detail) = transfer_failure {
+                            Err(AppError::ExternalCommand {
+                                role: "download test package",
+                                code: Some(28),
+                                detail: Some(detail.to_owned()),
+                            })
                         } else {
                             Ok(())
                         }
@@ -2557,7 +2580,13 @@ mod tests {
                 )
                 .expect_err("failed transfer or checksum must not publish a package");
                 assert_eq!(downloads, 1, "prepare must not loop on a bad download");
-                if !transfer_failed {
+                if let Some(detail) = transfer_failure {
+                    assert!(error.to_string().contains(detail));
+                    assert!(matches!(
+                        &error,
+                        AppError::ExternalCommand { code: Some(28), .. }
+                    ));
+                } else {
                     assert!(error.to_string().contains("LW_PACKAGE_INPUT_INVALID"));
                 }
                 assert!(!final_path.exists());
@@ -2569,7 +2598,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn package_downloads_bound_connections_stalls_and_retries() {
+    fn package_downloads_bound_connections_stalls_and_slow_progress() {
         for bypass_proxy in [false, true] {
             let path = Path::new("package.tgz.part");
             let command =
@@ -2584,9 +2613,8 @@ mod tests {
                 ("--connect-timeout", "30"),
                 ("--speed-limit", "1024"),
                 ("--speed-time", "60"),
-                ("--max-time", "600"),
+                ("--max-time", "3600"),
                 ("--retry", "3"),
-                ("--retry-max-time", "900"),
                 ("--output", "package.tgz.part"),
             ] {
                 assert!(

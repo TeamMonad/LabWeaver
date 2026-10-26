@@ -12,7 +12,7 @@ cargo xtask package-prepare
 
 该命令生成与当前 `HEAD` 对应的 vendored Web dist、Claude Code 包和 Alpine/Debian 离线包闭包。`up` 不会下载或生成这些输入；它在第一次 Docker image build 前运行无网络、无写入的 `cargo xtask package-check` 预检。预检失败会停止启动并说明缺失或过期输入，请按上述命令在干净工作树中重新准备。`package-check` 还会拒绝未提交、未跟踪或被忽略的 Web 构建输入（包括 Vite 读取的 `web/.env*` 文件）；请先提交、移除或暂存这些修改，再运行 `cargo xtask package-prepare`。Web dist 的校验哈希覆盖 `HEAD` 中的 `web/` 树和 lockfile，不会哈希工作树来绕过这个检查；提交或切换 HEAD 后需重新运行准备命令。
 
-`package-prepare` 会校验已有下载；Claude Code 或离线包内容损坏时会删除该文件并重新下载一次。下载只写入同目录的 `.part` 文件，通过锁定的 SHA-512（Claude Code）或 SHA-256（离线包）校验后才原子重命名到最终路径；被中断的 `.part` 文件会在下次下载时覆盖，无需手工删除损坏缓存。每次连接最多等待 30 秒，连续 60 秒低于 1 KiB/s 视为停滞，每次传输最多 600 秒；保留 curl 的 3 次重试，并在 900 秒重试窗口结束后不再发起新尝试（已开始的尝试仍受 600 秒上限约束）。下载或校验失败会终止准备，不发布最终文件。`package-check` 仍只读、无网络，遇到缺失或损坏文件时直接失败，不会修复输入。
+`package-prepare` 会校验已有下载；Claude Code 或离线包内容损坏时会删除该文件并重新下载一次。下载只写入同目录的 `.part` 文件，通过锁定的 SHA-512（Claude Code）或 SHA-256（离线包）校验后才原子重命名到最终路径；被中断的 `.part` 文件会在下次下载时覆盖，无需手工删除损坏缓存。每次连接最多等待 30 秒，连续 60 秒低于 1 KiB/s 视为停滞，每次传输最多 3600 秒，并保留 curl 的 3 次重试。3600 秒允许约 83 MB 的 Claude Code 包在约 29 KiB/s 的慢连接上完成，同时为持续缓慢推进的传输保留有限上限。下载或校验失败会终止准备，不发布最终文件。`package-check` 仍只读、无网络，遇到缺失或损坏文件时直接失败，不会修复输入。
 
  需要可用的 Linux Docker 引擎、Docker Buildx、Kind、kubectl、Helm、Python、OpenSSL 和 OpenSSH 的 `ssh-keygen`。首次运行会拉取基础镜像并编译 Rust 与 Web 镜像，应预留足够的磁盘、内存和构建时间。固定版本的基础镜像在服务启动前由各 Kind 节点按 digest 预拉取，下载不会占用服务启动的等待时间。已有应用构建缓存会被复用。
 
