@@ -68,7 +68,13 @@ impl PostgresAgentRunStore {
         let limit = query.limit.unwrap_or(50);
         for _ in 0..3 {
             let run = self.load(run_id).await?;
-            let scope = ("agent-task-progress", actor_id, run.project_id, run_id);
+            let scope = (
+                "agent-task-progress",
+                actor_id,
+                run.project_id,
+                run.course_id,
+                run_id,
+            );
             let after: Option<HistoryPosition> = query
                 .cursor
                 .as_deref()

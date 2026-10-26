@@ -2140,6 +2140,12 @@ class LocalDevBundleTests(unittest.TestCase):
             )
 
             platform_documents = list(yaml.safe_load_all(bundle.read_text(encoding="utf-8")))
+            # The local profile has only a current key; it does not simulate rotation
+            # by emitting a previous key unrelated to the last rendered current key.
+            for rendered_bundle in (bundle, resource_bundle):
+                for document in yaml.safe_load_all(rendered_bundle.read_text(encoding="utf-8")):
+                    if document["kind"] == "Secret":
+                        self.assertNotIn("cursor-signing-key-previous", document["data"])
             platform_names = {
                 (document["kind"], document["metadata"]["name"])
                 for document in platform_documents

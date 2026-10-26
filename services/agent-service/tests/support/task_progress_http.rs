@@ -6,7 +6,7 @@ use contracts::authoring::{
     AgentAttempt, AgentAttemptState, AgentRun, AgentRunPurpose, AgentRunState, AgentTrack,
     AgentTrackKind, EnvironmentClass, LlmUsage,
 };
-use contracts::{ActorId, AgentRunId, PolicyId, ProblemPackageId, ProjectId, Revision};
+use contracts::{ActorId, AgentRunId, CourseId, PolicyId, ProblemPackageId, ProjectId, Revision};
 use persistence_sqlx::Sha256Digest;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{ImageExt, runners::AsyncRunner};
@@ -28,11 +28,12 @@ async fn task_progress_http_rejects_cross_actor_run_tampering_and_offset()
     let run_id = AgentRunId::new();
     let other_run = AgentRunId::new();
     let project = ProjectId::new();
+    let course = CourseId::new();
     for id in [run_id, other_run] {
         let run = AgentRun {
             id,
             project_id: project,
-            course_id: None,
+            course_id: Some(course),
             package_id: ProblemPackageId::new(),
             policy_id: PolicyId::new(),
             policy_revision: Revision::new(1)?,
@@ -66,8 +67,8 @@ async fn task_progress_http_rejects_cross_actor_run_tampering_and_offset()
             plan: None,
         };
         run.validate()?;
-        sqlx::query("INSERT INTO agent.agent_runs(run_id,project_id,course_id,problem_package_id,revision,state,provider_binding,input_sha256,policy_revision,purpose,contract) VALUES($1,$2,NULL,$3,1,'failed','claude-code-v1',$4,1,$5,$6)")
-            .bind(id.as_uuid()).bind(project.as_uuid()).bind(run.package_id.as_uuid()).bind(Sha256Digest::of_bytes(b"input").to_string()).bind(serde_json::to_value(run.purpose)?).bind(serde_json::to_value(run)?).execute(&pool).await?;
+        sqlx::query("INSERT INTO agent.agent_runs(run_id,project_id,course_id,problem_package_id,revision,state,provider_binding,input_sha256,policy_revision,purpose,contract) VALUES($1,$2,$3,$4,1,'failed','claude-code-v1',$5,1,$6,$7)")
+            .bind(id.as_uuid()).bind(project.as_uuid()).bind(course.as_uuid()).bind(run.package_id.as_uuid()).bind(Sha256Digest::of_bytes(b"input").to_string()).bind(serde_json::to_value(run.purpose)?).bind(serde_json::to_value(run)?).execute(&pool).await?;
     }
     let key = signing_material("progress")?;
     let authority = spawn_authority(&key).await?;
@@ -120,7 +121,7 @@ async fn task_progress_http_rejects_cross_actor_run_tampering_and_offset()
         ),
         llm_reviews: agent_service::llm_review::LlmReviewStore::new(pool.clone()),
         platform_image_import_jobs:
-            agent_service::platform_image_jobs::PlatformImageImportJobStore::new(pool),
+            agent_service::platform_image_jobs::PlatformImageImportJobStore::new(pool.clone()),
         platform_registry: None,
         objects: Arc::new(objects),
     });
@@ -153,6 +154,42 @@ async fn task_progress_http_rejects_cross_actor_run_tampering_and_offset()
     assert!(page.get("pageSize").is_none());
     assert!(page.get("hasMore").is_none());
     let cursor = page["nextCursor"].as_str().ok_or("missing cursor")?;
+    for foreign_course in [Some(CourseId::new()), None] {
+        set_course(&pool, run_id, foreign_course).await?;
+        let response = client
+            .get(&path)
+            .bearer_auth(&token)
+            .header("x-labweaver-actor-id", actor.to_string())
+            .query(&[("limit", "1"), ("cursor", cursor)])
+            .send()
+            .await?;
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    }
+    let without_course: Value = client
+        .get(&path)
+        .bearer_auth(&token)
+        .header("x-labweaver-actor-id", actor.to_string())
+        .query(&[("limit", "1")])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let no_course_cursor = without_course["nextCursor"]
+        .as_str()
+        .ok_or("missing unscoped continuation")?;
+    set_course(&pool, run_id, Some(course)).await?;
+    assert_eq!(
+        client
+            .get(&path)
+            .bearer_auth(&token)
+            .header("x-labweaver-actor-id", actor.to_string())
+            .query(&[("cursor", no_course_cursor)])
+            .send()
+            .await?
+            .status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
     let mut tampered = cursor.to_owned();
     let last = tampered.pop().ok_or("empty cursor")?;
     tampered.push(if last == 'A' { 'B' } else { 'A' });
@@ -174,5 +211,15 @@ async fn task_progress_http_rejects_cross_actor_run_tampering_and_offset()
     }
     server.abort();
     let _ = server.await;
+    Ok(())
+}
+
+async fn set_course(
+    pool: &sqlx::PgPool,
+    run_id: AgentRunId,
+    course: Option<CourseId>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE agent.agent_runs SET course_id=$2,contract=jsonb_set(contract,'{courseId}',COALESCE(to_jsonb($2::uuid),'null'::jsonb)) WHERE run_id=$1")
+        .bind(run_id.as_uuid()).bind(course.map(CourseId::as_uuid)).execute(pool).await?;
     Ok(())
 }

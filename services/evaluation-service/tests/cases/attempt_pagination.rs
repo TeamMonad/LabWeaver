@@ -38,6 +38,18 @@ async fn pagination_case(submission: bool) -> Result<(), Box<dyn std::error::Err
         ..query.clone()
     };
     assert!(continuation.cursor.is_some());
+    for foreign_course in [Some(CourseId::new()), None] {
+        set_course(&fixture.pool, run.id, foreign_course).await?;
+        assert_http_400(read(&fixture, &run, submission, &continuation).await)?;
+    }
+    let without_course = read(&fixture, &run, submission, &query).await?;
+    let no_course_query = TaskProgressQuery {
+        cursor: without_course.next_cursor,
+        ..query.clone()
+    };
+    assert!(no_course_query.cursor.is_some());
+    set_course(&fixture.pool, run.id, run.course_id).await?;
+    assert_http_400(read(&fixture, &run, submission, &no_course_query).await)?;
     // An owner can use only the cursor's original run/submission endpoint.
     assert_http_400(read(&fixture, &run, !submission, &continuation).await)?;
     assert_http_400(
@@ -253,4 +265,14 @@ async fn retry(
         .claim_next_step("cursor-worker", Duration::from_secs(30))
         .await?
         .ok_or("missing retry")?)
+}
+
+async fn set_course(
+    pool: &sqlx::PgPool,
+    run_id: EvaluationRunId,
+    course: Option<CourseId>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE evaluation.evaluation_runs SET course_id=$2,contract=jsonb_set(contract,'{courseId}',COALESCE(to_jsonb($2::uuid),'null'::jsonb)) WHERE run_id=$1")
+        .bind(run_id.as_uuid()).bind(course.map(CourseId::as_uuid)).execute(pool).await?;
+    Ok(())
 }

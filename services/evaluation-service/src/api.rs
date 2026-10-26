@@ -1184,6 +1184,28 @@ mod tests {
     }
 
     #[test]
+    fn task_cursor_errors_are_bad_requests_but_resource_identity_and_read_races_are_conflicts() {
+        use crate::task_progress::EvaluationTaskProgressError;
+        assert_eq!(
+            EvaluationApiError::TaskProgress(EvaluationTaskProgressError::PageInvalid)
+                .into_response()
+                .status(),
+            axum::http::StatusCode::BAD_REQUEST
+        );
+        for error in [
+            EvaluationTaskProgressError::IdentityMismatch,
+            EvaluationTaskProgressError::Changed,
+        ] {
+            assert_eq!(
+                EvaluationApiError::TaskProgress(error)
+                    .into_response()
+                    .status(),
+                axum::http::StatusCode::CONFLICT
+            );
+        }
+    }
+
+    #[test]
     fn routes_require_their_declared_service_permission() -> Result<(), String> {
         let control = principal(CONTROL_PERMISSION);
         assert!(require_control(Some(control)).is_ok());

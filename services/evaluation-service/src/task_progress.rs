@@ -114,11 +114,21 @@ impl PgEvaluationControlStore {
                 EvaluationControlStoreError::ContractInvalid,
             ));
         }
+        // Read only the immutable course binding here so even a cross-actor cursor
+        // is rejected as an invalid scope before the actor-owned attempt query.
+        let course_id: Option<uuid::Uuid> =
+            sqlx::query_scalar("SELECT course_id FROM evaluation.evaluation_runs WHERE run_id=$1")
+                .bind(run_id.as_uuid())
+                .fetch_optional(self.pool())
+                .await
+                .map_err(EvaluationControlStoreError::from)?
+                .ok_or(EvaluationControlStoreError::RunNotFound)?;
         let scope = (
             "evaluation-task-progress",
             project_id,
             actor_id,
             run_id,
+            course_id,
             submission_id,
         );
         let after: Option<HistoryPosition> = query
@@ -142,6 +152,9 @@ impl PgEvaluationControlStore {
             let run = self
                 .owned_progress_run(project_id, actor_id, run_id)
                 .await?;
+            if run.course_id.map(contracts::CourseId::as_uuid) != course_id {
+                return Err(EvaluationTaskProgressError::PageInvalid);
+            }
             let release = self.load_release(run.release_id).await?;
             let attempts = self
                 .progress_attempts(project_id, actor_id, run_id, true, None, limit)
