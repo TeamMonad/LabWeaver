@@ -4010,27 +4010,17 @@
             "required": true,
             "schema": {
               "maxLength": 128,
-              "minLength": 1,
+              "minLength": 2,
               "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "page",
-            "required": false,
-            "schema": {
-              "default": 1,
-              "minimum": 1,
-              "type": "integer"
-            }
-          },
-          {
-            "in": "query",
-            "name": "pageSize",
+            "name": "limit",
             "required": false,
             "schema": {
               "default": 25,
-              "maximum": 100,
+              "maximum": 50,
               "minimum": 1,
               "type": "integer"
             }
@@ -4104,7 +4094,7 @@
         "x-labweaver-cancellable": false,
         "x-labweaver-errors": [
           "LW_ACCESS_DIRECTORY_QUERY_INVALID",
-          "LW_ACCESS_DIRECTORY_PAGE_INVALID",
+          "LW_ACCESS_DIRECTORY_LIMIT_INVALID",
           "LW_ACCESS_DIRECTORY_UNAVAILABLE"
         ],
         "x-labweaver-idempotency": "None",

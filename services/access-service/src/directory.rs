@@ -182,40 +182,17 @@ impl KeycloakDirectory {
     pub(crate) async fn search(
         &self,
         query: &str,
-        page: u32,
-        page_size: u16,
-        first: u32,
+        limit: u16,
     ) -> Result<OrganizationUserPage, DirectoryError> {
         let users = self
             .request_users(&[
                 ("search", query.to_owned()),
-                ("first", first.to_string()),
-                ("max", (u32::from(page_size) + 1_u32).to_string()),
+                ("first", "0".to_owned()),
+                ("max", (u32::from(limit) + 1_u32).to_string()),
             ])
             .await?;
-        let has_more = users.len() > usize::from(page_size);
-        let items = users
-            .into_iter()
-            .take(usize::from(page_size))
-            .filter_map(|user| {
-                let username = user.username.as_deref()?.trim().to_owned();
-                if username.is_empty() {
-                    return None;
-                }
-                let display_name = display_name(&user, &username);
-                Some(OrganizationUser {
-                    username,
-                    display_name,
-                    enabled: user.enabled.unwrap_or(false),
-                })
-            })
-            .collect();
-        Ok(OrganizationUserPage {
-            items,
-            page,
-            page_size,
-            has_more,
-        })
+        let (items, truncated) = project_search_results(users, limit);
+        Ok(OrganizationUserPage { items, truncated })
     }
 
     pub(crate) async fn resolve_username(
@@ -323,6 +300,30 @@ fn select_exact_user(
     Ok(user)
 }
 
+/// Projects one bounded Keycloak window of `limit + 1` raw users.
+///
+/// `truncated` is true when Keycloak filled the window, even if invalid usernames are
+/// dropped afterwards: the directory may hold further matches past `max`, so the caller
+/// must refine the query instead of treating the shortened list as complete.
+fn project_search_results(users: Vec<KeycloakUser>, limit: u16) -> (Vec<OrganizationUser>, bool) {
+    let truncated = users.len() > usize::from(limit);
+    let mut items = Vec::with_capacity(usize::from(limit));
+    let eligible = users.into_iter().filter_map(|user| {
+        let username = user.username.as_deref()?.trim().to_owned();
+        if username.is_empty() {
+            return None;
+        }
+        let display_name = display_name(&user, &username);
+        Some(OrganizationUser {
+            username,
+            display_name,
+            enabled: user.enabled.unwrap_or(false),
+        })
+    });
+    items.extend(eligible.take(usize::from(limit)));
+    (items, truncated)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -331,7 +332,8 @@ mod tests {
     };
 
     use super::{
-        DirectoryError, DirectoryFailure, KeycloakDirectory, KeycloakUser, select_exact_user,
+        DirectoryError, DirectoryFailure, KeycloakDirectory, KeycloakUser, project_search_results,
+        select_exact_user,
     };
     use axum::{
         Json, Router,
@@ -532,7 +534,7 @@ mod tests {
         let fixture = directory_fixture(case).await?;
         let error = fixture
             .directory
-            .search(QUERY_USERNAME, 1, 20, 0)
+            .search(QUERY_USERNAME, 20)
             .await
             .err()
             .ok_or("expected upstream rejection")?;
@@ -675,5 +677,45 @@ mod tests {
         let result = select_exact_user(vec![user("Alice")], "alice")?;
         assert_eq!(result.username.as_deref(), Some("Alice"));
         Ok(())
+    }
+
+    #[test]
+    fn search_filters_invalid_usernames_before_truncating() {
+        let mut invalid = user("");
+        invalid.username = None;
+        let mut whitespace = user(" ");
+        whitespace.username = Some("   ".to_owned());
+        let (items, truncated) =
+            project_search_results(vec![invalid, whitespace, user("alice"), user("bob")], 1);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.username.as_str())
+                .collect::<Vec<_>>(),
+            ["alice"]
+        );
+        assert!(truncated);
+    }
+
+    #[test]
+    fn search_reports_truncation_when_a_full_window_loses_invalid_rows() {
+        let mut invalid = user("");
+        invalid.username = None;
+        let (items, truncated) = project_search_results(vec![invalid, user("alice")], 1);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.username.as_str())
+                .collect::<Vec<_>>(),
+            ["alice"]
+        );
+        assert!(truncated, "a full Keycloak window may hide further matches");
+    }
+
+    #[test]
+    fn search_is_complete_when_keycloak_returns_fewer_than_limit_plus_one() {
+        let (items, truncated) = project_search_results(vec![user("alice")], 1);
+        assert_eq!(items.len(), 1);
+        assert!(!truncated);
     }
 }

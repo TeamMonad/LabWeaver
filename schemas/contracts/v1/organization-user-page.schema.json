@@ -27,34 +27,22 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Bounded organization-directory search result.",
+  "description": "Bounded organization-directory search result. Keycloak does not expose a stable continuation key,\nso this endpoint intentionally returns a bounded search result rather than pages.",
   "properties": {
-    "hasMore": {
-      "type": "boolean"
-    },
     "items": {
       "items": {
         "$ref": "#/$defs/OrganizationUser"
       },
       "type": "array"
     },
-    "page": {
-      "format": "uint32",
-      "minimum": 0,
-      "type": "integer"
-    },
-    "pageSize": {
-      "format": "uint16",
-      "maximum": 65535,
-      "minimum": 0,
-      "type": "integer"
+    "truncated": {
+      "description": "True when more matching provider users exist beyond this bounded result.",
+      "type": "boolean"
     }
   },
   "required": [
     "items",
-    "page",
-    "pageSize",
-    "hasMore"
+    "truncated"
   ],
   "title": "OrganizationUserPage",
   "type": "object"

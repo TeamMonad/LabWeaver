@@ -1568,9 +1568,8 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         }
         if operation.operation_id == "listOrganizationUsers" {
             parameters.extend([
-                json!({"name":"query","in":"query","required":true,"schema":{"type":"string","minLength":1,"maxLength":128}}),
-                json!({"name":"page","in":"query","required":false,"schema":{"type":"integer","minimum":1,"default":1}}),
-                json!({"name":"pageSize","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":100,"default":25}}),
+                json!({"name":"query","in":"query","required":true,"schema":{"type":"string","minLength":2,"maxLength":128}}),
+                json!({"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":50,"default":25}}),
             ]);
         }
         if operation.operation_id == "listProjectAgentRuns" {
@@ -1770,7 +1769,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
         if operation.operation_id == "listOrganizationUsers" {
             operation_json["x-labweaver-errors"] = json!([
                 "LW_ACCESS_DIRECTORY_QUERY_INVALID",
-                "LW_ACCESS_DIRECTORY_PAGE_INVALID",
+                "LW_ACCESS_DIRECTORY_LIMIT_INVALID",
                 "LW_ACCESS_DIRECTORY_UNAVAILABLE",
             ]);
         }

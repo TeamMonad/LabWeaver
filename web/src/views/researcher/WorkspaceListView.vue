@@ -187,11 +187,7 @@
                           </button>
                         </li>
                       </ul>
-                      <nav v-if="data.page > 1 || data.hasMore" class="directory-pagination" aria-label="组织账号分页">
-                        <button type="button" class="text-button" :disabled="data.page <= 1 || directory.users.kind === 'loading'" @click="loadDirectoryPage(data.page - 1)">上一页</button>
-                        <span>第 {{ data.page }} 页</span>
-                        <button type="button" class="text-button" :disabled="!data.hasMore || directory.users.kind === 'loading'" @click="loadDirectoryPage(data.page + 1)">下一页</button>
-                      </nav>
+                      <p v-if="data.truncated" class="directory-empty" role="status">结果过多，请输入更精确的关键词。</p>
                     </template>
                   </template>
                 </AsyncStateView>
@@ -531,13 +527,7 @@ function clearDirectorySelection() {
 function searchDirectory() {
   selectedDirectoryUser.value = null
   memberUsername.value = ''
-  void directory.load(directoryQuery.value, 1)
-}
-
-function loadDirectoryPage(page: number) {
-  selectedDirectoryUser.value = null
-  memberUsername.value = ''
-  void directory.load(directoryQuery.value, page)
+  void directory.load(directoryQuery.value)
 }
 
 function selectDirectoryUser(user: OrganizationUser) {

@@ -12227,13 +12227,15 @@ export type NotificationSchemaUtcTimestamp = string;
 /**
  * OrganizationUserPage
  *
- * Bounded organization-directory search result.
+ * Bounded organization-directory search result. Keycloak does not expose a stable continuation key,
+ * so this endpoint intentionally returns a bounded search result rather than pages.
  */
 export type OrganizationUserPageSchema = {
-    hasMore: boolean;
     items: Array<OrganizationUserPageSchemaOrganizationUser>;
-    page: number;
-    pageSize: number;
+    /**
+     * True when more matching provider users exist beyond this bounded result.
+     */
+    truncated: boolean;
 };
 
 /**
@@ -16514,8 +16516,7 @@ export type ListOrganizationUsersData = {
     path?: never;
     query: {
         query: string;
-        page?: number;
-        pageSize?: number;
+        limit?: number;
     };
     url: '/api/v1/directory/users';
 };
