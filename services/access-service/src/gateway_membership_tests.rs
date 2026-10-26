@@ -8,6 +8,10 @@ use production_roles::ProductionRoles;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "owned Result::map_err callback"
+)]
 fn api_error(error: ApiError) -> std::io::Error {
     std::io::Error::other(format!("{} ({:?})", error.diagnostic, error.status))
 }

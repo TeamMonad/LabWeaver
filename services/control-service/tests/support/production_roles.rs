@@ -18,12 +18,12 @@ pub struct ProductionRoles {
     pub provisioner: PgPool,
     pub control: PgPool,
     pub access: PgPool,
-    _container: ContainerAsync<Postgres>,
+    container: ContainerAsync<Postgres>,
 }
 
 impl ProductionRoles {
     pub async fn database_errors(&self) -> TestResult<String> {
-        Ok(String::from_utf8(self._container.stderr_to_vec().await?)?)
+        Ok(String::from_utf8(self.container.stderr_to_vec().await?)?)
     }
     /// Applies the production bootstrap and every catalog migration, then logs in as runtime roles.
     pub async fn start() -> TestResult<Self> {
@@ -91,7 +91,7 @@ impl ProductionRoles {
             provisioner,
             control,
             access,
-            _container: container,
+            container,
         })
     }
 }
