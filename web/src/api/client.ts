@@ -6,7 +6,17 @@ import { createClient, type Client } from '@/generated/contracts/client'
 import { client as defaultSdkClient } from '@/generated/contracts/client.gen'
 import type { ServerSentEventsOptions, ServerSentEventsResult } from '@/generated/contracts/core/serverSentEvents.gen'
 import { REQUEST_ID_HEADER, rememberHeaderRequestId } from './requestId'
-import { reportSessionRejected, sessionActor, sessionCredentialVersion, sessionEpoch, sessionEpochSignal } from './session'
+import {
+  IdentityWaitInterrupted,
+  identityReadPending,
+  identityReadsSettled,
+  reportSessionRejected,
+  sessionActor,
+  sessionActorInDoubt,
+  sessionCredentialVersion,
+  sessionEpoch,
+  sessionEpochSignal,
+} from './session'
 
 export type AccessTokenProvider = () => Promise<string | undefined>
 /** A CSRF token and the actor of the BFF session that issued it. */
@@ -14,7 +24,12 @@ export interface CsrfToken {
   token: string
   actorId: string
 }
-export type CsrfTokenProvider = () => Promise<CsrfToken | undefined>
+/** What a CSRF lookup for one write may take: it stops when `signal` aborts, at the latest at `deadline` (epoch ms). */
+export interface CsrfTokenRequest {
+  signal: AbortSignal
+  deadline: number
+}
+export type CsrfTokenProvider = (request: CsrfTokenRequest) => Promise<CsrfToken | undefined>
 
 export type LabWeaverApiAuthentication =
   | { mode: 'bearer'; accessToken: AccessTokenProvider }
@@ -34,6 +49,7 @@ export type LabWeaverClientDiagnostic =
   | 'LW_SDK_REQUEST_TIMEOUT'
   | 'LW_SDK_TRANSPORT_FAILED'
   | 'LW_SDK_SESSION_CHANGED'
+  | 'LW_SDK_IDENTITY_UNCONFIRMED'
 
 export class LabWeaverApiError extends Error {
   readonly diagnosticCode: LabWeaverClientDiagnostic | string
@@ -90,15 +106,17 @@ function createBffCsrfTokenProvider(baseUrl: string, timeout: number): CsrfToken
   // change or any CSRF/session rejection changes the credential version and
   // retires it, so the next write asks the BFF which session the cookie holds.
   let cached: { csrf: CsrfToken; expiresAt: number; version: string } | undefined
-  let inFlight: { csrf: Promise<CsrfToken>; version: string } | undefined
-  return async () => {
-    const version = sessionCredentialVersion()
-    if (cached?.version === version && cached.expiresAt - Date.now() > 30_000) return cached.csrf
-    if (inFlight?.version === version) return inFlight.csrf
+  // One lookup serves every write of the same credential version; it is
+  // aborted once all of them stopped waiting (cancelled or past their deadline).
+  let inFlight: { csrf: Promise<CsrfToken>; version: string; abort: AbortController; waiters: number } | undefined
+
+  function lookUp(version: string) {
+    const abort = new AbortController()
     const csrf = axios
       .get('/api/v1/auth/csrf', {
         baseURL: baseUrl,
         timeout,
+        signal: abort.signal,
         withCredentials: true,
         headers: { Accept: 'application/json, application/problem+json' },
       })
@@ -118,10 +136,83 @@ function createBffCsrfTokenProvider(baseUrl: string, timeout: number): CsrfToken
         return issued
       })
       .finally(() => {
-        if (inFlight?.csrf === csrf) inFlight = undefined
+        if (inFlight === lookup) inFlight = undefined
       })
-    inFlight = { csrf, version }
-    return csrf
+    const lookup = { csrf, version, abort, waiters: 0 }
+    inFlight = lookup
+    return lookup
+  }
+
+  return async ({ signal }) => {
+    const version = sessionCredentialVersion()
+    if (cached?.version === version && cached.expiresAt - Date.now() > 30_000) return cached.csrf
+    const lookup = inFlight?.version === version ? inFlight : lookUp(version)
+    lookup.waiters += 1
+    return new Promise<CsrfToken>((resolve, reject) => {
+      let waiting = true
+      const leave = () => {
+        waiting = false
+        signal.removeEventListener('abort', stop)
+        lookup.waiters -= 1
+      }
+      const stop = () => {
+        if (!waiting) return
+        leave()
+        if (lookup.waiters === 0) {
+          lookup.abort.abort()
+          if (inFlight === lookup) inFlight = undefined
+        }
+        reject(new LabWeaverApiError('LW_SDK_REQUEST_CANCELLED', 'The CSRF token lookup was abandoned.'))
+      }
+      signal.addEventListener('abort', stop)
+      if (signal.aborted) stop()
+      lookup.csrf.then(
+        (csrf) => {
+          if (!waiting) return
+          leave()
+          resolve(csrf)
+        },
+        (error: unknown) => {
+          if (!waiting) return
+          leave()
+          reject(error)
+        },
+      )
+    })
+  }
+}
+
+/**
+ * When a request entered the SDK: its session epoch and start time, fixed
+ * synchronously at the call, before any generated step (security, request
+ * validator, serializer) awaits. Not a plain object, so Axios carries this
+ * same frozen instance into the request config instead of copying it.
+ */
+class CallStart {
+  constructor(readonly epoch: number, readonly startedAt: number) {
+    Object.freeze(this)
+  }
+}
+
+const CALL_START = 'labweaverCallStart'
+
+function callStartOf(config: object): CallStart | undefined {
+  const start = (config as Record<string, unknown>)[CALL_START]
+  return start instanceof CallStart ? start : undefined
+}
+
+const REQUEST_METHODS = ['connect', 'delete', 'get', 'head', 'options', 'patch', 'post', 'put', 'trace', 'request'] as const
+
+/**
+ * Every REST call of `client` records its `CallStart` when it is entered. The
+ * generated SDK functions call these methods on the client object and pass
+ * unknown options through to Axios, so the stamp reaches the interceptors.
+ */
+function stampCallStart(client: Client): void {
+  const methods = client as unknown as Record<(typeof REQUEST_METHODS)[number], (options: Record<string, unknown>) => unknown>
+  for (const method of REQUEST_METHODS) {
+    const send = methods[method]
+    methods[method] = (options) => send({ ...options, [CALL_START]: new CallStart(sessionEpoch.value, Date.now()) })
   }
 }
 
@@ -155,6 +246,102 @@ export function decodeProblemDetails(error: unknown): ProblemDetails | undefined
   return isProblemDetails(error.response?.data) ? error.response.data : undefined
 }
 
+/** A write refused because the actor is unknown; nothing was sent. */
+function identityUnconfirmed(): LabWeaverApiError {
+  const refused = new LabWeaverApiError('LW_SDK_IDENTITY_UNCONFIRMED', 'The signed-in actor could not be confirmed; the write was not sent.')
+  // The generated SDK hands `response.data` back as `result.error`: give
+  // callers the code (and its Chinese reason) instead of an empty object.
+  Object.assign(refused, { response: { data: { diagnosticCode: refused.diagnosticCode, detail: refused.message, retryable: false } } })
+  return refused
+}
+
+/**
+ * The caller's cancellation and the write's remaining deadline (counted from
+ * the SDK call) as one signal, for every wait before the write is sent.
+ */
+function writeWaits(config: { timeout?: number; signal?: unknown }, startedAt: number) {
+  const timeout = typeof config.timeout === 'number' && config.timeout > 0 ? config.timeout : undefined
+  const deadline = timeout === undefined ? Number.POSITIVE_INFINITY : startedAt + timeout
+  const stopped = new AbortController()
+  let reason: 'timeout' | 'cancelled' | undefined
+  const stop = (why: 'timeout' | 'cancelled') => {
+    if (reason) return
+    reason = why
+    stopped.abort()
+  }
+  const caller = config.signal as Pick<AbortSignal, 'aborted'> & Partial<Pick<AbortSignal, 'addEventListener' | 'removeEventListener'>> | undefined
+  const cancel = () => stop('cancelled')
+  let timer: ReturnType<typeof setTimeout> | undefined
+  if (caller?.aborted) cancel()
+  else caller?.addEventListener?.('abort', cancel)
+  if (Number.isFinite(deadline)) {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) stop('timeout')
+    else timer = setTimeout(() => stop('timeout'), remaining)
+  }
+  const interrupted = () => reason === 'timeout'
+    ? new LabWeaverApiError('LW_SDK_REQUEST_TIMEOUT', 'The API request timed out before it was sent.')
+    : new LabWeaverApiError('LW_SDK_REQUEST_CANCELLED', 'The API request was cancelled before it was sent.')
+  /** Run `work` unless already stopped; a stop rejects at once, whether or not `work` honors the signal. */
+  const until = <T>(work: () => Promise<T>): Promise<T> => {
+    if (stopped.signal.aborted) return Promise.reject(interrupted())
+    return new Promise<T>((resolve, reject) => {
+      let settled = false
+      // The one way out (result, failure, stop or a synchronous throw): the
+      // stop listener goes at once, and a late answer of `work` changes nothing.
+      const settle = (outcome: () => void) => {
+        if (settled) return
+        settled = true
+        stopped.signal.removeEventListener('abort', onStop)
+        outcome()
+      }
+      const onStop = () => settle(() => reject(interrupted()))
+      stopped.signal.addEventListener('abort', onStop)
+      let pending: Promise<T>
+      try {
+        pending = work()
+      } catch (error) {
+        settle(() => reject(error))
+        return
+      }
+      pending.then(
+        (value) => settle(() => resolve(value)),
+        (error: unknown) => settle(() => reject(stopped.signal.aborted || error instanceof IdentityWaitInterrupted ? interrupted() : error)),
+      )
+    })
+  }
+  return {
+    signal: stopped.signal,
+    deadline,
+    until,
+    dispose() {
+      clearTimeout(timer)
+      caller?.removeEventListener?.('abort', cancel)
+    },
+  }
+}
+
+/**
+ * The one authoritative check of a write, run synchronously as the last thing
+ * before the real adapter: still the epoch the write started in (otherwise it
+ * belongs to the previous actor), no identity read in flight, the actor not in
+ * doubt, and its CSRF token issued to the confirmed actor. Nothing is awaited
+ * between this check and the dispatch. A refusal sends nothing and is not
+ * retried; the caller keeps its pending command for the user to resubmit.
+ */
+function assertWriteStillAuthorized(initiatingEpoch: number, csrfActor: string): void {
+  if (sessionEpoch.value !== initiatingEpoch) throw sessionChanged()
+  if (identityReadPending() || sessionActorInDoubt.value) throw identityUnconfirmed()
+  const confirmedActor = sessionActor()
+  if (confirmedActor === undefined) throw identityUnconfirmed()
+  // The BFF accepts a token only with the session that issued it; a token of
+  // another actor means the cookie changed hands: read the actor again.
+  if (csrfActor !== confirmedActor) {
+    reportSessionRejected()
+    throw sessionChanged()
+  }
+}
+
 function attachAuthInterceptor(instance: AxiosInstance, authentication: LabWeaverApiAuthentication): void {
   const csrfToken =
     authentication.mode === 'bff'
@@ -162,8 +349,15 @@ function attachAuthInterceptor(instance: AxiosInstance, authentication: LabWeave
       : undefined
 
   instance.interceptors.request.use(async (config) => {
-    requestEpochs.set(config, sessionEpoch.value)
-    const actor = sessionActor()
+    const start = callStartOf(config)
+    const unsafe = isUnsafeMethod(config.method)
+    // A write is only ever checked against the epoch its SDK call was entered in.
+    if (csrfToken && unsafe && !start) {
+      throw new LabWeaverApiError('LW_SDK_CONFIGURATION_INVALID', 'A write must be started through a LabWeaver SDK client.')
+    }
+    const initiatingEpoch = start?.epoch ?? sessionEpoch.value
+    requestEpochs.set(config, initiatingEpoch)
+    if (startedInEarlierSession(config)) throw sessionChanged()
     if (authentication.mode === 'bearer') {
       const token = await authentication.accessToken()
       if (!token) {
@@ -171,20 +365,29 @@ function attachAuthInterceptor(instance: AxiosInstance, authentication: LabWeave
       } else {
         config.headers.Authorization = `Bearer ${token}`
       }
-    } else if (isUnsafeMethod(config.method)) {
-      const csrf = await csrfToken?.()
+    } else if (csrfToken && start && unsafe) {
+      // Earlier steps may wait, within the caller's cancellation and the
+      // write's deadline: for an identity read in flight, then for the token.
+      const waits = writeWaits(config, start.startedAt)
+      let csrf: CsrfToken | undefined
+      try {
+        // Only a head start: the final check before dispatch decides, so a read that starts after this wait still stops the write.
+        await waits.until(() => identityReadsSettled({ signal: waits.signal }))
+        if (sessionActorInDoubt.value) throw identityUnconfirmed()
+        csrf = await waits.until(() => csrfToken({ signal: waits.signal, deadline: waits.deadline }))
+      } finally {
+        waits.dispose()
+      }
       if (!csrf) {
         throw new LabWeaverApiError('LW_SDK_AUTH_TOKEN_UNAVAILABLE', 'A current BFF CSRF token is required.')
       }
-      // The BFF accepts a token only with the session that issued it, so a
-      // write carrying a token of its own actor can never be accepted for
-      // another one, whenever it is dispatched. A token of another actor means
-      // the cookie changed hands: this write belongs to the previous actor.
-      if (actor !== undefined && csrf.actorId !== actor) {
-        reportSessionRejected()
-        throw sessionChanged()
-      }
+      const csrfActor = csrf.actorId
       config.headers['X-CSRF-Token'] = csrf.token
+      const realAdapter = axios.getAdapter(config.adapter ?? axios.defaults.adapter)
+      config.adapter = (dispatched) => {
+        assertWriteStillAuthorized(initiatingEpoch, csrfActor)
+        return realAdapter(dispatched)
+      }
     }
     // Reading the bearer of another actor advances the epoch.
     if (startedInEarlierSession(config)) throw sessionChanged()
@@ -253,6 +456,7 @@ export function createLabWeaverApiClient(options: LabWeaverApiClientOptions): Cl
     baseURL: baseUrl,
     timeout,
   })
+  stampCallStart(client)
   guardStreams(client, authentication.mode === 'bearer' ? authentication.accessToken : undefined)
   return client
 }
@@ -421,6 +625,7 @@ export async function initializeSdkClient(): Promise<void> {
     axios: sdkTransport,
     baseURL: '',
   })
+  stampCallStart(defaultSdkClient)
   guardStreams(defaultSdkClient, API_AUTH_MODE === 'bearer' ? getOidcAccessToken : undefined)
 }
 

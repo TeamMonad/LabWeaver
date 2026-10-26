@@ -73,6 +73,15 @@
         </button>
       </template>
 
+      <!-- The session may still exist while its identity cannot be read: keep a way to end it. -->
+      <template v-else-if="auth.identityUnknown.value">
+        <span class="login-status">账号未确认</span>
+        <button type="button" class="text-button" aria-label="退出" data-testid="identity-unknown-logout" @click="endBrowserSession">
+          <SvgIcon name="logout" size="sm" aria-hidden="true" />
+          <span class="text-button__label">退出</span>
+        </button>
+      </template>
+
       <template v-else>
         <span class="login-status">未认证</span>
         <button v-if="oidcEnabled" type="button" class="filled-button" aria-label="登录" @click="login">
@@ -155,6 +164,10 @@ async function login() {
 
 async function logout() {
   await auth.logout()
+}
+
+async function endBrowserSession() {
+  await auth.endBrowserSession()
 }
 
 function cycleTheme() {

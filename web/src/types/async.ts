@@ -132,6 +132,8 @@ function readableDiagnosticMessage(code: string, message: string): string {
       return '登录会话已在其他页面变化或安全校验已失效，这次操作没有执行。'
     case 'LW_SDK_SESSION_CHANGED':
       return '登录账号已变化，这次操作属于之前的账号，没有执行或结果已丢弃。'
+    case 'LW_SDK_IDENTITY_UNCONFIRMED':
+      return '暂时无法确认当前登录账号，这次操作没有执行。'
     // Notification codes (#224): Control rechecks recipient and membership on every read.
     case 'LW_NOTIFICATION_NOT_FOUND':
       return '这条通知已不可查看：你可能已不再是对应项目或课程的成员，或这条提醒已失效。页面不会打开对应对象，也不会显示它的内容。'
@@ -176,6 +178,8 @@ function codeNextStep(code: string): string | undefined {
     case 'LW_AUTH_CSRF_REJECTED':
     case 'LW_SDK_SESSION_CHANGED':
       return '平台会重新确认当前登录账号。请核对页面上的账号和内容，再手动重新提交；平台不会自动重试。'
+    case 'LW_SDK_IDENTITY_UNCONFIRMED':
+      return '请刷新页面或重新登录，确认账号后核对页面内容，再手动重新提交；平台不会自动重试，未确认的提交仍会保留。'
     case 'LW_ENVIRONMENT_RESTART_OUTCOME_UNKNOWN':
       return '平台不会自动重试。请在“异步操作与诊断”中核对环境当前状态；确认需要恢复时，使用顶部操作栏的“重试失败的操作”手动恢复。'
     case 'LW_STORAGE_HEALTH_UNAVAILABLE':

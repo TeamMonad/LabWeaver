@@ -366,6 +366,14 @@ export function actorIdFromProfile(profile: unknown): string | null {
   return null
 }
 
+/**
+ * Leave the SPA for a server-owned page (BFF login, provider logout). Kept as
+ * the one place that does so, so tests can observe where the browser goes.
+ */
+export function navigateTopLevel(url: string): void {
+  window.location.assign(url)
+}
+
 export function hasAnyRole(roles: readonly PlatformRole[], allowedRoles: readonly PlatformRole[]): boolean {
   return allowedRoles.some((role) => roles.includes(role))
 }

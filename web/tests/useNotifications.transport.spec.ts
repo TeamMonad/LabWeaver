@@ -39,6 +39,9 @@ async function freshTransport() {
   const { client } = await import('@/generated/contracts/client.gen')
   const notifications = await import('@/composables/useNotifications')
   await initializeSdkClient()
+  // Writes go out only for a confirmed actor holding a token issued to it.
+  const { recordSessionActor } = await import('@/api/session')
+  recordSessionActor('actor-a')
   const adapter = vi.fn(async (config: InternalAxiosRequestConfig) => {
     const data = String(config.url).endsWith('/read')
       ? { ...notification, readAt: '2026-10-20T08:05:00.000Z' }

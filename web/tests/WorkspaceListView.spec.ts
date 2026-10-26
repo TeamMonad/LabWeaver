@@ -129,12 +129,12 @@ vi.mock('@/composables/useProjectResources', () => ({
   useProjectResources: () => reactive({ requests: mocks.requestState ?? { kind: 'success', data: mocks.requests }, load: mocks.loadResources }),
 }))
 
-async function mountView(projectId = 'project-1') {
+async function mountView(projectId = 'project-1', objectQuery: Record<string, string> = {}) {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [{ path: '/researcher/workspaces', component: WorkspaceListView }],
   })
-  await router.push({ path: '/researcher/workspaces', query: { projectId } })
+  await router.push({ path: '/researcher/workspaces', query: { projectId, ...objectQuery } })
   await router.isReady()
   const wrapper = mount(WorkspaceListView, { global: { plugins: [router] } })
   await flushPromises()
@@ -174,6 +174,28 @@ describe('WorkspaceListView', () => {
     const { wrapper } = await mountView()
     const link = wrapper.findAll('a').find((anchor) => anchor.text().includes('新建 Work'))
     expect(link?.attributes('href')).toBe('/researcher/environments?projectId=project-1')
+    wrapper.unmount()
+  })
+
+  it('drops the previous project\'s object ids when the shared selection switches project', async () => {
+    const { wrapper, router } = await mountView('project-1', { releaseId: 'release-1', environmentId: 'env-1' })
+
+    // The top-bar selector switches the shared selection; this page must not write the old ids back.
+    projectsState.select('project-2')
+    await flushPromises()
+
+    expect(router.currentRoute.value.query).toEqual({ projectId: 'project-2' })
+    wrapper.unmount()
+  })
+
+  it('drops the previous project\'s object ids when a project is chosen from the page list', async () => {
+    const { wrapper, router } = await mountView('project-1', { releaseId: 'release-1' })
+
+    const option = wrapper.findAll('[aria-label="项目列表"] button').find((button) => button.text().includes('另一个项目'))
+    await option!.trigger('click')
+    await flushPromises()
+
+    expect(router.currentRoute.value.query).toEqual({ projectId: 'project-2' })
     wrapper.unmount()
   })
 

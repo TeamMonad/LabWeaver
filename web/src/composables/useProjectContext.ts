@@ -1,8 +1,10 @@
 import { computed, shallowRef, toRaw, watch } from 'vue'
 import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
 import { getProject, type ProjectSchema } from '@/generated/contracts'
+import { useAuth } from '@/composables/useAuth'
 import { useProjects } from '@/composables/useProjects'
 import { diagnosticFromError, type AsyncState, type DiagnosticViewModel } from '@/types/async'
+import { navigationPending } from '@/utils/pendingNavigation'
 
 /**
  * The browser-wide project context.
@@ -20,6 +22,7 @@ import { diagnosticFromError, type AsyncState, type DiagnosticViewModel } from '
 export type ProjectContextState =
   | { kind: 'unscoped' }
   | { kind: 'loading' }
+  | { kind: 'signed-out' }
   | { kind: 'ready'; project: ProjectSchema }
   | { kind: 'none' }
   | { kind: 'list-error'; diagnostic: DiagnosticViewModel }
@@ -65,8 +68,18 @@ function routeProjectIdOf(value: unknown): string | null {
 export function useProjectContext() {
   const route = useRoute()
   const projects = useProjects()
+  const auth = useAuth()
 
-  const scoped = computed(() => Boolean(route.meta.projectScoped))
+  // The project context belongs to the signed-in actor. A public page (the
+  // home page: no role requirement) read without one renders its own sign-in
+  // entry. A role-protected page without one stays behind the gate whatever
+  // list was read before: the session may have expired or be unconfirmable.
+  const publicRoute = computed(() => !route.matched.some((record) => {
+    const roles: unknown = record.meta.requiredRoles
+    return Array.isArray(roles) && roles.length > 0
+  }))
+  const scoped = computed(() => Boolean(route.meta.projectScoped) && (auth.isAuthenticated.value || !publicRoute.value))
+  const actorConfirmed = computed(() => auth.isAuthenticated.value)
   const routeProjectId = computed(() => routeProjectIdOf(route.query.projectId))
 
   const fallbackProject = computed<ProjectSchema | null>(() => {
@@ -82,6 +95,10 @@ export function useProjectContext() {
 
   const state = computed<ProjectContextState>(() => {
     if (!scoped.value) return { kind: 'unscoped' }
+    // Never decide from a list read for an actor that is no longer confirmed:
+    // the session expired, its read failed, or the server rejected it and the
+    // identity is being read again (or that read failed in transit).
+    if (!actorConfirmed.value) return auth.isLoading.value || auth.isConfirming.value ? { kind: 'loading' } : { kind: 'signed-out' }
     const settled = projects.settledProjects
     const requested = routeProjectId.value
     if (settled.kind === 'idle' || settled.kind === 'loading') return { kind: 'loading' }
@@ -135,7 +152,7 @@ export function useProjectContext() {
 
   const project = computed(() => state.value.kind === 'ready' ? state.value.project : null)
 
-  return { state, project, routeProjectId, scoped }
+  return { state, project, routeProjectId, scoped, actorConfirmed }
 }
 
 /**
@@ -149,9 +166,22 @@ export function useProjectContextSync() {
   const context = useProjectContext()
 
   watch(
-    [() => context.scoped.value, () => context.routeProjectId.value, () => projects.settledProjects],
-    ([scoped, requested, settled]) => {
-      if (!scoped || (settled.kind !== 'success' && settled.kind !== 'empty')) return
+    // Re-runs when the page, its projectId, the settled list or the actor
+    // changes, and whenever a navigation starts or finishes (commits, aborts,
+    // fails). Nothing is synchronized while a navigation is pending: the
+    // address is about to change, so following it would undo a project just
+    // chosen in the selector, and a replace would cancel the navigation (its
+    // guards may still be reading the session). Once it finishes this runs
+    // again on whatever page the router ends up on.
+    [
+      () => context.scoped.value,
+      () => context.routeProjectId.value,
+      () => projects.settledProjects,
+      () => context.actorConfirmed.value,
+      () => navigationPending(router),
+    ],
+    ([scoped, requested, settled, actorConfirmed, pending]) => {
+      if (pending || !scoped || !actorConfirmed || (settled.kind !== 'success' && settled.kind !== 'empty')) return
       const items = settled.kind === 'success' ? settled.data : []
       if (requested) {
         if (items.some((project) => project.id === requested)) {
@@ -184,7 +214,8 @@ export function useProjectContextSync() {
     ([title, projectName, kind]) => {
       if (typeof document === 'undefined') return
       const page = typeof title === 'string' && title ? title : 'LabWeaver'
-      if (kind === 'unavailable' || kind === 'list-error') document.title = `项目不可用 · ${page} · LabWeaver`
+      if (kind === 'signed-out') document.title = `需要重新登录 · ${page} · LabWeaver`
+      else if (kind === 'unavailable' || kind === 'list-error') document.title = `项目不可用 · ${page} · LabWeaver`
       else if (projectName) document.title = `${page} · ${projectName} · LabWeaver`
       else document.title = page === 'LabWeaver' ? page : `${page} · LabWeaver`
     },
