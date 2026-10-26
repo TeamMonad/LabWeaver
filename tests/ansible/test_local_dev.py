@@ -1259,7 +1259,7 @@ class LocalDevBundleTests(unittest.TestCase):
             local_dev.KUBERNETES_OWNER_LABEL_VALUE,
         )
 
-    def test_keycloak_foundation_uses_persistent_single_writer_storage(self) -> None:
+    def _render_foundation_objects(self) -> list[list[dict[str, object]]]:
         applied: list[list[dict[str, object]]] = []
 
         def capture_apply(_kubeconfig: Path, objects: list[dict[str, object]]) -> None:
@@ -1291,6 +1291,10 @@ class LocalDevBundleTests(unittest.TestCase):
                 ),
             ):
                 local_dev.start_foundation(Path("kubeconfig"), foundation, work)
+        return applied
+
+    def test_keycloak_foundation_uses_persistent_single_writer_storage(self) -> None:
+        applied = self._render_foundation_objects()
 
         keycloak_objects = next(
             objects
@@ -1343,6 +1347,41 @@ class LocalDevBundleTests(unittest.TestCase):
         self.assertTrue(realm_mount["readOnly"])
         data_volume = next(volume for volume in pod_spec["volumes"] if volume["name"] == "data")
         self.assertEqual(data_volume["persistentVolumeClaim"], {"claimName": "keycloak-data"})
+
+    def test_keycloak_directory_roles_and_scopes_match_production(self) -> None:
+        applied = self._render_foundation_objects()
+        realm_config = next(
+            document
+            for objects in applied
+            for document in objects
+            if document.get("metadata", {}).get("name") == "keycloak-realm"
+        )
+        realm = json.loads(realm_config["data"]["workloads-realm.json"])
+        defaults = local_dev.load_yaml(
+            ROOT / "deploy/ansible/roles/identity_foundation/defaults/main.yml"
+        )
+        expected = {
+            assignment["caller"]: sorted(assignment["roles"])
+            for assignment in defaults["identity_service_realm_role_assignments"]
+        }
+        accounts = {
+            user["serviceAccountClientId"]: user
+            for user in realm["users"] if "serviceAccountClientId" in user
+        }
+        actual = {
+            caller: sorted(user["clientRoles"]["realm-management"])
+            for caller, user in accounts.items()
+            if "realm-management" in user.get("clientRoles", {})
+        }
+        self.assertEqual(actual, expected)
+        self.assertEqual(
+            realm["clientScopeMappings"].get("realm-management"),
+            [{"client": caller, "roles": roles} for caller, roles in expected.items()],
+        )
+        for caller in expected:
+            client = next(client for client in realm["clients"] if client["clientId"] == caller)
+            self.assertFalse(client["fullScopeAllowed"])
+        self.assertNotIn("realm-management", realm["roles"]["client"])
 
     def test_kind_harbor_trust_installs_idempotent_restart_restore_unit(self) -> None:
         calls: list[tuple[list[str], bytes | None]] = []
