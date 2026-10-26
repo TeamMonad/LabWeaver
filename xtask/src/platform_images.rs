@@ -1190,19 +1190,25 @@ fn verify_offline_pkg_closure(
     let base = root.join(dir);
     for (file, expected_sha256, _) in entries {
         let path = base.join(file);
-        let actual = std::fs::read(&path).map_err(|_| AppError::PlatformImage {
-            code: "LW_PACKAGE_INPUT_MISSING",
-            detail: path.to_string_lossy().into_owned(),
-        })?;
-        let actual = format!("{:x}", Sha256::digest(&actual));
-        if actual != *expected_sha256 {
-            return Err(AppError::PlatformImage {
-                code: "LW_PACKAGE_INPUT_INVALID",
-                detail: format!(
-                    "vendored package {file} sha256 mismatch: expected {expected_sha256}, observed {actual}"
-                ),
-            });
-        }
+        verify_offline_package(&path, file, expected_sha256)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn verify_offline_package(path: &Path, file: &str, expected_sha256: &str) -> Result<(), AppError> {
+    let actual = fs::read(path).map_err(|_| AppError::PlatformImage {
+        code: "LW_PACKAGE_INPUT_MISSING",
+        detail: path.to_string_lossy().into_owned(),
+    })?;
+    let actual = format!("{:x}", Sha256::digest(&actual));
+    if actual != expected_sha256 {
+        return Err(AppError::PlatformImage {
+            code: "LW_PACKAGE_INPUT_INVALID",
+            detail: format!(
+                "vendored package {file} sha256 mismatch: expected {expected_sha256}, observed {actual}"
+            ),
+        });
     }
     Ok(())
 }
@@ -1213,59 +1219,116 @@ fn ensure_offline_pkg_closure(
     dir: &str,
     entries: &[(&str, &str, &str)],
 ) -> Result<(), AppError> {
+    ensure_offline_pkg_closure_with(root, dir, entries, &mut download_package)
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_offline_pkg_closure_with(
+    root: &Path,
+    dir: &str,
+    entries: &[(&str, &str, &str)],
+    download: &mut impl FnMut(&str, &Path, bool) -> Result<(), AppError>,
+) -> Result<(), AppError> {
     let base = root.join(dir);
     fs::create_dir_all(&base)
         .map_err(|error| io_error("create offline package directory", error))?;
-    for (file, _, url) in entries {
-        let path = base.join(file);
-        if !path.exists() {
-            let output_path = path.to_string_lossy().into_owned();
+    for (file, expected_sha256, url) in entries {
+        ensure_verified_package(
+            &base.join(file),
+            url,
+            true,
+            |path| verify_offline_package(path, file, expected_sha256),
+            download,
+        )?;
+    }
+    Ok(())
+}
 
-            let download_result = run_checked(
-                Command::new("curl").args([
-                    "--fail",
-                    "--silent",
-                    "--show-error",
-                    "--location",
-                    "--retry",
-                    "3",
-                    "--noproxy",
-                    "*",
-                    "--output",
-                    &output_path,
-                    url,
-                ]),
-                "download vendored offline package",
-            );
-            if let Err(error) = download_result {
-                let cleanup_detail = match fs::remove_file(&path) {
-                    Ok(()) => None,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                    Err(error) => Some(format!("partial package cleanup failed: {error}")),
-                };
-                return Err(match error {
-                    AppError::ExternalCommand { role, code, detail } => {
-                        let mut detail = detail.unwrap_or_default();
-                        if !detail.is_empty() {
-                            detail.push_str("; ");
-                        }
-                        detail.push_str(&format!("package file {file}; source URL {url}"));
-                        if let Some(cleanup_detail) = cleanup_detail {
-                            detail.push_str("; ");
-                            detail.push_str(&cleanup_detail);
-                        }
-                        AppError::ExternalCommand {
-                            role,
-                            code,
-                            detail: Some(detail),
-                        }
-                    }
-                    error => error,
-                });
-            }
+#[cfg(target_os = "linux")]
+fn package_download_command(url: &str, path: &Path, bypass_proxy: bool) -> Command {
+    let mut command = Command::new("curl");
+    command.args([
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--location",
+        "--retry",
+        "3",
+        "--connect-timeout",
+        "30",
+        "--speed-limit",
+        "1024",
+        "--speed-time",
+        "60",
+        "--max-time",
+        "600",
+        "--retry-max-time",
+        "900",
+    ]);
+    if bypass_proxy {
+        command.args(["--noproxy", "*"]);
+    }
+    command.arg("--output").arg(path).arg(url);
+    command
+}
+
+#[cfg(target_os = "linux")]
+fn download_package(url: &str, path: &Path, bypass_proxy: bool) -> Result<(), AppError> {
+    run_checked(
+        &mut package_download_command(url, path, bypass_proxy),
+        if bypass_proxy {
+            "download vendored offline package"
+        } else {
+            "download pinned claude-code package"
+        },
+    )
+    .map(|_| ())
+    .map_err(|error| match error {
+        AppError::ExternalCommand { role, code, detail } => AppError::ExternalCommand {
+            role,
+            code,
+            detail: Some(format!(
+                "{}; package file {}; source URL {url}",
+                detail.unwrap_or_default(),
+                path.display()
+            )),
+        },
+        error => error,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_verified_package(
+    path: &Path,
+    url: &str,
+    bypass_proxy: bool,
+    verify: impl Fn(&Path) -> Result<(), AppError>,
+    download: &mut impl FnMut(&str, &Path, bool) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    if verify(path).is_ok() {
+        return Ok(());
+    }
+    if path.exists() {
+        fs::remove_file(path).map_err(|error| io_error("remove invalid package", error))?;
+    }
+    let mut partial = path.as_os_str().to_os_string();
+    partial.push(".part");
+    let partial = PathBuf::from(partial);
+    // curl overwrites an interrupted attempt's sibling; the final path is only
+    // published after the same verifier used by package-check accepts it.
+    let result = download(url, &partial, bypass_proxy)
+        .and_then(|()| verify(&partial))
+        .and_then(|()| {
+            fs::rename(&partial, path).map_err(|error| io_error("publish verified package", error))
+        });
+    if result.is_err() {
+        match fs::remove_file(&partial) {
+            Ok(()) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(io_error("remove partial package", error)),
         }
     }
-    verify_offline_pkg_closure(root, dir, entries)
+    result
 }
 #[cfg(target_os = "linux")]
 /// The web frontend is built outside the cluster (the build network cannot
@@ -1396,12 +1459,21 @@ fn verify_claude_code_package(root: &Path, lock: &PlatformImageLock) -> Result<(
     let expected = &lock.claude_code_linux_x64_sha512;
     let relative = format!("containers/claude-code-linux-x64-{version}.tgz");
     let path = root.join(&relative);
-    let actual = std::fs::read(&path).map_err(|_| AppError::PlatformImage {
+    verify_claude_code_package_at(&path, &relative, expected)
+}
+
+#[cfg(target_os = "linux")]
+fn verify_claude_code_package_at(
+    path: &Path,
+    relative: &str,
+    expected: &str,
+) -> Result<(), AppError> {
+    let actual = fs::read(path).map_err(|_| AppError::PlatformImage {
         code: "LW_PACKAGE_INPUT_MISSING",
-        detail: relative.clone(),
+        detail: relative.to_owned(),
     })?;
     let actual = sha512_bytes(&actual);
-    if actual != *expected {
+    if actual != expected {
         return Err(AppError::PlatformImage {
             code: "LW_PACKAGE_INPUT_INVALID",
             detail: format!(
@@ -1414,6 +1486,15 @@ fn verify_claude_code_package(root: &Path, lock: &PlatformImageLock) -> Result<(
 
 #[cfg(target_os = "linux")]
 fn ensure_claude_code_package(root: &Path, lock: &PlatformImageLock) -> Result<(), AppError> {
+    ensure_claude_code_package_with(root, lock, &mut download_package)
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_claude_code_package_with(
+    root: &Path,
+    lock: &PlatformImageLock,
+    download: &mut impl FnMut(&str, &Path, bool) -> Result<(), AppError>,
+) -> Result<(), AppError> {
     let version = &lock.claude_code;
     let relative = format!("containers/claude-code-linux-x64-{version}.tgz");
     if !version
@@ -1426,27 +1507,17 @@ fn ensure_claude_code_package(root: &Path, lock: &PlatformImageLock) -> Result<(
         });
     }
     let path = root.join(&relative);
-    if !path.exists() {
-        let url = format!(
-            "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/\
-             claude-code-linux-x64-{version}.tgz"
-        );
-        run_checked(
-            Command::new("curl").args([
-                "--fail",
-                "--silent",
-                "--show-error",
-                "--location",
-                "--retry",
-                "3",
-                "--output",
-                &path.to_string_lossy(),
-                &url,
-            ]),
-            "download pinned claude-code package",
-        )?;
-    }
-    verify_claude_code_package(root, lock)
+    let url = format!(
+        "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/\
+         claude-code-linux-x64-{version}.tgz"
+    );
+    ensure_verified_package(
+        &path,
+        &url,
+        false,
+        |path| verify_claude_code_package_at(path, &relative, &lock.claude_code_linux_x64_sha512),
+        download,
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -2323,27 +2394,208 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn package_prepare_rejects_wrong_existing_offline_package_like_check() -> Result<(), String> {
+    fn package_prepare_replaces_wrong_existing_offline_package() -> Result<(), String> {
         let root = tempfile::tempdir().map_err(|error| error.to_string())?;
         let dir = root.path().join("containers/debian-bookworm-pkgs");
         fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-        fs::write(dir.join("fixture.deb"), b"wrong\n").map_err(|error| error.to_string())?;
+        let final_path = dir.join("fixture.deb");
+        fs::write(&final_path, b"wrong\n").map_err(|error| error.to_string())?;
         let expected = format!("{:x}", Sha256::digest(b"right\n"));
-        let entries = [(
-            "fixture.deb",
-            expected.as_str(),
-            "https://invalid.example/fixture.deb",
-        )];
+        let url = "https://invalid.example/fixture.deb";
+        let entries = [("fixture.deb", expected.as_str(), url)];
         let check_error =
             verify_offline_pkg_closure(root.path(), "containers/debian-bookworm-pkgs", &entries)
                 .expect_err("check must reject wrong package");
-        let prepare_error =
-            ensure_offline_pkg_closure(root.path(), "containers/debian-bookworm-pkgs", &entries)
-                .expect_err("prepare must reject wrong package without redownloading");
-        if prepare_error.to_string() != check_error.to_string() {
-            return Err(format!("prepare and check errors differ: {prepare_error}"));
+        assert!(check_error.to_string().contains("LW_PACKAGE_INPUT_INVALID"));
+        assert_eq!(
+            fs::read(&final_path).map_err(|error| error.to_string())?,
+            b"wrong\n"
+        );
+        let mut downloads = 0;
+        let mut download = |source: &str, path: &Path, bypass_proxy: bool| {
+            downloads += 1;
+            assert_eq!(source, url);
+            assert!(bypass_proxy);
+            assert_eq!(path, dir.join("fixture.deb.part"));
+            assert!(!final_path.exists());
+            fs::write(path, b"right\n").map_err(|error| io_error("write test package", error))
+        };
+        for _ in 0..2 {
+            ensure_offline_pkg_closure_with(
+                root.path(),
+                "containers/debian-bookworm-pkgs",
+                &entries,
+                &mut download,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        assert_eq!(downloads, 1, "valid package must be reused");
+        verify_offline_pkg_closure(root.path(), "containers/debian-bookworm-pkgs", &entries)
+            .map_err(|error| error.to_string())?;
+        assert!(!dir.join("fixture.deb.part").exists());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn package_prepare_replaces_truncated_claude_package() -> Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let dir = root.path().join("containers");
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let final_path = dir.join("claude-code-linux-x64-1.0.0.tgz");
+        let partial = dir.join("claude-code-linux-x64-1.0.0.tgz.part");
+        let bytes = b"complete pinned package\n";
+        fs::write(&final_path, &bytes[..5]).map_err(|error| error.to_string())?;
+        fs::write(&partial, b"interrupted earlier attempt").map_err(|error| error.to_string())?;
+        let mut lock = fixture_lock();
+        lock.claude_code_linux_x64_sha512 = sha512_bytes(bytes);
+        let error = verify_claude_code_package(root.path(), &lock)
+            .expect_err("check must reject the truncated package without changing it");
+        assert!(error.to_string().contains("LW_PACKAGE_INPUT_INVALID"));
+        assert_eq!(
+            fs::read(&final_path).map_err(|error| error.to_string())?,
+            &bytes[..5]
+        );
+        let mut downloads = 0;
+        let mut download = |url: &str, path: &Path, bypass_proxy: bool| {
+            downloads += 1;
+            assert!(url.ends_with("claude-code-linux-x64-1.0.0.tgz"));
+            assert!(!bypass_proxy);
+            assert_eq!(path, partial);
+            assert!(!final_path.exists());
+            fs::write(path, bytes).map_err(|error| io_error("write test package", error))
+        };
+        for _ in 0..2 {
+            ensure_claude_code_package_with(root.path(), &lock, &mut download)
+                .map_err(|error| error.to_string())?;
+        }
+        assert_eq!(downloads, 1, "valid package must be reused");
+        verify_claude_code_package(root.path(), &lock).map_err(|error| error.to_string())?;
+        assert!(!partial.exists());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_claude_download_never_publishes_a_package() -> Result<(), String> {
+        for existing in [false, true] {
+            for transfer_failed in [false, true] {
+                let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+                let dir = root.path().join("containers");
+                fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+                let final_path = dir.join("claude-code-linux-x64-1.0.0.tgz");
+                if existing {
+                    fs::write(&final_path, b"truncated").map_err(|error| error.to_string())?;
+                }
+                let mut lock = fixture_lock();
+                lock.claude_code_linux_x64_sha512 = sha512_bytes(b"right\n");
+                let mut downloads = 0;
+                let error =
+                    ensure_claude_code_package_with(root.path(), &lock, &mut |_, path, _| {
+                        downloads += 1;
+                        assert!(!final_path.exists());
+                        fs::write(path, b"wrong\n")
+                            .map_err(|error| io_error("write partial test package", error))?;
+                        if transfer_failed {
+                            Err(io_error(
+                                "test transfer failed",
+                                std::io::Error::other("stalled"),
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .expect_err("failed transfer or checksum must not publish a package");
+                assert_eq!(downloads, 1, "prepare must not loop on a bad download");
+                if !transfer_failed {
+                    assert!(error.to_string().contains("LW_PACKAGE_INPUT_INVALID"));
+                }
+                assert!(!final_path.exists());
+                assert!(!dir.join("claude-code-linux-x64-1.0.0.tgz.part").exists());
+            }
         }
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_offline_download_never_publishes_a_package() -> Result<(), String> {
+        for existing in [false, true] {
+            for transfer_failed in [false, true] {
+                let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+                let dir = root.path().join("containers/debian-bookworm-pkgs");
+                fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+                let final_path = dir.join("fixture.deb");
+                if existing {
+                    fs::write(&final_path, b"wrong existing").map_err(|error| error.to_string())?;
+                }
+                let expected = format!("{:x}", Sha256::digest(b"right\n"));
+                let entries = [(
+                    "fixture.deb",
+                    expected.as_str(),
+                    "https://invalid.example/pkg",
+                )];
+                let mut downloads = 0;
+                let error = ensure_offline_pkg_closure_with(
+                    root.path(),
+                    "containers/debian-bookworm-pkgs",
+                    &entries,
+                    &mut |_, path, _| {
+                        downloads += 1;
+                        assert!(!final_path.exists());
+                        fs::write(path, b"wrong\n")
+                            .map_err(|error| io_error("write partial test package", error))?;
+                        if transfer_failed {
+                            Err(io_error(
+                                "test transfer failed",
+                                std::io::Error::other("stalled"),
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .expect_err("failed transfer or checksum must not publish a package");
+                assert_eq!(downloads, 1, "prepare must not loop on a bad download");
+                if !transfer_failed {
+                    assert!(error.to_string().contains("LW_PACKAGE_INPUT_INVALID"));
+                }
+                assert!(!final_path.exists());
+                assert!(!dir.join("fixture.deb.part").exists());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn package_downloads_bound_connections_stalls_and_retries() {
+        for bypass_proxy in [false, true] {
+            let path = Path::new("package.tgz.part");
+            let command =
+                package_download_command("https://invalid.example/pkg", path, bypass_proxy);
+            let args: Vec<_> = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy())
+                .collect();
+            assert_eq!(command.get_program(), "curl");
+            assert!(args.iter().any(|arg| arg == "--fail"));
+            for (flag, value) in [
+                ("--connect-timeout", "30"),
+                ("--speed-limit", "1024"),
+                ("--speed-time", "60"),
+                ("--max-time", "600"),
+                ("--retry", "3"),
+                ("--retry-max-time", "900"),
+                ("--output", "package.tgz.part"),
+            ] {
+                assert!(
+                    args.windows(2)
+                        .any(|pair| pair[0] == flag && pair[1] == value)
+                );
+            }
+            assert_eq!(args.iter().any(|arg| arg == "--noproxy"), bypass_proxy);
+        }
     }
 
     #[cfg(target_os = "linux")]
