@@ -44,6 +44,8 @@ uuid.workspace = true
 workspace = true
 
 [dev-dependencies]
+agent-service = { path = "../agent-service" }
+resource-service = { path = "../resource-service" }
 control-service = { path = "../control-service" }
 artifact-store = { path = "../../crates/artifact-store", features = ["test-support"] }
 serde_yaml.workspace = true

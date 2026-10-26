@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{Path, Query, RawQuery, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -275,9 +275,17 @@ async fn list_project_runs(
     State(state): State<Arc<AgentApiState>>,
     caller: Option<Extension<auth::ServiceIdentity>>,
     Path(project_id): Path<ProjectId>,
-    Query(query): Query<AgentRunListQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Response, AgentApiError> {
     require_control(caller)?;
+    let query =
+        AgentRunListQuery::from_query(raw_query.as_deref().unwrap_or_default()).map_err(|_| {
+            AgentApiError {
+                status: StatusCode::BAD_REQUEST,
+                diagnostic: "LW_CONTRACT_DOCUMENT_INVALID",
+                retryable: false,
+            }
+        })?;
     Ok(Json(
         state
             .store

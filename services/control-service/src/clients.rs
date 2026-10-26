@@ -239,13 +239,16 @@ impl AgentClient {
         project_id: contracts::ProjectId,
         query: &AgentRunListQuery,
     ) -> Result<AgentRunHistoryPage, DownstreamError> {
+        let mut endpoint = self
+            .config
+            .endpoint(&format!("internal/v1/projects/{project_id}/agent-runs"))?;
+        endpoint.set_query(Some(
+            &query
+                .to_query()
+                .map_err(|_| DownstreamError::Configuration)?,
+        ));
         let page: AgentRunHistoryPage = send_json(
-            self.client
-                .get(
-                    self.config
-                        .endpoint(&format!("internal/v1/projects/{project_id}/agent-runs"))?,
-                )
-                .query(query),
+            self.client.get(endpoint),
             &self.service_token_client,
             self.token_target,
         )

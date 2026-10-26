@@ -45,6 +45,8 @@ mod freeze_context_tests;
 mod rubric_rules_proxy_tests;
 #[path = "runtime_origin_tests.rs"]
 mod runtime_origin_tests;
+#[path = "state_query_tests.rs"]
+mod state_query_tests;
 #[path = "../tests/support/mod.rs"]
 pub(super) mod support;
 

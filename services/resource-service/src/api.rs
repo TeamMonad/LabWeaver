@@ -2,7 +2,7 @@
 
 use axum::{
     Json, Router,
-    extract::{Extension, Path, Query, Request, State},
+    extract::{Extension, Path, Query, RawQuery, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -442,9 +442,11 @@ async fn list_requests_for_project(
     State(state): State<ResourceApiState>,
     Extension(principal): Extension<ResourceCallerPrincipal>,
     Path(project_id): Path<ProjectId>,
-    Query(query): Query<ResourceRequestListQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Response, ResourceApiError> {
     authorize(&principal);
+    let query = ResourceRequestListQuery::from_query(raw_query.as_deref().unwrap_or_default())
+        .map_err(|_| ResourceApiError::ContractInvalid)?;
     query
         .validate()
         .map_err(|_| ResourceApiError::InvalidCursor)?;
@@ -1551,6 +1553,8 @@ pub enum ResourceApiError {
     ServiceConfiguration,
     #[error("LW_RESOURCE_REVISION_CONFLICT")]
     RevisionConflict,
+    #[error("LW_CONTRACT_DOCUMENT_INVALID")]
+    ContractInvalid,
     #[error("LW_RESOURCE_REQUEST_INVALID")]
     Invalid,
     #[error("LW_RESOURCE_REQUEST_CURSOR_INVALID")]
@@ -1573,7 +1577,8 @@ impl IntoResponse for ResourceApiError {
             | Self::Store(ResourceStoreError::Credits(crate::credits::CreditError::Denied)) => {
                 StatusCode::FORBIDDEN
             }
-            Self::Invalid
+            Self::ContractInvalid
+            | Self::Invalid
             | Self::InvalidCursor
             | Self::Store(
                 ResourceStoreError::RateEndInvalid

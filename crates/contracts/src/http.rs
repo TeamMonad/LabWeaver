@@ -1,5 +1,7 @@
 //! Infrastructure-neutral REST, SSE, concurrency, and security contract catalog.
 
+mod query;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use schemars::JsonSchema;
@@ -5542,6 +5544,8 @@ pub enum HttpContractError {
     PublicInternalLeak,
     #[error("cursor or page limit is invalid")]
     InvalidCursorPage,
+    #[error("list query encoding is invalid")]
+    InvalidListQuery,
     #[error("environment request or query is invalid")]
     InvalidEnvironmentQuery,
     #[error("internal service identity or canonical response is invalid")]

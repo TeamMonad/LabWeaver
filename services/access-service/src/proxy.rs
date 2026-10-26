@@ -882,9 +882,10 @@ async fn authorize_resource_request(
                 .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
             match *method {
                 Method::GET => {
-                    let Query(query) =
-                        Query::<contracts::http::ResourceRequestListQuery>::try_from_uri(uri)
-                            .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+                    let query = contracts::http::ResourceRequestListQuery::from_query(
+                        uri.query().unwrap_or_default(),
+                    )
+                    .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
                     query
                         .validate()
                         .map_err(|_| ApiError::bad_request("LW_RESOURCE_REQUEST_CURSOR_INVALID"))?;

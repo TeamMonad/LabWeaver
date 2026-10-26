@@ -16,7 +16,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::Request;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
@@ -1378,8 +1378,10 @@ async fn list_project_agent_runs(
     Extension(principal): Extension<GatewayPrincipal>,
     Path(project_id): Path<ProjectId>,
     headers: HeaderMap,
-    Query(query): Query<AgentRunListQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Response, ApiError> {
+    let query = AgentRunListQuery::from_query(raw_query.as_deref().unwrap_or_default())
+        .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
     authorize_project(
         &state,
         &principal,
