@@ -52,6 +52,7 @@ nix = { version = "0.31.3", default-features = false, features = ["process", "re
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest"] }
 rand = "0.9.1"
 memmap2 = "=0.9.9"
+rust_decimal = { version = "=1.43.0", default-features = false, features = ["std", "serde-with-str"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["cookies", "json", "rustls-tls", "stream"] }
 russh = { version = "0.62.2", default-features = false, features = ["ring"] }
 russh-sftp = "2.3.0"
@@ -86,8 +87,9 @@ uuid = { version = "1.16.0", features = ["serde", "v4", "v7"] }
 url = { version = "2.5.4", features = ["serde"] }
 x509-parser = "0.16.0"
 
- # Keep unsafe denied; the sole reviewed mmap call uses a function-level allow.
- unsafe_code = "deny"
+[workspace.lints.rust]
+# Keep unsafe denied; the sole reviewed mmap call uses a function-level allow (tests/ci/test_unsafe_allowlist.py).
+unsafe_code = "deny"
 missing_docs = "warn"
 
 [workspace.lints.clippy]

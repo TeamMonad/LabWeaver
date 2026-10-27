@@ -118,15 +118,20 @@ admission has succeeded. Unreadable/corrupt configuration is HTTP 503
 
 ## Build context resource boundary
 
-Agent validates the immutable context size before opening its object body. The configured
-`maxUnpackedContextBytes` value is both the maximum expanded archive budget and the total byte
-budget shared by concurrent Dockerfile builds in one Agent process. A build waits for its declared
-bytes to become available; cancellation or the original deadline cancels that wait without
-consuming budget. Context objects are copied to a temporary file with a fixed-size storage buffer,
-then unpacked entry-by-entry into a temporary workspace. The archive is never retained as a
-whole in control-plane memory. Temporary object and workspace files are owned by cleanup guards,
-including cancellation and failed archive traversal. Oversized declarations fail before a body
-read with a stable rejected result. Archive paths, parent traversal and links remain rejected.
+Agent validates the immutable context's declared size before opening its object body. The
+configured `maxUnpackedContextBytes` is a per-process semaphore budget for logical unpacked
+file payload bytes, not a bound on overlapping temporary files or tar header overhead. Plain tar
+reserves its entire declared object size atomically; gzip reserves the full configured cap before
+the body read and never trusts the gzip ISIZE trailer. Unpacking counts actual expanded file
+payload bytes against that reservation, rejecting an oversized archive. Concurrent builds wait
+for permits; cancellation or the original deadline interrupts the wait without leaking permits.
+The permit remains held until the compressed object temp file, unpacked workspace and BuildKit
+upload spool/mmap `Bytes` have all been dropped after the build. The upload tar is spooled to disk
+and mapped rather than copied into an in-memory archive. Disk exposure includes simultaneous
+compressed object, unpacked workspace and re-packed BuildKit spool (plus tar headers/padding),
+potentially across concurrent builds; `maxUnpackedContextBytes` does not cap that disk usage.
+Temp-file owners clean up on success, rejection and cancellation. Archive paths, parent traversal
+and links remain rejected.
 
 ## Build network posture
 

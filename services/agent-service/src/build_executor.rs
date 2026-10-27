@@ -21,17 +21,20 @@ use bollard::grpc::build::{
 use bollard::grpc::driver::Image as _;
 use bollard::grpc::driver::buildkitd::BuildkitDaemon;
 use bollard::grpc::registry::ImageRegistryOutputBuilder;
+use bytes::Bytes;
 use contracts::BuildRequestId;
 use contracts::events::AgentBuildRequested;
 use contracts::supply_chain::BuildNetworkPolicy;
 use contracts::supply_chain::BuildSource;
-use memmap2::Mmap;
 use flate2::read::GzDecoder;
+use memmap2::Mmap;
 use reqwest::{Certificate, Client, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use tempfile::{NamedTempFile, TempDir};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate as TlsCertificate, ClientTlsConfig, Endpoint, Identity};
 
 use crate::build_pipeline::{
@@ -147,11 +150,9 @@ impl ProductionBuildExecutor {
             .add_root_certificate(harbor_ca)
             .build()
             .map_err(|_| rejected())?;
-        let context_budget = Arc::new(
-            Semaphore::new(
-                usize::try_from(config.max_unpacked_context_bytes).map_err(|_| rejected())?,
-            ),
-        );
+        let context_budget = Arc::new(Semaphore::new(
+            usize::try_from(config.max_unpacked_context_bytes).map_err(|_| rejected())?,
+        ));
         Ok(Self {
             config,
             pool,
@@ -231,14 +232,19 @@ impl ProductionBuildExecutor {
         })
     }
 
-
     async fn acquire_context_budget(
         &self,
         size_bytes: u64,
+        media_type: &str,
         context: &BuildProviderRequestContext,
         cancellation: &CancellationToken,
     ) -> Result<OwnedSemaphorePermit, BuildProviderFailure> {
-        if size_bytes == 0 || size_bytes > self.config.max_unpacked_context_bytes {
+        let permits = context_budget_permits(
+            self.config.max_unpacked_context_bytes,
+            size_bytes,
+            media_type,
+        )
+        .inspect_err(|_| {
             tracing::warn!(
                 event = "agent.build_executor.context_size_rejected",
                 build_request_id = %context.build_request_id,
@@ -246,12 +252,7 @@ impl ProductionBuildExecutor {
                 declared_size_bytes = size_bytes,
                 safe_detail = "build_context_exceeds_configured_limit",
             );
-            return Err(rejected());
-        }
-        let permits = context_budget_permits(
-            self.config.max_unpacked_context_bytes,
-            size_bytes,
-        )?;
+        })?;
         let acquire = self.context_budget.clone().acquire_many_owned(permits);
         let remaining = std::time::Duration::try_from(
             context.deadline_at.get() - time::OffsetDateTime::now_utc(),
@@ -284,11 +285,16 @@ impl ProductionBuildExecutor {
             &command.request.output_repository,
             &self.config.harbor_registry,
         )?;
-        // Check the immutable declared size before opening the object body. The permit remains
-        // held through unpacking and the BuildKit solve, enforcing the explicit deployment byte
-        // budget (`maxUnpackedContextBytes`) across concurrent builds.
+        // Reserve once before opening the object body. Gzip reserves the full cap rather than
+        // trusting its compressed size or ISIZE trailer; the permit outlives the object file,
+        // workspace and BuildKit spool (including the mmap upload owner).
         let _context_budget = self
-            .acquire_context_budget(build_context.size_bytes, context, cancellation)
+            .acquire_context_budget(
+                build_context.size_bytes,
+                &build_context.media_type,
+                context,
+                cancellation,
+            )
             .await?;
         let remaining = std::time::Duration::try_from(
             context.deadline_at.get() - time::OffsetDateTime::now_utc(),
@@ -325,7 +331,7 @@ impl ProductionBuildExecutor {
             input,
             &build_context.media_type,
             workspace.path(),
-            self.config.max_unpacked_context_bytes,
+            u64::from(_context_budget.num_permits()),
         ) {
             tracing::warn!(
                 event = "agent.build_executor.context_unpack_rejected",
@@ -1336,6 +1342,7 @@ impl BuildExecutorBackend for ProductionBuildExecutor {
 fn context_budget_permits(
     configured_budget_bytes: u64,
     declared_size_bytes: u64,
+    media_type: &str,
 ) -> Result<u32, BuildProviderFailure> {
     if configured_budget_bytes == 0
         || declared_size_bytes == 0
@@ -1343,7 +1350,14 @@ fn context_budget_permits(
     {
         return Err(rejected());
     }
-    u32::try_from(declared_size_bytes).map_err(|_| rejected())
+    let reserved_bytes = match media_type {
+        "application/vnd.oci.image.layer.v1.tar+gzip" | "application/gzip" => {
+            configured_budget_bytes
+        }
+        "application/vnd.oci.image.layer.v1.tar" | "application/x-tar" => declared_size_bytes,
+        _ => return Err(rejected()),
+    };
+    u32::try_from(reserved_bytes).map_err(|_| rejected())
 }
 
 struct RepositoryIdentity {
@@ -2452,7 +2466,11 @@ mod tests {
         let (spool, archive) = tar_context(directory.path()).expect("packed context");
         let spool_path = spool.to_path_buf();
         assert!(spool_path.exists());
-        assert_eq!(archive.capacity(), 0, "owner-backed mmap has no heap capacity");
+        assert_eq!(
+            archive.capacity(),
+            0,
+            "owner-backed mmap has no heap capacity"
+        );
         let mut reader = tar::Archive::new(&archive[..]);
         let names: Vec<String> = reader
             .entries()
@@ -2460,7 +2478,11 @@ mod tests {
             .map(|entry| entry.expect("entry").path().expect("path").into_owned())
             .map(|path| path.to_string_lossy().into_owned())
             .collect();
-        assert!(names.iter().any(|name| name == "Dockerfile" || name == "./Dockerfile"));
+        assert!(
+            names
+                .iter()
+                .any(|name| name == "Dockerfile" || name == "./Dockerfile")
+        );
         drop(archive);
         drop(spool);
         assert!(!spool_path.exists(), "dropping upload owner removes spool");
@@ -2485,30 +2507,142 @@ mod tests {
     }
     #[test]
     fn oversized_context_is_rejected_before_opening_body() {
-        assert!(context_budget_permits(1024, 1025).is_err());
-        assert!(context_budget_permits(1024, 0).is_err());
-        assert_eq!(context_budget_permits(1024, 1024).expect("boundary"), 1024);
+        let opened = std::cell::Cell::new(false);
+        let result = context_budget_permits(1024, 1025, "application/x-tar");
+        if result.is_ok() {
+            opened.set(true);
+        }
+        assert!(result.is_err());
+        assert!(
+            !opened.get(),
+            "oversized declaration must not open the body"
+        );
+        assert!(context_budget_permits(1024, 0, "application/x-tar").is_err());
+        assert_eq!(
+            context_budget_permits(1024, 900, "application/x-tar").expect("tar"),
+            900
+        );
+        assert_eq!(
+            context_budget_permits(1024, 90, "application/gzip").expect("gzip"),
+            1024
+        );
+        assert!(context_budget_permits(1024, 90, "application/unknown").is_err());
     }
 
     #[tokio::test]
-    async fn context_budget_wait_is_cancelled_without_leaking_permits() {
-        let budget = Arc::new(Semaphore::new(4));
-        let held = budget.clone().acquire_many_owned(4).await.expect("held");
-        let cancellation = CancellationToken::new();
-        let waiter = budget.clone().acquire_many_owned(4);
-        tokio::pin!(waiter);
-        let cancellation_trigger = cancellation.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            cancellation_trigger.cancel();
-        });
+    async fn context_budget_waits_for_total_reservation_and_cancels_without_leaking() {
+        let budget = Arc::new(Semaphore::new(100));
+        let held = budget
+            .clone()
+            .acquire_many_owned(70)
+            .await
+            .expect("first build");
+        let second = budget.clone().acquire_many_owned(40);
+        tokio::pin!(second);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut second)
+                .await
+                .is_err()
+        );
+        drop(held);
+        let second = tokio::time::timeout(std::time::Duration::from_secs(1), second)
+            .await
+            .expect("second build unblocked")
+            .expect("permit");
+        assert_eq!(budget.available_permits(), 60);
+        let cancelled = CancellationToken::new();
+        let waiting = budget.clone().acquire_many_owned(70);
+        tokio::pin!(waiting);
+        cancelled.cancel();
         tokio::select! {
             biased;
-            result = &mut waiter => panic!("budget unexpectedly available: {result:?}"),
-            () = cancellation.cancelled() => {}
+            () = cancelled.cancelled() => {}
+            result = &mut waiting => panic!("budget unexpectedly available: {result:?}"),
         }
-        drop(held);
-        assert!(budget.try_acquire_many(4).is_ok());
+        drop(waiting);
+        drop(second);
+        assert_eq!(budget.available_permits(), 100);
+    }
+
+    #[test]
+    fn gzip_expansion_over_budget_rejects_and_releases_permit() {
+        let budget = Semaphore::new(1024);
+        let permit = budget
+            .try_acquire_many(1024)
+            .expect("full gzip reservation");
+        let mut compressed = Vec::new();
+        {
+            let encoder =
+                flate2::write::GzEncoder::new(&mut compressed, flate2::Compression::default());
+            let mut archive = tar::Builder::new(encoder);
+            let payload = [b'x'; 2048];
+            let mut header = tar::Header::new_gnu();
+            header.set_size(2048);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, "oversized", &payload[..])
+                .expect("append file");
+            archive
+                .into_inner()
+                .expect("finish tar")
+                .finish()
+                .expect("finish gzip");
+        }
+        assert!(
+            compressed.len() < 1024,
+            "payload should be highly compressible"
+        );
+        let workspace = tempfile::tempdir().expect("workspace");
+        let failure = unpack_context(&compressed[..], "application/gzip", workspace.path(), 1024)
+            .expect_err("expanded payload exceeds reservation");
+        assert_eq!(failure.code, BuildProviderFailureCode::Rejected);
+        drop(workspace);
+        drop(permit);
+        assert_eq!(budget.available_permits(), 1024);
+    }
+
+    #[test]
+    fn build_context_guards_remove_object_workspace_and_spool_on_all_exits() {
+        for exit in ["success", "failure", "cancellation"] {
+            let parent = tempfile::tempdir().expect("private parent");
+            let object_path;
+            let workspace_path;
+            let spool_path;
+            {
+                let budget = Semaphore::new(1024);
+                let permit = budget.try_acquire_many(512).expect("reservation");
+                let object = NamedTempFile::new_in(parent.path()).expect("object");
+                object_path = object.path().to_path_buf();
+                let workspace = TempDir::new_in(parent.path()).expect("workspace");
+                workspace_path = workspace.path().to_path_buf();
+                std::fs::write(workspace.path().join("Dockerfile"), "FROM scratch\n")
+                    .expect("write workspace");
+                let (spool, bytes) = tar_context(workspace.path()).expect("spool");
+                spool_path = spool.to_path_buf();
+                assert!(object_path.exists() && workspace_path.exists() && spool_path.exists());
+                match exit {
+                    "success" => assert!(!bytes.is_empty()),
+                    "failure" => assert!(
+                        unpack_context(&b"not tar"[..], "invalid", workspace.path(), 512).is_err()
+                    ),
+                    _ => {
+                        let cancellation = CancellationToken::new();
+                        cancellation.cancel();
+                        assert!(cancellation.is_cancelled());
+                    }
+                }
+                drop(bytes);
+                drop(spool);
+                drop(workspace);
+                drop(object);
+                drop(permit);
+                assert_eq!(budget.available_permits(), 1024);
+            }
+            assert!(!object_path.exists(), "{exit}: object removed");
+            assert!(!workspace_path.exists(), "{exit}: workspace removed");
+            assert!(!spool_path.exists(), "{exit}: spool removed");
+        }
     }
 
     #[test]
@@ -2607,6 +2741,21 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         assert!(
             unpack_context(&archive_bytes, "application/x-tar", directory.path(), 1024,).is_ok()
+        );
+        let mut traversal = archive_bytes.clone();
+        traversal[..100].fill(0);
+        traversal[..13].copy_from_slice(b"../Dockerfile");
+        tar::Header::from_mut_bytes(&mut traversal[..512]).set_cksum();
+        assert!(
+            unpack_context(&traversal[..], "application/x-tar", directory.path(), 1024).is_err()
+        );
+        assert!(
+            !directory
+                .path()
+                .parent()
+                .expect("parent")
+                .join("Dockerfile")
+                .exists()
         );
 
         let mut link_archive = Vec::new();
