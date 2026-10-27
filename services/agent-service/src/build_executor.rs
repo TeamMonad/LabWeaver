@@ -343,23 +343,23 @@ impl ProductionBuildExecutor {
                 code = ?failure.code,
             );
         })?;
-        let workspace = &resources.workspace;
-        if let Err(failure) = validate_dockerfile(workspace.path(), dockerfile_path) {
-            tracing::warn!(
-                event = "agent.build_executor.dockerfile_rejected",
-                component = "build-executor",
-                operation = "build.dockerfile.validate",
-                outcome = "rejected",
-                duration_ms = 0_u64,
-                build_request_id = %context.build_request_id,
-                diagnostic_code = failure.diagnostic_code(),
-                error_kind = "dockerfile_rejected",
-                failure_stage = "build.dockerfile.validate",
-                retryable = false,
-                safe_detail = "dockerfile_rejected",
-            );
-            return Err(failure);
-        }
+        validate_dockerfile(resources.workspace.path(), dockerfile_path).inspect_err(
+            |failure| {
+                tracing::warn!(
+                    event = "agent.build_executor.dockerfile_rejected",
+                    component = "build-executor",
+                    operation = "build.dockerfile.validate",
+                    outcome = "rejected",
+                    duration_ms = 0_u64,
+                    build_request_id = %context.build_request_id,
+                    diagnostic_code = failure.diagnostic_code(),
+                    error_kind = "dockerfile_rejected",
+                    failure_stage = "build.dockerfile.validate",
+                    retryable = false,
+                    safe_detail = "dockerfile_rejected",
+                );
+            },
+        )?;
         let tag = candidate_tag(identity);
         let tagged = format!("{}:{tag}", command.request.output_repository);
         // BuildKit solves with a push-to-registry exporter. The authoritative
@@ -2591,15 +2591,15 @@ mod tests {
         fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
             let count = self.input.read(buffer)?;
             self.read_bytes += count;
-            if self.read_bytes >= 128 * 1024 {
-                if let Some(reached) = self.reached.take() {
-                    reached
-                        .send(())
-                        .map_err(|()| std::io::Error::other("test receiver dropped"))?;
-                    self.resume
-                        .recv_timeout(std::time::Duration::from_secs(5))
-                        .map_err(std::io::Error::other)?;
-                }
+            if self.read_bytes >= 128 * 1024
+                && let Some(reached) = self.reached.take()
+            {
+                reached
+                    .send(())
+                    .map_err(|()| std::io::Error::other("test receiver dropped"))?;
+                self.resume
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .map_err(std::io::Error::other)?;
             }
             Ok(count)
         }
@@ -2673,9 +2673,7 @@ mod tests {
             .await
             .expect("worker stops promptly")
             .expect("worker task joined");
-        let Err(failure) = result else {
-            panic!("cancelled extraction must not succeed")
-        };
+        let failure = result.err().expect("cancelled extraction must not succeed");
         assert_eq!(failure.code, BuildProviderFailureCode::Cancelled);
         assert!(!object_path.exists(), "cancelled object file removed");
         assert!(
