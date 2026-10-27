@@ -11,10 +11,10 @@ pub mod service_runtime;
 pub mod api;
 mod candidate_builds;
 pub mod clients;
+mod course_calendar;
 mod manual_templates;
 mod material_uploads;
 mod membership_governance;
-mod course_calendar;
 pub mod messaging;
 mod model_input_authorization;
 pub mod notifications;
@@ -9499,6 +9499,22 @@ pub enum ControlError {
     MembershipNotFound,
     #[error("LW_PROJECT_OWNER_MEMBERSHIP_PROTECTED")]
     OwnerMembershipProtected,
+    #[error("LW_COURSE_CALENDAR_NOT_FOUND")]
+    CourseCalendarNotFound,
+    #[error("LW_COURSE_CALENDAR_INVALID")]
+    CourseCalendarInvalid,
+    #[error("LW_COURSE_CALENDAR_CONFLICT")]
+    CourseCalendarConflict,
+    #[error("LW_COURSE_ROSTER_IMPORT_INVALID")]
+    CourseRosterImportInvalid,
+    #[error("LW_COURSE_ROSTER_ROW_INVALID")]
+    CourseRosterRowInvalid,
+    #[error("LW_COURSE_ROSTER_ROLE_INVALID")]
+    CourseRosterRoleInvalid,
+    #[error("LW_COURSE_ROSTER_ACCOUNT_NOT_FOUND")]
+    CourseRosterAccountNotFound,
+    #[error("LW_COURSE_ROSTER_GOVERNANCE_DENIED")]
+    CourseRosterGovernanceDenied,
     #[error("LW_MEMBERSHIP_INVITATION_DENIED")]
     InvitationDenied,
     #[error("LW_MEMBERSHIP_INVITATION_NOT_FOUND")]

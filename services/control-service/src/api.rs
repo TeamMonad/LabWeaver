@@ -47,6 +47,7 @@ use contracts::http::{
     WithdrawEnvironmentTemplateReleaseRequest, WithdrawEvaluationReleaseRequest,
     WorkConfigurationAdmissionQuery, WorkConfigurationPlanView, resolve_sse_resume,
 };
+use contracts::membership_governance::{ResolvedCourseRosterImportRequest, UpdateCourseCalendar};
 use contracts::{
     ActorId, AgentRunId, AuthorizationDecisionRequest, AuthorizationScope, BffSessionId,
     CandidateId, CourseId, DiagnosticCode, EvaluationReleaseId, EventId, OperationId,
@@ -296,6 +297,18 @@ pub fn router(state: Arc<ApiState>) -> Router {
             post(withdraw_evaluation_release),
         )
         .route("/api/v1/courses/{course_id}/events", get(events))
+        .route(
+            "/api/v1/courses/{course_id}/calendar",
+            get(get_course_calendar).put(update_course_calendar),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/roster/import",
+            post(import_course_roster),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/student-view",
+            get(get_course_student_view),
+        )
         .route(
             "/api/v1/admin/images",
             get(list_admin_images).post(register_admin_image),
@@ -3180,6 +3193,104 @@ async fn cancel_admin_image_upload(
         )
         .await?;
     Ok(with_etag(StatusCode::ACCEPTED, &status, status.revision))
+}
+
+async fn get_course_calendar(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(course_id): Path<CourseId>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let decision =
+        authorize_decision(&state, &principal, &headers, "getCourseCalendar", course_id).await?;
+    let calendar = state
+        .control
+        .course_calendar(&decision.actor, course_id)
+        .await?;
+    Ok(with_etag(StatusCode::OK, &calendar, calendar.revision))
+}
+
+async fn update_course_calendar(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(course_id): Path<CourseId>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateCourseCalendar>,
+) -> Result<Response, ApiError> {
+    let decision = authorize_decision(
+        &state,
+        &principal,
+        &headers,
+        "updateCourseCalendar",
+        course_id,
+    )
+    .await?;
+    let calendar = state
+        .control
+        .update_course_calendar(
+            &decision.actor,
+            course_id,
+            &request,
+            optional_etag(&headers)?,
+        )
+        .await?;
+    Ok(with_etag(StatusCode::OK, &calendar, calendar.revision))
+}
+
+async fn import_course_roster(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(course_id): Path<CourseId>,
+    headers: HeaderMap,
+    Json(request): Json<ResolvedCourseRosterImportRequest>,
+) -> Result<Response, ApiError> {
+    let decision = authorize_decision(
+        &state,
+        &principal,
+        &headers,
+        "importCourseRoster",
+        course_id,
+    )
+    .await?;
+    let result = state
+        .control
+        .import_course_roster(
+            &decision.actor,
+            course_id,
+            &request,
+            &idempotency(&headers)?,
+        )
+        .await?;
+    Ok(with_etag(StatusCode::OK, &result, result.revision))
+}
+
+async fn get_course_student_view(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(course_id): Path<CourseId>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let decision = authorize_decision(
+        &state,
+        &principal,
+        &headers,
+        "getCourseStudentView",
+        course_id,
+    )
+    .await?;
+    let calendar = state
+        .control
+        .course_calendar(&decision.actor, course_id)
+        .await?;
+    let membership = state
+        .control
+        .course_membership_for_actor(&decision.actor, course_id)
+        .await?;
+    let view = contracts::membership_governance::CourseStudentView {
+        calendar,
+        membership,
+    };
+    Ok(Json(view).into_response())
 }
 
 fn accepted(run: &AgentRun) -> Response {

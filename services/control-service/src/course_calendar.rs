@@ -1,4 +1,7 @@
-#![allow(dead_code, reason = "The Control boundary is staged before the shared public contract is generated.")]
+#![allow(
+    dead_code,
+    reason = "The Control boundary is staged before the shared public contract is generated."
+)]
 //! Course calendar facts and roster import invariants.
 //!
 //! This module intentionally has no HTTP-contract dependency. It is the Control
@@ -6,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use time::{OffsetDateTime, UtcOffset};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 /// The policy applied after the due instant.
@@ -137,7 +140,7 @@ pub(crate) fn validate_time_zone(value: &str) -> Result<(), CalendarError> {
     if value.trim().is_empty() || value.chars().any(char::is_control) {
         return Err(CalendarError::InvalidTimeZone);
     }
-    if value.parse::<UtcOffset>().is_ok() || value.contains('/') || value == "UTC" {
+    if value.contains('/') || value == "UTC" {
         Ok(())
     } else {
         Err(CalendarError::InvalidTimeZone)
@@ -173,26 +176,54 @@ mod tests {
     #[test]
     fn due_boundary_is_late_only_when_policy_allows_it() {
         let now = datetime!(2026-10-01 10:00 UTC);
-        assert_eq!(calendar(LatePolicy::HardClose, None).state_at(now), Ok(CalendarState::Closed));
         assert_eq!(
-            calendar(LatePolicy::AllowWithMark, Some(datetime!(2026-10-01 11:00 UTC))).state_at(now),
+            calendar(LatePolicy::HardClose, None).state_at(now),
+            Ok(CalendarState::Closed)
+        );
+        assert_eq!(
+            calendar(
+                LatePolicy::AllowWithMark,
+                Some(datetime!(2026-10-01 11:00 UTC))
+            )
+            .state_at(now),
             Ok(CalendarState::Late)
         );
     }
 
     #[test]
     fn late_until_is_a_hard_boundary() {
-        let facts = calendar(LatePolicy::AllowWithMark, Some(datetime!(2026-10-01 11:00 UTC)));
-        assert_eq!(facts.state_at(datetime!(2026-10-01 10:59:59 UTC)), Ok(CalendarState::Late));
-        assert_eq!(facts.state_at(datetime!(2026-10-01 11:00 UTC)), Ok(CalendarState::Closed));
+        let facts = calendar(
+            LatePolicy::AllowWithMark,
+            Some(datetime!(2026-10-01 11:00 UTC)),
+        );
+        assert_eq!(
+            facts.state_at(datetime!(2026-10-01 10:59:59 UTC)),
+            Ok(CalendarState::Late)
+        );
+        assert_eq!(
+            facts.state_at(datetime!(2026-10-01 11:00 UTC)),
+            Ok(CalendarState::Closed)
+        );
     }
 
     #[test]
     fn roster_classification_preserves_duplicate_row_results() {
         let states = classify_roster_rows(&[
-            RosterRow { row_number: 2, username: "alice".to_owned(), role: None },
-            RosterRow { row_number: 3, username: "alice".to_owned(), role: None },
-            RosterRow { row_number: 4, username: "".to_owned(), role: None },
+            RosterRow {
+                row_number: 2,
+                username: "alice".to_owned(),
+                role: None,
+            },
+            RosterRow {
+                row_number: 3,
+                username: "alice".to_owned(),
+                role: None,
+            },
+            RosterRow {
+                row_number: 4,
+                username: String::new(),
+                role: None,
+            },
         ]);
         assert_eq!(states.get(&2), Some(&RosterRowState::Valid));
         assert_eq!(states.get(&3), Some(&RosterRowState::DuplicateInFile));

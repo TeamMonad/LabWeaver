@@ -1,0 +1,56 @@
+{
+  "$defs": {
+    "CourseLatePolicy": {
+      "description": "Submission behavior at and after the due instant.",
+      "enum": [
+        "hard_close",
+        "allow_with_mark"
+      ],
+      "type": "string"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "dueAt": {
+      "$ref": "#/$defs/UtcTimestamp"
+    },
+    "latePolicy": {
+      "$ref": "#/$defs/CourseLatePolicy"
+    },
+    "lateUntil": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "openAt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "timeZone": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "dueAt",
+    "timeZone",
+    "latePolicy"
+  ],
+  "title": "UpdateCourseCalendar",
+  "type": "object"
+}

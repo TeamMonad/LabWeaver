@@ -44,6 +44,14 @@ Work 配置脚本执行沿用现有环境和 Agent 已保存的执行意图；�
 
 内容摘要和镜像 digest 用于真实输入与产物完整性；运行时不要求开发证明包或固定镜像数量。生成与校验命令以当前 xtask 和 Web scripts 为准，修改公共契约必须重新生成并检查所有消费者。
 
+
+## 课程日历与名单导入
+
+Control 是课程开放/截止、时区和迟交规则的唯一事实来源。日历时间必须为带 offset 的 RFC3339 instant，持久化为 UTC；`timeZone` 必须是数据库可识别的 IANA 时区，仅用于用户输入/展示换算，不改变已解析 instant。开放区间为 `[openAt, dueAt)`：恰好 openAt 时开放，恰好 dueAt 时已迟交或关闭。`allow_with_mark` 在 dueAt 起允许迟交，直至可选 `lateUntil`；到达 lateUntil 即 hard close，未设置则允许迟交而不设自动关闭时间。`hard_close` 在 dueAt 起拒绝提交，不可同时设置 lateUntil。
+
+`PUT /api/v1/courses/{courseId}/calendar` 使用 `If-Match` 更新既有修订；首次创建不传 If-Match，教师身份本身不够，仍须当前课程 instructor 成员。TA 可浏览但不能更改日历或名单。学生视图通过 `GET /api/v1/courses/{courseId}/student-view` 只返回调用者自己的成员事实与课程日历。
+
+名单 CSV 必须含 `campusUsername` 列，可含 `role` 列；角色允许 `participant` 或 `teaching_assistant`，不提供 role 时按 participant 处理。未知列、无效角色或 malformed row 拒绝，不允许 CSV 授予 instructor。`POST /api/v1/courses/{courseId}/roster/import` 要求幂等键；Access 先以精确校园用户名查询身份，再将解析后的 actor ID 交由 Control。逐行结果标记新建、已是成员或本文件重复行；同请求重试返回原结果，不能新增第二条 membership。
 ## 组织账号搜索
 
 `GET /api/v1/directory/users` 仅用于按关键词选取项目成员，不是组织账号的全量浏览接口。必须提供至少 2 个字符的 `query`，可选 `limit` 范围为 1–50（默认 25）。Keycloak Admin 用户接口没有稳定的续页键，因此响应只返回有限的 `items` 和 `truncated`；`truncated=true` 时应缩小关键词，不能使用 `page`、`pageSize`、`offset` 或续页游标。传入未知或已删除的分页参数返回 400。精确用户名添加流程仍使用独立的 exact lookup。

@@ -55,6 +55,18 @@
       "ContainerWorkExecutionRequest": {
         "$ref": "../contracts/v1/http/container-work-execution-request.schema.json"
       },
+      "CourseCalendar": {
+        "$ref": "../contracts/v1/course-calendar.schema.json"
+      },
+      "CourseRosterImportRequest": {
+        "$ref": "../contracts/v1/http/course-roster-import-request.schema.json"
+      },
+      "CourseRosterImportResult": {
+        "$ref": "../contracts/v1/http/course-roster-import-result.schema.json"
+      },
+      "CourseStudentView": {
+        "$ref": "../contracts/v1/http/course-student-view.schema.json"
+      },
       "CsrfTokenResponse": {
         "$ref": "../contracts/v1/csrf-token-response.schema.json"
       },
@@ -256,6 +268,9 @@
       },
       "TaskAttemptProgress": {
         "$ref": "../contracts/v1/task-attempt-progress.schema.json"
+      },
+      "UpdateCourseCalendar": {
+        "$ref": "../contracts/v1/http/update-course-calendar.schema.json"
       },
       "WorkConfigurationAdmissionBinding": {
         "$ref": "../contracts/v1/http/work-configuration-admission-binding.schema.json"
@@ -2762,6 +2777,222 @@
         "summary": "Return the safe actor and current authoritative scopes"
       }
     },
+    "/api/v1/courses/{courseId}/calendar": {
+      "get": {
+        "description": "Permission: course_calendar:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getCourseCalendar",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "courseId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/course-calendar.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "course_calendar:read"
+            ]
+          }
+        ],
+        "summary": "getCourseCalendar",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "course_calendar:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
+        "x-labweaver-timeout-ms": 30000
+      },
+      "put": {
+        "description": "Permission: course_calendar:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "updateCourseCalendar",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "courseId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/update-course-calendar.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/course-calendar.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "course_calendar:write"
+            ]
+          }
+        ],
+        "summary": "updateCourseCalendar",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "IdempotentRevisioned",
+        "x-labweaver-permission": "course_calendar:write",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
     "/api/v1/courses/{courseId}/evaluation-releases": {
       "get": {
         "description": "Permission: evaluation_release:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
@@ -3638,16 +3869,6 @@
             }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "../contracts/v1/http/create-course-membership-invitation.schema.json"
-              }
-            }
-          },
-          "required": true
-        },
         "responses": {
           "201": {
             "content": {
@@ -3993,6 +4214,216 @@
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
         "x-labweaver-permission": "course_membership:write",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/courses/{courseId}/roster/import": {
+      "post": {
+        "description": "Permission: course_membership:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "importCourseRoster",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "courseId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/course-roster-import-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/course-roster-import-result.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "course_membership:write"
+            ]
+          }
+        ],
+        "summary": "importCourseRoster",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-permission": "course_membership:write",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/courses/{courseId}/student-view": {
+      "get": {
+        "description": "Permission: course_calendar:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getCourseStudentView",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "courseId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/http/course-student-view.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "course_calendar:read"
+            ]
+          }
+        ],
+        "summary": "getCourseStudentView",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_ACCESS_DENIED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_REVISION_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "course_calendar:read",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": true,
         "x-labweaver-scope": "course",
@@ -12999,16 +13430,6 @@
             }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "../contracts/v1/http/create-project-membership-invitation.schema.json"
-              }
-            }
-          },
-          "required": true
-        },
         "responses": {
           "201": {
             "content": {

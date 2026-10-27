@@ -74,6 +74,26 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::membership_governance::CourseMembershipPage
     );
     document!(
+        "schemas/contracts/v1/course-calendar.schema.json",
+        crate::membership_governance::CourseCalendar
+    );
+    document!(
+        "schemas/contracts/v1/http/update-course-calendar.schema.json",
+        crate::membership_governance::UpdateCourseCalendar
+    );
+    document!(
+        "schemas/contracts/v1/http/course-roster-import-request.schema.json",
+        crate::membership_governance::CourseRosterImportRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/course-roster-import-result.schema.json",
+        crate::membership_governance::CourseRosterImportResult
+    );
+    document!(
+        "schemas/contracts/v1/http/course-student-view.schema.json",
+        crate::membership_governance::CourseStudentView
+    );
+    document!(
         "schemas/contracts/v1/project-page.schema.json",
         crate::membership_governance::ProjectPage
     );
@@ -2041,6 +2061,11 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 ,"PlatformImageUploadSession": contract_ref("http/platform-image-upload-session")
                 ,"PlatformImageUploadStatus": contract_ref("http/platform-image-upload-status")
                 ,"InternalPlatformImageImportJobStatus": contract_ref("http/internal-platform-image-import-job-status")
+                ,"CourseCalendar": contract_ref("course-calendar")
+                ,"UpdateCourseCalendar": contract_ref("http/update-course-calendar")
+                ,"CourseRosterImportRequest": contract_ref("http/course-roster-import-request")
+                ,"CourseRosterImportResult": contract_ref("http/course-roster-import-result")
+                ,"CourseStudentView": contract_ref("http/course-student-view")
             },
             "responses": {"Problem": {"description":"RFC 9457 problem detail","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}}}
         }
@@ -2413,8 +2438,8 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "updatePlatformConfiguration" => "http/update-platform-configuration-request",
         "applyPlatformConfiguration" => "http/apply-platform-configuration-request",
         "reportPlatformConfigurationApply" => "http/report-platform-configuration-apply-request",
-        "createProjectMembershipInvitation" => "http/create-project-membership-invitation",
-        "createCourseMembershipInvitation" => "http/create-course-membership-invitation",
+        "updateCourseCalendar" => "http/update-course-calendar",
+        "importCourseRoster" => "http/course-roster-import-request",
         "acceptMembershipInvitation" => "http/accept-membership-invitation",
         "revokeMembershipInvitation" | "removeCourseMembership" | "removeProjectMembership" => {
             "http/remove-project-membership-request"
@@ -2526,6 +2551,9 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "getLoadedPlatformConfiguration" => {
             contract_ref("control-configuration-replica-observation")
         }
+        "getCourseCalendar" | "updateCourseCalendar" => contract_ref("course-calendar"),
+        "importCourseRoster" => contract_ref("http/course-roster-import-result"),
+        "getCourseStudentView" => contract_ref("http/course-student-view"),
         "getPlatformConfigurationApply" => contract_ref("platform-configuration-apply"),
         "listIncomingMembershipInvitations"
         | "listProjectMembershipInvitations"

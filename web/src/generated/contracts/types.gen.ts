@@ -32,6 +32,14 @@ export type ContainerWorkExecutionReceipt = ContainerWorkExecutionReceiptSchema;
 
 export type ContainerWorkExecutionRequest = ContainerWorkExecutionRequestSchema;
 
+export type CourseCalendar = CourseCalendarSchema;
+
+export type CourseRosterImportRequest = CourseRosterImportRequestSchema;
+
+export type CourseRosterImportResult = CourseRosterImportResultSchema;
+
+export type CourseStudentView = CourseStudentViewSchema;
+
 export type CsrfTokenResponse = CsrfTokenResponseSchema;
 
 export type EnvironmentExecutionBinding = EnvironmentExecutionBindingSchema;
@@ -126,6 +134,8 @@ export type ProblemDetails = {
 export type StudentEvaluationResult = StudentEvaluationResultSchema;
 
 export type TaskAttemptProgress = TaskAttemptProgressSchema;
+
+export type UpdateCourseCalendar = UpdateCourseCalendarSchema;
 
 export type WorkConfigurationAdmissionBinding = WorkConfigurationAdmissionBindingSchema;
 
@@ -1926,6 +1936,44 @@ export type ConsoleCapabilitySchemaRevision = number;
  * UTC timestamp serialized with a literal `Z` and millisecond precision.
  */
 export type ConsoleCapabilitySchemaUtcTimestamp = string;
+
+/**
+ * CourseCalendar
+ *
+ * A course's authoritative schedule and late-submission policy.
+ */
+export type CourseCalendarSchema = {
+    courseId: CourseCalendarSchemaCourseId;
+    dueAt: CourseCalendarSchemaUtcTimestamp;
+    latePolicy: CourseLatePolicy;
+    lateUntil?: CourseCalendarSchemaUtcTimestamp | null;
+    openAt?: CourseCalendarSchemaUtcTimestamp | null;
+    revision: CourseCalendarSchemaRevision;
+    state: CourseCalendarState;
+    timeZone: string;
+};
+
+export type CourseCalendarState = 'not_open' | 'open' | 'late' | 'closed';
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type CourseCalendarSchemaCourseId = string;
+
+/**
+ * Submission behavior at and after the due instant.
+ */
+export type CourseLatePolicy = 'hard_close' | 'allow_with_mark';
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CourseCalendarSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type CourseCalendarSchemaUtcTimestamp = string;
 
 /**
  * CursorPage
@@ -5119,6 +5167,159 @@ export type ContainerWorkExecutionRequestSchemaUtcTimestamp = string;
 export type ContainerWorkExecutionRequestSchemaWorkConfigurationPlanId = string;
 
 /**
+ * CourseRosterImportRequest
+ */
+export type CourseRosterImportRequestSchema = {
+    /**
+     * UTF-8 CSV with header `campusUsername,role`; role is optional.
+     */
+    csv: string;
+};
+
+/**
+ * CourseRosterImportResult
+ */
+export type CourseRosterImportResultSchema = {
+    courseId: CourseRosterImportResultSchemaCourseId;
+    revision: CourseRosterImportResultSchemaRevision;
+    rows: Array<CourseRosterImportRowResult>;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type CourseRosterImportResultSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type CourseRosterImportResultSchemaCourseId = string;
+
+export type CourseRosterImportRowResult = {
+    actorId?: CourseRosterImportResultSchemaActorId | null;
+    campusUsername: string;
+    diagnosticCode?: string | null;
+    invitationId?: MembershipInvitationId | null;
+    result: CourseRosterImportRowState;
+    role?: CourseRosterRole | null;
+    rowNumber: number;
+};
+
+export type CourseRosterImportRowState = 'imported' | 'already_member' | 'invited' | 'duplicate_in_file' | 'unknown_account' | 'invalid_role' | 'invalid_row' | 'rejected';
+
+export type CourseRosterRole = 'participant' | 'teaching_assistant';
+
+/**
+ * Strongly typed UUIDv7 identifier for `MembershipInvitationId`.
+ */
+export type MembershipInvitationId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CourseRosterImportResultSchemaRevision = number;
+
+/**
+ * CourseStudentView
+ *
+ * Student-facing course facts. It contains no other member's identity.
+ */
+export type CourseStudentViewSchema = {
+    calendar: CourseStudentViewSchemaCourseCalendar;
+    membership: CourseStudentViewSchemaCourseMembership;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type CourseStudentViewSchemaActorId = string;
+
+/**
+ * A course's authoritative schedule and late-submission policy.
+ */
+export type CourseStudentViewSchemaCourseCalendar = {
+    courseId: CourseStudentViewSchemaCourseId;
+    dueAt: CourseStudentViewSchemaUtcTimestamp;
+    latePolicy: CourseStudentViewSchemaCourseLatePolicy;
+    lateUntil?: CourseStudentViewSchemaUtcTimestamp | null;
+    openAt?: CourseStudentViewSchemaUtcTimestamp | null;
+    revision: CourseStudentViewSchemaRevision;
+    state: CourseStudentViewSchemaCourseCalendarState;
+    timeZone: string;
+};
+
+export type CourseStudentViewSchemaCourseCalendarState = 'not_open' | 'open' | 'late' | 'closed';
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type CourseStudentViewSchemaCourseId = string;
+
+/**
+ * Submission behavior at and after the due instant.
+ */
+export type CourseStudentViewSchemaCourseLatePolicy = 'hard_close' | 'allow_with_mark';
+
+/**
+ * Course-local role grant with revision and expiry.
+ */
+export type CourseStudentViewSchemaCourseMembership = {
+    /**
+     * Actor scope.
+     */
+    actorId: CourseStudentViewSchemaActorId;
+    /**
+     * Course scope.
+     */
+    courseId: CourseStudentViewSchemaCourseId;
+    /**
+     * Optional hard expiry.
+     */
+    expiresAt?: CourseStudentViewSchemaUtcTimestamp | null;
+    /**
+     * Control-owned course responsibility, independent of platform identity.
+     */
+    objectRole?: CourseStudentViewSchemaCourseObjectRole;
+    /**
+     * Monotonic authorization revision.
+     */
+    revision: CourseStudentViewSchemaRevision;
+    /**
+     * Role permitted by this course.
+     */
+    role: CourseStudentViewSchemaPlatformRole;
+    /**
+     * Current lifecycle state.
+     */
+    state: CourseStudentViewSchemaMembershipState;
+};
+
+/**
+ * Course responsibility does not change the actor's verified platform identity.
+ */
+export type CourseStudentViewSchemaCourseObjectRole = 'instructor' | 'teaching_assistant' | 'participant';
+
+/**
+ * Authoritative membership state owned by Control Service.
+ */
+export type CourseStudentViewSchemaMembershipState = 'active' | 'suspended' | 'revoked';
+
+/**
+ * Base role asserted by the configured OIDC issuer.
+ */
+export type CourseStudentViewSchemaPlatformRole = 'teacher' | 'student' | 'platform_admin';
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CourseStudentViewSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type CourseStudentViewSchemaUtcTimestamp = string;
+
+/**
  * CreateAccessGrantRequest
  */
 export type CreateAccessGrantRequestSchema = {
@@ -5206,26 +5407,6 @@ export type CreateAgentRunRequestSchemaProjectId = string;
  * Monotonic aggregate revision. Zero is never a persisted revision.
  */
 export type CreateAgentRunRequestSchemaRevision = number;
-
-/**
- * CreateCourseMembershipInvitation
- */
-export type CreateCourseMembershipInvitationSchema = {
-    expiresAt: CreateCourseMembershipInvitationSchemaUtcTimestamp;
-    membershipExpiresAt?: CreateCourseMembershipInvitationSchemaUtcTimestamp | null;
-    objectRole: CreateCourseMembershipInvitationSchemaCourseObjectRole;
-    username: string;
-};
-
-/**
- * Course responsibility does not change the actor's verified platform identity.
- */
-export type CreateCourseMembershipInvitationSchemaCourseObjectRole = 'instructor' | 'teaching_assistant' | 'participant';
-
-/**
- * UTC timestamp serialized with a literal `Z` and millisecond precision.
- */
-export type CreateCourseMembershipInvitationSchemaUtcTimestamp = string;
 
 /**
  * CreateEnvironmentRequest
@@ -5653,28 +5834,6 @@ export type CreateProblemPackageUploadRequestSchemaProjectId = string;
  * Monotonic aggregate revision. Zero is never a persisted revision.
  */
 export type CreateProblemPackageUploadRequestSchemaRevision = number;
-
-/**
- * CreateProjectMembershipInvitation
- *
- * The recipient must use this exact campus username. Access resolves it before forwarding.
- */
-export type CreateProjectMembershipInvitationSchema = {
-    expiresAt: CreateProjectMembershipInvitationSchemaUtcTimestamp;
-    membershipExpiresAt?: CreateProjectMembershipInvitationSchemaUtcTimestamp | null;
-    objectRole: CreateProjectMembershipInvitationSchemaProjectObjectRole;
-    username: string;
-};
-
-/**
- * Responsibilities granted by Control in one project, independent of Teacher/Student identity.
- */
-export type CreateProjectMembershipInvitationSchemaProjectObjectRole = 'viewer' | 'operator' | 'editor' | 'manager' | 'owner';
-
-/**
- * UTC timestamp serialized with a literal `Z` and millisecond precision.
- */
-export type CreateProjectMembershipInvitationSchemaUtcTimestamp = string;
 
 /**
  * CreateProjectRequest
@@ -11314,6 +11473,27 @@ export type RevokeAccessGrantRequestSchema = {
 export type RevokeAccessGrantRequestSchemaAccessGrantId = string;
 
 /**
+ * UpdateCourseCalendar
+ */
+export type UpdateCourseCalendarSchema = {
+    dueAt: UpdateCourseCalendarSchemaUtcTimestamp;
+    latePolicy: UpdateCourseCalendarSchemaCourseLatePolicy;
+    lateUntil?: UpdateCourseCalendarSchemaUtcTimestamp | null;
+    openAt?: UpdateCourseCalendarSchemaUtcTimestamp | null;
+    timeZone: string;
+};
+
+/**
+ * Submission behavior at and after the due instant.
+ */
+export type UpdateCourseCalendarSchemaCourseLatePolicy = 'hard_close' | 'allow_with_mark';
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type UpdateCourseCalendarSchemaUtcTimestamp = string;
+
+/**
  * UpdatePlatformConfigurationRequest
  */
 export type UpdatePlatformConfigurationRequestSchema = {
@@ -12005,7 +12185,7 @@ export type MembershipInvitation = {
     createdAt: MembershipInvitationPageSchemaUtcTimestamp;
     createdBy: MembershipInvitationPageSchemaActorId;
     expiresAt: MembershipInvitationPageSchemaUtcTimestamp;
-    id: MembershipInvitationId;
+    id: MembershipInvitationPageSchemaMembershipInvitationId;
     membershipExpiresAt?: MembershipInvitationPageSchemaUtcTimestamp | null;
     recipientActorId: MembershipInvitationPageSchemaActorId;
     revision: MembershipInvitationPageSchemaRevision;
@@ -12016,7 +12196,7 @@ export type MembershipInvitation = {
 /**
  * Strongly typed UUIDv7 identifier for `MembershipInvitationId`.
  */
-export type MembershipInvitationId = string;
+export type MembershipInvitationPageSchemaMembershipInvitationId = string;
 
 /**
  * Proposed responsibility. Acceptance does not create any unrelated membership.
@@ -15804,6 +15984,144 @@ export type GetAuthSessionResponses = {
 
 export type GetAuthSessionResponse = GetAuthSessionResponses[keyof GetAuthSessionResponses];
 
+export type GetCourseCalendarData = {
+    body?: never;
+    path: {
+        courseId: string;
+    };
+    query?: never;
+    url: '/api/v1/courses/{courseId}/calendar';
+};
+
+export type GetCourseCalendarErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetCourseCalendarError = GetCourseCalendarErrors[keyof GetCourseCalendarErrors];
+
+export type GetCourseCalendarResponses = {
+    /**
+     * Successful response
+     */
+    200: CourseCalendarSchema;
+};
+
+export type GetCourseCalendarResponse = GetCourseCalendarResponses[keyof GetCourseCalendarResponses];
+
+export type UpdateCourseCalendarData = {
+    body: UpdateCourseCalendarSchema;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+    };
+    path: {
+        courseId: string;
+    };
+    query?: never;
+    url: '/api/v1/courses/{courseId}/calendar';
+};
+
+export type UpdateCourseCalendarErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type UpdateCourseCalendarError = UpdateCourseCalendarErrors[keyof UpdateCourseCalendarErrors];
+
+export type UpdateCourseCalendarResponses = {
+    /**
+     * Successful response
+     */
+    200: CourseCalendarSchema;
+};
+
+export type UpdateCourseCalendarResponse = UpdateCourseCalendarResponses[keyof UpdateCourseCalendarResponses];
+
 export type ListEvaluationReleasesData = {
     body?: never;
     path: {
@@ -16300,7 +16618,7 @@ export type ListCourseMembershipInvitationsResponses = {
 export type ListCourseMembershipInvitationsResponse = ListCourseMembershipInvitationsResponses[keyof ListCourseMembershipInvitationsResponses];
 
 export type CreateCourseMembershipInvitationData = {
-    body: CreateCourseMembershipInvitationSchema;
+    body?: never;
     headers: {
         'Idempotency-Key': string;
     };
@@ -16510,6 +16828,143 @@ export type RemoveCourseMembershipResponses = {
 };
 
 export type RemoveCourseMembershipResponse = RemoveCourseMembershipResponses[keyof RemoveCourseMembershipResponses];
+
+export type ImportCourseRosterData = {
+    body: CourseRosterImportRequestSchema;
+    headers: {
+        'Idempotency-Key': string;
+    };
+    path: {
+        courseId: string;
+    };
+    query?: never;
+    url: '/api/v1/courses/{courseId}/roster/import';
+};
+
+export type ImportCourseRosterErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ImportCourseRosterError = ImportCourseRosterErrors[keyof ImportCourseRosterErrors];
+
+export type ImportCourseRosterResponses = {
+    /**
+     * Successful response
+     */
+    200: CourseRosterImportResultSchema;
+};
+
+export type ImportCourseRosterResponse = ImportCourseRosterResponses[keyof ImportCourseRosterResponses];
+
+export type GetCourseStudentViewData = {
+    body?: never;
+    path: {
+        courseId: string;
+    };
+    query?: never;
+    url: '/api/v1/courses/{courseId}/student-view';
+};
+
+export type GetCourseStudentViewErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetCourseStudentViewError = GetCourseStudentViewErrors[keyof GetCourseStudentViewErrors];
+
+export type GetCourseStudentViewResponses = {
+    /**
+     * Successful response
+     */
+    200: CourseStudentViewSchema;
+};
+
+export type GetCourseStudentViewResponse = GetCourseStudentViewResponses[keyof GetCourseStudentViewResponses];
 
 export type ListOrganizationUsersData = {
     body?: never;
@@ -21841,7 +22296,7 @@ export type ListProjectMembershipInvitationsResponses = {
 export type ListProjectMembershipInvitationsResponse = ListProjectMembershipInvitationsResponses[keyof ListProjectMembershipInvitationsResponses];
 
 export type CreateProjectMembershipInvitationData = {
-    body: CreateProjectMembershipInvitationSchema;
+    body?: never;
     headers: {
         'Idempotency-Key': string;
     };

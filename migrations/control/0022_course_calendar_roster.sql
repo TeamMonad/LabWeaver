@@ -16,13 +16,12 @@ CREATE TABLE control.course_calendars (
     CHECK ((late_policy = 'hard_close' AND late_until IS NULL)
         OR (late_policy = 'allow_with_mark' AND (late_until IS NULL OR late_until > due_at)))
 );
-
 -- The import itself uses the existing idempotency ledger. This audit table is
 -- intentionally separate so a retried request can return per-row diagnostics
 -- without creating a second membership or invitation.
 CREATE TABLE control.course_roster_imports (
     import_id uuid PRIMARY KEY,
-    course_id uuid NOT NULL REFERENCES control.course_calendars(course_id) ON DELETE RESTRICT,
+    course_id uuid NOT NULL,
     requested_by uuid NOT NULL,
     request_sha256 text NOT NULL CHECK (request_sha256 ~ '^[0-9a-f]{64}$'),
     revision bigint NOT NULL CHECK (revision > 0),

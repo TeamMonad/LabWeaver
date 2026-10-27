@@ -5,9 +5,12 @@ use super::{ControlError, ControlService, canonical_hash, db, i64_revision};
 use contracts::http::{IdempotencyKey, RemoveProjectMembershipRequest};
 use contracts::membership_governance::ControlListQuery;
 use contracts::membership_governance::{
-    AcceptMembershipInvitation, CourseMembershipPage, CourseMembershipView, CourseObjectRole,
+    AcceptMembershipInvitation, CourseCalendar, CourseCalendarState, CourseLatePolicy,
+    CourseMembershipPage, CourseMembershipView, CourseObjectRole, CourseRosterImportResult,
+    CourseRosterImportRowResult, CourseRosterImportRowState, CourseRosterRole,
     MembershipInvitation, MembershipInvitationPage, MembershipInvitationScope,
-    MembershipInvitationState, ResolvedMembershipInvitation,
+    MembershipInvitationState, ResolvedCourseRosterImportRequest, ResolvedMembershipInvitation,
+    UpdateCourseCalendar,
 };
 use contracts::object_authorization::{ObjectAction, ProjectObjectRole};
 use contracts::{
@@ -741,6 +744,210 @@ impl ControlService {
         sqlx::query("UPDATE control.course_memberships SET state='revoked',revision=$3,updated_at=$4 WHERE course_id=$1 AND actor_id=$2").bind(course_id.as_uuid()).bind(target.as_uuid()).bind(i64_revision(membership.revision)?).bind(now.get()).execute(&mut *tx).await.map_err(db)?;
         event(&mut tx,&scope,target.as_uuid(),membership.revision,json!({"courseId":course_id,"actorId":target,"performedBy":actor.actor_id,"revision":membership.revision,"state":membership.state,"objectRole":membership.object_role})).await?;
         complete(&mut tx, REMOVE, key, &membership).await?;
+        tx.commit().await.map_err(db)?;
+        Ok(membership)
+    }
+}
+impl ControlService {
+    /// Reads the authoritative course calendar for an authenticated member.
+    pub async fn course_calendar(
+        &self,
+        _actor: &AuthenticatedActor,
+        course_id: CourseId,
+    ) -> Result<CourseCalendar, ControlError> {
+        let mut tx = self.pool.begin().await.map_err(db)?;
+        let now = database_now(&mut tx).await?;
+        let row = sqlx::query(
+            "SELECT course_id,revision,contract FROM control.course_calendars WHERE course_id=$1",
+        )
+        .bind(course_id.as_uuid())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db)?
+        .ok_or(ControlError::CourseCalendarNotFound)?;
+        let mut calendar: CourseCalendar =
+            serde_json::from_value(row.try_get("contract").map_err(db)?)
+                .map_err(|_| ControlError::CourseCalendarInvalid)?;
+        if calendar.course_id != course_id
+            || i64_revision(calendar.revision)? != row.try_get::<i64, _>("revision").map_err(db)?
+        {
+            return Err(ControlError::PersistenceIdentityMismatch);
+        }
+        calendar.state = calendar.state_at(now);
+        tx.commit().await.map_err(db)?;
+        Ok(calendar)
+    }
+
+    /// Replaces calendar facts under instructor governance and revision fencing.
+    pub async fn update_course_calendar(
+        &self,
+        actor: &AuthenticatedActor,
+        course_id: CourseId,
+        request: &UpdateCourseCalendar,
+        expected_revision: Option<Revision>,
+    ) -> Result<CourseCalendar, ControlError> {
+        let mut tx = self.pool.begin().await.map_err(db)?;
+        let now = require_actor(&mut tx, actor).await?;
+        let scope = MembershipInvitationScope::Course {
+            course_id,
+            object_role: CourseObjectRole::Participant,
+        };
+        lock_scope(&mut tx, &scope, true).await?;
+        govern(&mut tx, &scope, actor).await?;
+        if request.time_zone.trim().is_empty()
+            || request.time_zone.chars().any(char::is_control)
+            || request.open_at.is_some_and(|open| open >= request.due_at)
+            || (request.late_policy == CourseLatePolicy::HardClose && request.late_until.is_some())
+            || request
+                .late_until
+                .is_some_and(|until| until <= request.due_at)
+        {
+            return Err(ControlError::CourseCalendarInvalid);
+        }
+        let zone_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_timezone_names WHERE name=$1)",
+        )
+        .bind(&request.time_zone)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db)?;
+        if !zone_exists {
+            return Err(ControlError::CourseCalendarInvalid);
+        }
+        let current: Option<i64> = sqlx::query_scalar(
+            "SELECT revision FROM control.course_calendars WHERE course_id=$1 FOR UPDATE",
+        )
+        .bind(course_id.as_uuid())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db)?;
+        let revision = if let Some(value) = current {
+            let current = revision(value)?;
+            if expected_revision != Some(current) {
+                return Err(ControlError::CourseCalendarConflict);
+            }
+            Revision::new(
+                current
+                    .get()
+                    .checked_add(1)
+                    .ok_or(ControlError::CourseCalendarInvalid)?,
+            )
+            .map_err(|_| ControlError::CourseCalendarInvalid)?
+        } else {
+            if expected_revision.is_some() {
+                return Err(ControlError::CourseCalendarConflict);
+            }
+            Revision::new(1).map_err(|_| ControlError::CourseCalendarInvalid)?
+        };
+        let calendar = CourseCalendar {
+            course_id,
+            revision,
+            open_at: request.open_at,
+            due_at: request.due_at,
+            time_zone: request.time_zone.clone(),
+            state: CourseCalendarState::Open,
+            late_policy: request.late_policy,
+            late_until: request.late_until,
+        };
+        let value =
+            serde_json::to_value(&calendar).map_err(|_| ControlError::CourseCalendarInvalid)?;
+        sqlx::query("INSERT INTO control.course_calendars(course_id,revision,open_at,due_at,time_zone,late_policy,late_until,contract,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$9) ON CONFLICT(course_id) DO UPDATE SET revision=EXCLUDED.revision,open_at=EXCLUDED.open_at,due_at=EXCLUDED.due_at,time_zone=EXCLUDED.time_zone,late_policy=EXCLUDED.late_policy,late_until=EXCLUDED.late_until,contract=EXCLUDED.contract,updated_at=EXCLUDED.updated_at")
+            .bind(course_id.as_uuid()).bind(i64_revision(revision)?).bind(request.open_at.map(UtcTimestamp::get)).bind(request.due_at.get()).bind(&request.time_zone).bind(request.late_policy.as_str()).bind(request.late_until.map(UtcTimestamp::get)).bind(value).bind(now.get()).execute(&mut *tx).await.map_err(db)?;
+        tx.commit().await.map_err(db)?;
+        Ok(calendar)
+    }
+
+    /// Applies resolved directory rows idempotently to the course roster.
+    pub async fn import_course_roster(
+        &self,
+        actor: &AuthenticatedActor,
+        course_id: CourseId,
+        request: &ResolvedCourseRosterImportRequest,
+        key: &IdempotencyKey,
+    ) -> Result<CourseRosterImportResult, ControlError> {
+        let mut tx = self.pool.begin().await.map_err(db)?;
+        let now = require_actor(&mut tx, actor).await?;
+        let scope = MembershipInvitationScope::Course {
+            course_id,
+            object_role: CourseObjectRole::Participant,
+        };
+        lock_scope(&mut tx, &scope, true).await?;
+        govern(&mut tx, &scope, actor)
+            .await
+            .map_err(|_| ControlError::CourseRosterGovernanceDenied)?;
+        if let Some(value) = reserve(
+            &mut tx,
+            "control_import_course_roster_v1",
+            key,
+            json!({"actor":actor.actor_id,"courseId":course_id,"request":request}),
+        )
+        .await?
+        {
+            return serde_json::from_value(value)
+                .map_err(|_| ControlError::PersistenceIdentityMismatch);
+        }
+        let mut results = Vec::with_capacity(request.rows.len());
+        let mut seen = std::collections::BTreeSet::new();
+        let mut max_revision = 1_u64;
+        for row in &request.rows {
+            let duplicate = !seen.insert(row.actor_id);
+            let current: Option<i64> = sqlx::query_scalar("SELECT revision FROM control.course_memberships WHERE course_id=$1 AND actor_id=$2 FOR UPDATE").bind(course_id.as_uuid()).bind(row.actor_id.as_uuid()).fetch_optional(&mut *tx).await.map_err(db)?;
+            let result = if duplicate {
+                CourseRosterImportRowState::DuplicateInFile
+            } else if current.is_some() {
+                CourseRosterImportRowState::AlreadyMember
+            } else {
+                CourseRosterImportRowState::Imported
+            };
+            let member_revision = current.unwrap_or(1);
+            let member_revision = Revision::new(
+                u64::try_from(member_revision)
+                    .map_err(|_| ControlError::CourseRosterImportInvalid)?,
+            )
+            .map_err(|_| ControlError::CourseRosterImportInvalid)?;
+            max_revision = max_revision.max(member_revision.get());
+            if result == CourseRosterImportRowState::Imported {
+                let object_role = match row.role {
+                    CourseRosterRole::Participant => "participant",
+                    CourseRosterRole::TeachingAssistant => "teaching_assistant",
+                };
+                sqlx::query("INSERT INTO control.course_memberships(course_id,actor_id,role,object_role,state,revision,updated_at) VALUES($1,$2,'student',$3,'active',$4,$5) ON CONFLICT(course_id,actor_id) DO UPDATE SET object_role=EXCLUDED.object_role,state='active',revision=EXCLUDED.revision,updated_at=EXCLUDED.updated_at").bind(course_id.as_uuid()).bind(row.actor_id.as_uuid()).bind(object_role).bind(i64_revision(member_revision)?).bind(now.get()).execute(&mut *tx).await.map_err(db)?;
+            }
+            results.push(CourseRosterImportRowResult {
+                row_number: row.row_number,
+                campus_username: row.campus_username.clone(),
+                role: Some(row.role),
+                result,
+                actor_id: Some(row.actor_id),
+                invitation_id: None,
+                diagnostic_code: None,
+            });
+        }
+        let output = CourseRosterImportResult {
+            course_id,
+            revision: Revision::new(max_revision)
+                .map_err(|_| ControlError::CourseRosterImportInvalid)?,
+            rows: results,
+        };
+        complete(&mut tx, "control_import_course_roster_v1", key, &output).await?;
+        tx.commit().await.map_err(db)?;
+        Ok(output)
+    }
+}
+impl ControlService {
+    /// Reads only the authenticated actor's active course membership.
+    pub async fn course_membership_for_actor(
+        &self,
+        actor: &AuthenticatedActor,
+        course_id: CourseId,
+    ) -> Result<contracts::CourseMembership, ControlError> {
+        let mut tx = self.pool.begin().await.map_err(db)?;
+        require_actor(&mut tx, actor).await?;
+        let row = sqlx::query("SELECT course_id,actor_id,role,object_role,state,revision,expires_at FROM control.course_memberships WHERE course_id=$1 AND actor_id=$2 AND state='active' AND (expires_at IS NULL OR expires_at>clock_timestamp())")
+            .bind(course_id.as_uuid()).bind(actor.actor_id.as_uuid()).fetch_optional(&mut *tx).await.map_err(db)?
+            .ok_or(ControlError::CourseGovernanceDenied)?;
+        let membership = auth::repository::course_membership_from_row(&row)
+            .map_err(|_| ControlError::PersistenceIdentityMismatch)?;
         tx.commit().await.map_err(db)?;
         Ok(membership)
     }
