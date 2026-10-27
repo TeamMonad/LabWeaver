@@ -177,17 +177,19 @@
           - releases
           - "{{ (platform_clean_redeploy_release_metadata.results | map(attribute='item.name') | list) | to_json }}"
           - >-
-            [.items[] |
-              select(.kind != "ServiceAccount" or .metadata.name != "default") |
-              select((
-                ((.metadata.annotations["labweaver.io/installation-id"] // "") == $installation)
-                or (
-                  ((.metadata.annotations["meta.helm.sh/release-name"] // "") as $release |
-                    $releases | index($release)) != null and
-                  (.metadata.annotations["meta.helm.sh/release-namespace"] // "") == $scope and
-                  (.metadata.labels["app.kubernetes.io/managed-by"] // "") == "Helm"
-                )
-              ) | not)] | length == 0
+            .items as $all |
+            def owned($object):
+              (($object.metadata.annotations["labweaver.io/installation-id"] // "") == $installation)
+              or (
+                (($object.metadata.annotations["meta.helm.sh/release-name"] // "") as $release |
+                  $releases | index($release)) != null and
+                ($object.metadata.annotations["meta.helm.sh/release-namespace"] // "") == $scope and
+                ($object.metadata.labels["app.kubernetes.io/managed-by"] // "") == "Helm"
+              )
+              or any($object.metadata.ownerReferences[]?.uid;
+                . as $uid | any($all[]; $uid != null and .metadata.uid == $uid and owned(.)));
+            [$all[] | select(.kind != "ServiceAccount" or .metadata.name != "default") |
+              select(owned(.) | not)] | length == 0
         stdin: "{{ item.stdout }}"
       loop: "{{ platform_clean_redeploy_object_inventory.results }}"
       changed_when: false

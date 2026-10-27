@@ -47,11 +47,13 @@ def main() -> None:
         argument_spec={
             "kubeconfig": {"type": "path", "required": True},
             "bundle": {"type": "path", "required": True},
+            "namespace": {"type": "str", "required": True},
         },
         supports_check_mode=False,
     )
     kubeconfig = Path(module.params["kubeconfig"])
     bundle = Path(module.params["bundle"])
+    namespace = module.params["namespace"]
     if not kubeconfig.is_file() or kubeconfig.is_symlink() or not bundle.is_file() or bundle.is_symlink():
         fail(module, "RESOURCE_APPLICATION_BUNDLE_INPUT_INVALID")
     try:
@@ -64,7 +66,7 @@ def main() -> None:
     indexed: dict[tuple[str, str], dict[str, Any]] = {}
     for document in documents:
         metadata = document.get("metadata")
-        if not isinstance(metadata, dict) or metadata.get("namespace") != "labweaver-system":
+        if not isinstance(metadata, dict) or metadata.get("namespace") != namespace:
             fail(module, "RESOURCE_APPLICATION_BUNDLE_INPUT_INVALID")
         kind, name = document.get("kind"), metadata.get("name")
         if not isinstance(kind, str) or not isinstance(name, str):
@@ -77,7 +79,7 @@ def main() -> None:
     expected_secret_data = secret.get("data")
     if not isinstance(expected_secret_data, dict) or not expected_secret_data:
         fail(module, "RESOURCE_APPLICATION_BUNDLE_INPUT_INVALID")
-    base = ["/usr/bin/kubectl", "--kubeconfig", str(kubeconfig), "--namespace", "labweaver-system"]
+    base = ["/usr/bin/kubectl", "--kubeconfig", str(kubeconfig), "--namespace", namespace]
     try:
         observed = command(base + ["get", "secret/resource-service-secrets", "--output", "json"], "RESOURCE_APPLICATION_SECRET_UNAVAILABLE")
         observed_document = json.loads(observed.stdout)
