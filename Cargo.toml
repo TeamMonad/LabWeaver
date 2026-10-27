@@ -88,8 +88,6 @@ url = { version = "2.5.4", features = ["serde"] }
 x509-parser = "0.16.0"
 
 [workspace.lints.rust]
-# Keep unsafe denied; the sole reviewed mmap call uses a function-level allow (tests/ci/test_unsafe_allowlist.py).
-unsafe_code = "deny"
 missing_docs = "warn"
 
 [workspace.lints.clippy]

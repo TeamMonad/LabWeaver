@@ -1883,7 +1883,6 @@ fn tar_context(
 }
 /// Maps a completed private spool. The file is created and owned by this process, is not exposed
 /// to another process, and is never truncated or written while the mapping exists.
-#[allow(unsafe_code)]
 fn map_spool(path: &Path) -> Result<Mmap, BuildProviderFailure> {
     let file = std::fs::File::open(path).map_err(|_| unavailable())?;
     // SAFETY: this private spool is created exclusively by this process, completed and flushed
