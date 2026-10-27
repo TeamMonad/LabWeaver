@@ -3,10 +3,14 @@ use super::*;
 use axum::body::Body;
 use contracts::{EndpointGrantId, environment::EnvironmentInstance};
 use environment_service::{OwnerResolver, PgEnvironmentStore, PgReleaseProjectionStore};
-use futures_util::SinkExt;
+use futures_util::{SinkExt, Stream, StreamExt};
 use reqwest::cookie::{CookieStore, Jar};
 use rustls::{ClientConfig, RootCertStore};
 use sqlx::Row;
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
 use tokio_tungstenite::{
     Connector, connect_async, connect_async_tls_with_config, tungstenite::Message as WsMessage,
 };
@@ -450,6 +454,15 @@ async fn untrusted_app(
             .body(Body::from_stream(first.chain(never)))
             .unwrap_or_else(|_| Response::new(Body::empty()));
     }
+    if uri.path() == "/cancel" {
+        return Response::builder()
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from_stream(CancelProbe {
+                requests: Arc::clone(&requests),
+                first: true,
+            }))
+            .unwrap_or_else(|_| Response::new(Body::empty()));
+    }
     if uri.path() == "/cookie" {
         return Response::builder()
             .header(
@@ -477,6 +490,32 @@ async fn untrusted_app(
         return body.into_response();
     }
     ([(header::CONTENT_TYPE,"text/html")],"<!doctype html><title>Untrusted runtime</title><script>window.runtimeScriptRan = true</script>").into_response()
+}
+
+struct CancelProbe {
+    requests: Arc<Mutex<Vec<Value>>>,
+    first: bool,
+}
+
+impl Stream for CancelProbe {
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.first {
+            self.first = false;
+            Poll::Ready(Some(Ok(Bytes::from_static(b"first"))))
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+impl Drop for CancelProbe {
+    fn drop(&mut self) {
+        if let Ok(mut requests) = self.requests.try_lock() {
+            requests.push(json!({"cancelled": true}));
+        }
+    }
 }
 
 #[tokio::test]
@@ -903,7 +942,8 @@ async fn runtime_proxy_protocols_are_streamed_and_fenced() -> Result<(), Box<dyn
         .get(target(&fixture.runtime, fixture.grant, "/sse"))
         .send()
         .await?;
-    let first = tokio::time::timeout(std::time::Duration::from_secs(2), sse.bytes_stream().next())
+    let mut sse_stream = sse.bytes_stream();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), sse_stream.next())
         .await?
         .ok_or("SSE ended before first event")??;
     assert_eq!(first, Bytes::from_static(b"data: first\n\n"));
@@ -992,7 +1032,42 @@ async fn runtime_proxy_protocols_are_streamed_and_fenced() -> Result<(), Box<dyn
         .headers_mut()
         .insert(header::SEC_WEBSOCKET_PROTOCOL, "runtime.test.v1".parse()?);
     assert!(connect_async(cross_ws).await.is_err());
-    drop(ws);
+    let cancel = fixture
+        .client
+        .get(target(&fixture.runtime, fixture.grant, "/cancel"))
+        .send()
+        .await?;
+    let mut cancel_stream = cancel.bytes_stream();
+    assert_eq!(
+        cancel_stream.next().await.ok_or("cancel probe ended")??,
+        Bytes::from_static(b"first")
+    );
+    drop(cancel_stream);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if fixture
+                .upstream
+                .lock()
+                .await
+                .iter()
+                .any(|entry| entry["cancelled"] == true)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+
+    sqlx::query("UPDATE access.access_grants g SET state='revoked',revision=revision+1,revoked_at=now(),reason_code='fixture_revoke',updated_at=now() FROM access.endpoint_grants eg WHERE eg.grant_id=g.grant_id AND eg.endpoint_grant_id=$1")
+        .bind(fixture.grant.as_uuid())
+        .execute(&fixture.state.pool)
+        .await?;
+    let ws_closed = tokio::time::timeout(std::time::Duration::from_secs(7), ws.next()).await?;
+    assert!(ws_closed.is_none() || ws_closed.is_some_and(|result| result.is_err()));
+    let sse_closed =
+        tokio::time::timeout(std::time::Duration::from_secs(7), sse_stream.next()).await?;
+    assert!(sse_closed.is_none());
     Ok(())
 }
 
