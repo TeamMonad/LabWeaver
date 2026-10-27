@@ -133,13 +133,13 @@ cargo xtask preflight --env v1 --infra
 
 ### 2.3 新集群基础安装
 
-仅由统一入口执行目标集群基础阶段；该阶段复用 `site.yml` 依次导入主机预检、节点准备、Kubernetes、网络、存储、KubeVirt、sandbox runtime、addons 与 public ingress。它不在本地持久记录阶段状态。升级只执行所选阶段，不重复执行基础安装。
+仅由统一入口执行目标集群基础阶段；该阶段复用 `site.yml` 依次导入主机预检、节点准备、Kubernetes、网络、存储、KubeVirt、sandbox runtime、addons 与 public ingress。它不在本地持久记录阶段状态。升级只执行所选阶段，不重复执行基础安装；迁移是否跳过已完成版本由现有 migration ledger 与 role 的幂等逻辑保证，不能仅凭阶段重入推断。
 
 ### 2.4 持久化服务、BuildKit、Harbor 和身份
 
 在已有 Kubernetes 上，统一入口按依赖顺序调用现有 `platform-foundation`、`platform-buildkit`、`platform-harbor-route` roles；这些 playbook 是实现阶段，不再作为新装、采用或升级的独立入口。Harbor 本身不存在时，`install`/`adopt` 的基础设施阶段会调用现有 `95-harbor.yml`。
 
-所有 profile 阶段都使用同一 Bundle 派生的版本、配置和 ownership 检查；重复应用同一 manifest 保持幂等，状态不明时先查询 release、Pod、Service 和业务页面，不创建第二个 release 或第二个 migration run。
+所有 profile 阶段都使用同一 Bundle 派生的版本、配置和 ownership 检查；重复应用同一 manifest 按现有 migration ledger 与 role 幂等逻辑处理，状态不明时先查询 release、Pod、Service 和业务页面，不要创建第二个 release 或手工重复执行 migration。
 
 生产三节点安装先配置[高可用基线](high-availability.md)中的 Bundle `platform_foundation_ha`、裸盘清单与独立备份目标，再运行相同入口。HA profile 的版本锁、CNPG 同步 quorum、JetStream 三副本与存储健康拒绝准入由同一 Bundle 派生；缺少独立备份字段时校验失败。已有独立数据库不得直接原地转换，必须先进入获准的数据切换窗口。目标 RPO/RTO 已决定，实际兑现待 #208 恢复验收；RGW 切换尚需兼容验收，不把渲染通过当成生产故障恢复通过。
 
@@ -361,7 +361,7 @@ cargo xtask resource-application --env v1 --infra --yes \
   --package-manifest <resource-package-manifest>
 ```
 
-两个 profile 都要求 `LABWEAVER_RUN_ID`，并会检查输入文件存在、namespace、ConfigMap/Secret 键和 digest。按 profile reconcile 的操作约定，重复施加同一 manifest 应保持幂等；状态不明时先查询 Helm、Pod、Service 和业务页面，不要创建第二个 release 或第二个 migration run。
+两个 profile 都要求 `LABWEAVER_RUN_ID`，并会检查输入文件存在、namespace、ConfigMap/Secret 键和 digest。重复施加同一 manifest 的行为由现有 migration ledger 与 profile role 的幂等逻辑约束；状态不明时先查询 Helm、Pod、Service 和业务页面，不要创建第二个 release 或手工重复执行 migration。
 
 ### 4.3 发布后检查
 

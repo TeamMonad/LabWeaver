@@ -74,6 +74,7 @@
   args:
     executable: /bin/bash
   changed_when: false
+  register: resource_application_ownership_check
   failed_when: false
   when: resource_application_kubeconfig is defined
 

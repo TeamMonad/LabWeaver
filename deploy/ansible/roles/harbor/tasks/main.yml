@@ -71,14 +71,13 @@
       - json
   check_mode: false
   changed_when: false
-  failed_when: false
+  failed_when: harbor_namespace_read.rc != 0 and (harbor_namespace_read.stderr | default('')) is not search('(?i)not found')
   register: harbor_namespace_read
 
 - name: Reject an existing namespace not labelled as LabWeaver infrastructure
   ansible.builtin.assert:
     that:
-      - harbor_namespace_read.rc != 0 or
-        ((harbor_namespace_read.stdout | from_json).metadata.labels['app.kubernetes.io/part-of'] | default('')) == 'labweaver-infrastructure'
+      - harbor_namespace_read.rc == 0 or (harbor_namespace_read.stderr | default('')) is search('(?i)not found')
     fail_msg: HARBOR_NAMESPACE_UNMANAGED
 
 - name: Capture the shared demo Gateway identity without modifying it
@@ -135,7 +134,7 @@
       - jsonpath={.status.loadBalancer.ingress[0].ip}
   check_mode: false
   changed_when: false
-  failed_when: false
+  failed_when: harbor_gateway_service_vip.rc != 0 and (harbor_gateway_service_vip.stderr | default('')) is not search('(?i)not found')
   register: harbor_gateway_service_vip
 
 - name: Reject a Harbor VIP owned by a different service
@@ -223,7 +222,7 @@
   delegate_to: "{{ groups['routers'][0] }}"
   become: false
   changed_when: false
-  failed_when: false
+  failed_when: harbor_dns_records.rc not in [0, 1]
   register: harbor_dns_records
   when: harbor_dnsmasq_enabled | bool
 

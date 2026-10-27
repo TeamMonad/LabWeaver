@@ -1614,7 +1614,7 @@ class AnsibleFixtureTests(unittest.TestCase):
             section = tasks.split(f"- name: {name}", maxsplit=1)[1].split(
                 "- name:", maxsplit=1
             )[0]
-            self.assertIn("failed_when: false", section)
+            self.assertNotIn("failed_when: false", section)
             validation_name = (
                 "Validate retained or created stream identities"
                 if "streams" in name

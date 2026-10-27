@@ -221,6 +221,81 @@ class DeploymentModeTests(unittest.TestCase):
             )
             self.assertEqual(checked.returncode == 0, accepted, checked.stderr)
 
+    def test_resource_probe_registers_and_rejects_healthy_foreign_and_read_errors(self) -> None:
+        source = tasks("deploy/ansible/roles/resource_application/tasks/main.yml")
+        probe = next(task for task in source if task.get("name") == "Refuse to adopt unowned Resource objects")
+        reject = next(task for task in source if task.get("name") == "Reject unowned Resource objects")
+        self.assertEqual(probe["register"], "resource_application_ownership_check")
+        command = Environment().from_string(probe["ansible.builtin.shell"]["cmd"]).render({
+            "resource_application_kubectl": "/usr/bin/kubectl",
+            "resource_application_kubeconfig": "/tmp/kubeconfig",
+            "resource_application_namespace": "science-sandbox",
+            "resource_application_release_name": "labweaver-resource",
+            "resource_application_installation_id": INSTALLATION,
+        })
+        program = command.split("jq -e ", 1)[1].strip().strip("'")
+        healthy = sample_object(release="labweaver-resource", namespace="science-sandbox", installation=INSTALLATION)
+        foreign = sample_object(release="foreign", namespace="science-sandbox", installation="foreign")
+        self.assertEqual(subprocess.run(["jq", "-e", program], input=json.dumps({"items": [healthy]}), text=True, capture_output=True, check=False).returncode, 0)
+        self.assertNotEqual(subprocess.run(["jq", "-e", program], input=json.dumps({"items": [foreign]}), text=True, capture_output=True, check=False).returncode, 0)
+        for rc, accepted in ((0, True), (1, False)):
+            result = run_assertion(reject, {"resource_application_kubeconfig": "/tmp/kubeconfig", "resource_application_ownership_check": {"rc": rc}})
+            self.assertEqual(result.returncode == 0, accepted, result.stdout + result.stderr)
+        read_error = run_assertion(reject, {"resource_application_kubeconfig": "/tmp/kubeconfig", "resource_application_ownership_check": {"rc": 2, "stderr": "permission denied"}})
+        self.assertNotEqual(read_error.returncode, 0)
+
+    def test_platform_probe_covers_foreign_cdi_datavolume_pvc_and_datasource(self) -> None:
+        source = tasks("deploy/ansible/roles/platform_application/tasks/main.yml")
+        probe = next(task for task in source if task.get("name") == "Refuse to adopt unowned platform objects")
+        command = Environment().from_string(probe["ansible.builtin.shell"]["cmd"]).render({
+            "platform_application_kubectl": "/usr/bin/kubectl",
+            "platform_application_kubeconfig": "/tmp/kubeconfig",
+            "platform_application_namespace": "science-sandbox",
+            "platform_application_release_name": "labweaver",
+            "platform_application_installation_id": INSTALLATION,
+        })
+        for resource in ("datavolume", "persistentvolumeclaim", "datasource"):
+            self.assertIn(resource, command)
+        for kind in ("DataVolume", "PersistentVolumeClaim", "DataSource"):
+            with self.subTest(kind=kind):
+                foreign = {"kind": kind, "metadata": {"name": "foreign", "annotations": {"labweaver.io/installation-id": "foreign"}, "labels": {"app.kubernetes.io/part-of": "labweaver"}}}
+                owned = json.loads(json.dumps(foreign))
+                owned["metadata"]["annotations"]["labweaver.io/installation-id"] = INSTALLATION
+                program = command.split("jq -e ", 1)[1].strip().strip("'")
+                self.assertNotEqual(subprocess.run(["jq", "-e", program], input=json.dumps({"items": [foreign]}), text=True, capture_output=True, check=False).returncode, 0)
+                self.assertEqual(subprocess.run(["jq", "-e", program], input=json.dumps({"items": [owned]}), text=True, capture_output=True, check=False).returncode, 0)
+
+    def test_harbor_route_upgrade_guard_rejects_foreign_route_identity(self) -> None:
+        source = tasks("deploy/ansible/roles/platform_harbor_route/tasks/main.yml")
+        guard = named(source, "Reject foreign Harbor route objects before mutation")
+        base = {"metadata": {"name": "harbor", "namespace": "harbor-system", "annotations": {"labweaver.io/installation-id": INSTALLATION}}}
+        variables = {"platform_harbor_gateway_read": {"resources": []}, "platform_harbor_http_route_read": {"resources": [base]}, "platform_harbor_tls_route_read": {"resources": []}, "platform_harbor_gateway_object": {}, "platform_harbor_http_route_object": base, "platform_harbor_tls_route_object": {}, "harbor_gateway_name": "harbor-gateway", "harbor_namespace": "harbor-system", "labweaver_installation_id": INSTALLATION}
+        self.assertEqual(run_assertion(guard, variables).returncode, 0)
+        foreign = json.loads(json.dumps(base))
+        foreign["metadata"]["annotations"]["labweaver.io/installation-id"] = "foreign"
+        variables["platform_harbor_http_route_object"] = foreign
+        self.assertNotEqual(run_assertion(guard, variables).returncode, 0)
+        delete = named(source, "Remove the obsolete Harbor HTTP route")["kubernetes.core.k8s"]
+        self.assertEqual(delete["delete_options"]["preconditions"]["uid"], "{{ platform_harbor_http_route_object.metadata.uid }}")
+
+    def test_harbor_reads_allow_only_not_found_and_expected_grep_absence(self) -> None:
+        source = tasks("deploy/ansible/roles/harbor/tasks/main.yml")
+        namespace = named(source, "Reject an existing namespace not labelled as LabWeaver infrastructure")
+        self.assertEqual(run_assertion(namespace, {"harbor_namespace_read": {"rc": 1, "stderr": "Error from server (NotFound): namespaces \\\"harbor\\\" not found"}}).returncode, 0)
+        self.assertNotEqual(run_assertion(namespace, {"harbor_namespace_read": {"rc": 1, "stderr": "forbidden"}}).returncode, 0)
+        dns_read = named(source, "Guard against an existing Harbor DNS collision")
+        self.assertEqual(dns_read["failed_when"], "harbor_dns_records.rc not in [0, 1]")
+        namespace_read = named(source, "Read existing Harbor namespace")
+        self.assertIn("not search", namespace_read["failed_when"])
+        self.assertIn("not found", namespace_read["failed_when"])
+
+    def test_wipe_uses_uid_preconditions_for_pv_and_namespace(self) -> None:
+        source = tasks("deploy/ansible/playbooks/94-platform-clean-redeploy.yml")[-1]["tasks"]
+        pv = named(source, "Delete only installation-owned persistent volumes")["kubernetes.core.k8s"]
+        namespace = named(source, "Delete only installation-owned namespaces")["kubernetes.core.k8s"]
+        self.assertEqual(pv["delete_options"]["preconditions"]["uid"], "{{ item.metadata.uid }}")
+        self.assertEqual(namespace["delete_options"]["preconditions"]["uid"], "{{ item.metadata.uid }}")
+
 
     def test_wipe_runs_full_preflight_before_destructive_playbook(self) -> None:
         source = (ROOT / "xtask/src/main.rs").read_text()

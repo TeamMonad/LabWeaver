@@ -47,7 +47,7 @@
     cmd: >-
       set -o pipefail;
       {{ platform_application_kubectl }} --kubeconfig {{ platform_application_kubeconfig }}
-      --namespace {{ platform_application_namespace }} get all,configmap,secret,serviceaccount,role,rolebinding
+      --namespace {{ platform_application_namespace }} get all,configmap,secret,serviceaccount,role,rolebinding,datavolume,persistentvolumeclaim,datasource
       --output json |
       jq -e '[.items[] | select(.metadata.name != "default") |
         select((((.metadata.annotations["meta.helm.sh/release-name"] // "") == "{{ platform_application_release_name }}"
@@ -504,7 +504,6 @@
       - "{{ platform_application_portal_tls_certificate_file }}"
   register: platform_application_portal_certificate_verification
   changed_when: false
-  failed_when: false
   check_mode: false
   delegate_to: localhost
   become: false
@@ -1185,7 +1184,9 @@
   loop: "{{ platform_application_nats_streams }}"
   register: platform_application_stream_info_before
   check_mode: false
-  failed_when: false
+  failed_when: >-
+    item.rc != 0 and
+    ((item.stdout | default('') ~ item.stderr | default('')) is not search('(?i)stream\\s+.*not found|stream not found'))
   changed_when: false
 
 - name: Create only missing configured streams
@@ -1297,7 +1298,6 @@
   loop: "{{ platform_application_nats_streams }}"
   register: platform_application_stream_info_after
   check_mode: false
-  failed_when: false
   changed_when: false
 
 - name: Reject failed configured stream readback outside check mode
@@ -1344,7 +1344,9 @@
   loop: "{{ platform_application_nats_consumers }}"
   register: platform_application_consumer_info_before
   check_mode: false
-  failed_when: false
+  failed_when: >-
+    item.rc != 0 and
+    ((item.stdout | default('') ~ item.stderr | default('')) is not search('(?i)consumer\\s+.*not found|consumer not found'))
   changed_when: false
 
 - name: Materialize structured NATS consumer configurations
@@ -1440,7 +1442,6 @@
   loop: "{{ platform_application_nats_consumers }}"
   register: platform_application_consumer_info_after
   check_mode: false
-  failed_when: false
   changed_when: false
 
 - name: Reject failed configured consumer readback outside check mode
@@ -1474,7 +1475,13 @@
   register: platform_application_minio_bucket_before
   check_mode: false
   changed_when: false
-  failed_when: false
+  failed_when: >-
+    platform_application_minio_bucket_before.rc != 0 and
+    (
+      (platform_application_minio_bucket_before.stdout | default('') ~
+       platform_application_minio_bucket_before.stderr | default('')) is not
+      search('(?i)(not found|does not exist|no such key)')
+    )
   environment:
     MC_CONFIG_DIR: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/mc"
     SSL_CERT_FILE: "{{ platform_application_minio_ca_file }}"
@@ -1642,7 +1649,7 @@
   loop_control:
     label: "{{ item.binding }}"
   register: platform_application_harbor_seed_digest_probes
-  failed_when: false
+  failed_when: item.status | default(0) not in [200, 404]
   no_log: true
 
 - name: Require every reviewed container base image digest in the retained Harbor project
@@ -1905,7 +1912,13 @@
   register: platform_application_keycloak_realm_before
   environment:
     JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak.hosts"
-  failed_when: false
+  failed_when: >-
+    platform_application_keycloak_realm_before.rc != 0 and
+    (
+      (platform_application_keycloak_realm_before.stdout | default('') ~
+       platform_application_keycloak_realm_before.stderr | default('')) is not
+      search('(?i)(not found|does not exist)')
+    )
   check_mode: false
   changed_when: false
   no_log: true
@@ -2329,6 +2342,7 @@
         labels:
           app.kubernetes.io/part-of: labweaver
         annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
           cdi.kubevirt.io/storage.bind.immediate.requested: "true"
           labweaver.io/source-release: "{{ item.item.release }}"
           labweaver.io/source-registry: "{{ item.item.registry_url }}"
@@ -2360,6 +2374,7 @@
         name: "{{ item.seed_data_volume_name }}"
         namespace: "{{ platform_application_namespace }}"
         annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
           cdi.kubevirt.io/storage.bind.immediate.requested: "true"
   loop: "{{ platform_application_lock.platform_vm_bases }}"
   loop_control:
@@ -2391,6 +2406,7 @@
         name: "{{ item.seed_data_volume_name }}"
         namespace: "{{ platform_application_namespace }}"
         annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
           cdi.kubevirt.io/storage.bind.immediate.requested: "true"
   loop: "{{ platform_application_lock.platform_vm_bases }}"
   loop_control:
@@ -2453,6 +2469,7 @@
         labels:
           app.kubernetes.io/part-of: labweaver
         annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
           labweaver.io/source-release: "{{ item.item.release }}"
           labweaver.io/source-registry: "{{ item.item.registry_url }}"
           labweaver.io/disk-sha256: "{{ item.item.disk_sha256 }}"

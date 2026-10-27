@@ -83,7 +83,12 @@
   ansible.builtin.assert:
     that:
       - platform_harbor_namespace_object.metadata.labels['app.kubernetes.io/part-of'] | default('') == 'labweaver-infrastructure'
+      - platform_harbor_namespace_object.metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id
       - platform_harbor_service_object.metadata.name | default('') == harbor_release_name
+      - platform_harbor_service_object.metadata.namespace | default('') == harbor_namespace
+      - platform_harbor_service_object.metadata.annotations['meta.helm.sh/release-name'] | default('') == harbor_release_name
+      - platform_harbor_service_object.metadata.annotations['meta.helm.sh/release-namespace'] | default('') == harbor_namespace
+      - platform_harbor_service_object.metadata.labels['app.kubernetes.io/managed-by'] | default('') == 'Helm'
       - platform_harbor_service_object.spec.ports | selectattr('port', 'equalto', 80) | list | length == 1
       - platform_harbor_service_object.spec.ports | selectattr('port', 'equalto', 443) | list | length == 1
       - platform_harbor_endpoint_slices | length > 0
@@ -101,16 +106,19 @@
       - platform_harbor_tls_route_read.resources | length <= 1
       - >-
         platform_harbor_gateway_read.resources | length == 0 or
-        (platform_harbor_gateway_object.metadata.labels['app.kubernetes.io/part-of'] | default(''))
-        == 'labweaver-infrastructure'
+        (platform_harbor_gateway_object.metadata.name == harbor_gateway_name and
+         platform_harbor_gateway_object.metadata.namespace == harbor_namespace and
+         platform_harbor_gateway_object.metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id)
       - >-
         platform_harbor_http_route_read.resources | length == 0 or
-        (platform_harbor_http_route_object.metadata.labels['app.kubernetes.io/part-of'] | default(''))
-        == 'labweaver-infrastructure'
+        (platform_harbor_http_route_object.metadata.name == 'harbor' and
+         platform_harbor_http_route_object.metadata.namespace == harbor_namespace and
+         platform_harbor_http_route_object.metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id)
       - >-
         platform_harbor_tls_route_read.resources | length == 0 or
-        (platform_harbor_tls_route_object.metadata.labels['app.kubernetes.io/part-of'] | default(''))
-        == 'labweaver-infrastructure'
+        (platform_harbor_tls_route_object.metadata.name == 'harbor' and
+         platform_harbor_tls_route_object.metadata.namespace == harbor_namespace and
+         platform_harbor_tls_route_object.metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id)
     fail_msg: PLATFORM_HARBOR_ROUTE_OWNERSHIP_INVALID
 
 - name: Read the existing Harbor nginx public CA
@@ -127,6 +135,10 @@
   ansible.builtin.assert:
     that:
       - platform_harbor_nginx_secret_read.resources | length == 1
+      - platform_harbor_nginx_secret_read.resources[0].metadata.name == 'harbor-nginx'
+      - platform_harbor_nginx_secret_read.resources[0].metadata.namespace == harbor_namespace
+      - platform_harbor_nginx_secret_read.resources[0].metadata.annotations['meta.helm.sh/release-name'] | default('') == harbor_release_name
+      - platform_harbor_nginx_secret_read.resources[0].metadata.annotations['meta.helm.sh/release-namespace'] | default('') == harbor_namespace
       - platform_harbor_nginx_secret_read.resources[0].metadata.labels['app.kubernetes.io/managed-by'] | default('') == 'Helm'
       - platform_harbor_nginx_secret_read.resources[0].data['ca.crt'] | default('') | length > 0
     fail_msg: PLATFORM_HARBOR_BACKEND_CA_INVALID
@@ -233,6 +245,9 @@
     namespace: "{{ harbor_namespace }}"
     name: harbor
     state: absent
+    delete_options:
+      preconditions:
+        uid: "{{ platform_harbor_http_route_object.metadata.uid }}"
   when: platform_harbor_http_route_read.resources | length == 1
 
 - name: Reconcile the Harbor Gateway as TLS passthrough
@@ -247,6 +262,8 @@
         namespace: "{{ harbor_namespace }}"
         labels:
           app.kubernetes.io/part-of: labweaver-infrastructure
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
       spec:
         gatewayClassName: cilium
         infrastructure:
@@ -281,6 +298,8 @@
         namespace: "{{ harbor_namespace }}"
         labels:
           app.kubernetes.io/part-of: labweaver-infrastructure
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
       spec:
         parentRefs:
           - name: "{{ harbor_gateway_name }}"

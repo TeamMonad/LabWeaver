@@ -513,7 +513,13 @@
   become_user: rocky
   delegate_to: "{{ platform_buildkit_controller_host }}"
   changed_when: false
-  failed_when: false
+  failed_when: >-
+    platform_buildkit_controller_context.rc != 0 and
+    (
+      (platform_buildkit_controller_context.stdout | default('') ~
+       platform_buildkit_controller_context.stderr | default('')) is not
+      search('(?i)(not found|does not exist|no such builder)')
+    )
   when: platform_buildkit_controller_enabled | bool
 
 - name: Create the missing router-owned BuildKit package context
