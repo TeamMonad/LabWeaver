@@ -2653,7 +2653,10 @@ mod tests {
         assert_eq!(budget.available_permits(), 100);
         let (mut context, _, _) = history_fixture();
         context.deadline_at = contracts::UtcTimestamp::from_utc(
-            time::OffsetDateTime::now_utc() - time::Duration::seconds(1),
+            time::OffsetDateTime::now_utc()
+                .replace_nanosecond(0)
+                .expect("whole seconds")
+                - time::Duration::seconds(1),
         )
         .expect("expired deadline");
         let held = budget.clone().acquire_many_owned(100).await.expect("busy");
