@@ -885,7 +885,7 @@ async fn course_calendar_patch_reaches_real_control_and_rejects_stale_revision()
         "latePolicy":"hard_close",
         "lateUntil":null
     });
-    let patch = |session: &BffSession, etag: Option<&str>| {
+    let mutate = |session: &BffSession, etag: Option<&str>| {
         let request = fixture
             .http
             .patch(format!("{}{path}", fixture.access))
@@ -905,13 +905,8 @@ async fn course_calendar_patch_reaches_real_control_and_rejects_stale_revision()
             request
         }
     };
-    assert_diagnostic(
-        patch(student, None).send().await?,
-        StatusCode::FORBIDDEN,
-        "LW_AUTH_SCOPE_DENIED",
-    )
-    .await?;
-    let created = patch(teacher, None).send().await?;
+    let created = mutate(teacher, None).send().await?;
+    assert_eq!(created.status(), StatusCode::OK);
     let status = created.status();
     let etag = created
         .headers()
@@ -924,17 +919,23 @@ async fn course_calendar_patch_reaches_real_control_and_rejects_stale_revision()
     assert_eq!(created["revision"], 1);
     assert_eq!(created["dueAt"], "2026-10-01T10:00:00.000Z");
     assert_eq!(created["state"], "closed");
+    assert_diagnostic(
+        mutate(student, None).send().await?,
+        StatusCode::FORBIDDEN,
+        "LW_AUTH_SCOPE_DENIED",
+    )
+    .await?;
     assert_eq!(
         fixture.browser_get(&path, teacher).send().await?.status(),
         StatusCode::OK
     );
-    let updated = patch(teacher, Some(&etag)).send().await?;
+    let updated = mutate(teacher, Some(&etag)).send().await?;
     let status = updated.status();
     let updated: Value = updated.json().await?;
     assert_eq!(status, StatusCode::OK, "{updated}");
     assert_eq!(updated["revision"], 2);
     assert_diagnostic(
-        patch(teacher, Some(&etag)).send().await?,
+        mutate(teacher, Some(&etag)).send().await?,
         StatusCode::CONFLICT,
         "LW_COURSE_CALENDAR_CONFLICT",
     )
