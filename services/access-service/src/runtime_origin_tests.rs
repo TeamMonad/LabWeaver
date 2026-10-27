@@ -1,10 +1,15 @@
 //! Real Access + Environment HTTP authorities, persisted sessions/grants, and an untrusted HTTP app.
 use super::*;
+use axum::body::Body;
 use contracts::{EndpointGrantId, environment::EnvironmentInstance};
 use environment_service::{OwnerResolver, PgEnvironmentStore, PgReleaseProjectionStore};
-use reqwest::cookie::Jar;
+use futures_util::SinkExt;
+use reqwest::cookie::{CookieStore, Jar};
+use rustls::{ClientConfig, RootCertStore};
 use sqlx::Row;
-
+use tokio_tungstenite::{
+    Connector, connect_async, connect_async_tls_with_config, tungstenite::Message as WsMessage,
+};
 struct RuntimeFixture {
     state: Arc<AppState>,
     client: reqwest::Client,
@@ -16,6 +21,7 @@ struct RuntimeFixture {
     request_log: Arc<Mutex<Vec<Value>>>,
     bff: BffSession,
     upstream: Arc<Mutex<Vec<Value>>>,
+    jar: Arc<Jar>,
     certificate_pem: String,
     private_key_pem: String,
     tasks: Tasks,
@@ -174,6 +180,7 @@ impl RuntimeFixture {
         let upstream_address = upstream_listener.local_addr()?;
         let upstream = Arc::new(Mutex::new(Vec::new()));
         let app_router = Router::new()
+            .route("/ws", get(upstream_ws))
             .fallback(any(untrusted_app))
             .with_state(Arc::clone(&upstream));
         tasks.0.push(tokio::spawn(async move {
@@ -210,6 +217,8 @@ impl RuntimeFixture {
             )
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
+        mutable.runtime_proxy.websocket_base =
+            Some(Url::parse(&format!("ws://{upstream_address}"))?);
         let request_log = Arc::new(Mutex::new(Vec::new()));
         let router = browser_router(Arc::clone(&state)).layer(
             axum::middleware::from_fn_with_state(Arc::clone(&request_log), record_request_uri),
@@ -227,7 +236,7 @@ impl RuntimeFixture {
         );
         let client = reqwest::Client::builder()
             .no_proxy()
-            .cookie_provider(jar)
+            .cookie_provider(Arc::clone(&jar))
             .add_root_certificate(reqwest::Certificate::from_pem(ca.as_bytes())?)
             .resolve("portal.localhost", address)
             .resolve(
@@ -255,6 +264,7 @@ impl RuntimeFixture {
             request_log,
             bff,
             upstream,
+            jar,
             certificate_pem: ca,
             private_key_pem,
             tasks,
@@ -325,6 +335,23 @@ impl RuntimeFixture {
             binding: binding.to_owned(),
         })
     }
+
+    fn runtime_cookie(&self, grant: EndpointGrantId) -> Result<String, Box<dyn Error>> {
+        let origin = if grant == self.grant {
+            &self.runtime
+        } else if grant == self.grant_b {
+            &self.runtime_b
+        } else {
+            return Err("unknown runtime grant".into());
+        };
+        let url = Url::parse(&format!("{origin}/connect/{grant}/"))?;
+        Ok(self
+            .jar
+            .cookies(&url)
+            .ok_or("missing runtime capability cookie")?
+            .to_str()?
+            .to_owned())
+    }
 }
 
 async fn record_request_uri(
@@ -379,6 +406,22 @@ async fn seed_runtime(
     Ok(())
 }
 
+async fn upstream_ws(upgrade: WebSocketUpgrade) -> Response {
+    upgrade
+        .protocols(["runtime.test.v1"])
+        .on_upgrade(|mut socket| async move {
+            while let Some(Ok(message)) = socket.recv().await {
+                if matches!(message, axum::extract::ws::Message::Close(_)) {
+                    break;
+                }
+                if socket.send(message).await.is_err() {
+                    break;
+                }
+            }
+        })
+        .into_response()
+}
+
 async fn untrusted_app(
     State(requests): State<Arc<Mutex<Vec<Value>>>>,
     method: Method,
@@ -387,6 +430,42 @@ async fn untrusted_app(
     body: Bytes,
 ) -> Response {
     requests.lock().await.push(json!({"method":method.as_str(),"path":uri.path(),"cookie":headers.get(header::COOKIE).and_then(|h|h.to_str().ok()),"authorization":headers.get(header::AUTHORIZATION).and_then(|h|h.to_str().ok())}));
+    if uri.path() == "/sse" {
+        let first = futures_util::stream::once(async {
+            Ok::<_, std::io::Error>(Bytes::from_static(b"data: first\n\n"))
+        });
+        let never = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
+        return Response::builder()
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .body(Body::from_stream(first.chain(never)))
+            .unwrap_or_else(|_| Response::new(Body::empty()));
+    }
+    if uri.path() == "/download" {
+        let first = futures_util::stream::once(async {
+            Ok::<_, std::io::Error>(Bytes::from_static(b"first-chunk"))
+        });
+        let never = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
+        return Response::builder()
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from_stream(first.chain(never)))
+            .unwrap_or_else(|_| Response::new(Body::empty()));
+    }
+    if uri.path() == "/cookie" {
+        return Response::builder()
+            .header(
+                header::SET_COOKIE,
+                "app=1; Domain=.runtime.localhost; Path=/; Secure",
+            )
+            .body(Body::from(Bytes::from_static(b"cookie")))
+            .unwrap_or_else(|_| Response::new(Body::empty()));
+    }
+    if uri.path() == "/dangerous" {
+        return Response::builder()
+            .status(StatusCode::FOUND)
+            .header(header::LOCATION, "https://evil.example/steal")
+            .body(Body::empty())
+            .unwrap_or_else(|_| Response::new(Body::empty()));
+    }
     if uri.path() == "/redirect" {
         return (
             StatusCode::FOUND,
@@ -791,6 +870,129 @@ async fn runtime_handoff_isolated_bound_one_time_and_live_revocation() -> Result
             !target.contains(&handoff.token) && !target.contains(&handoff.binding)
         })
     }));
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn runtime_proxy_protocols_are_streamed_and_fenced() -> Result<(), Box<dyn Error>> {
+    let fixture = Box::pin(RuntimeFixture::new()).await?;
+    let handoff_a = fixture.handoff(fixture.grant).await?;
+    assert_eq!(
+        handoff_a.exchange(&fixture.client).send().await?.status(),
+        StatusCode::SEE_OTHER
+    );
+    let handoff_b = fixture.handoff(fixture.grant_b).await?;
+    assert_eq!(
+        handoff_b.exchange(&fixture.client).send().await?.status(),
+        StatusCode::SEE_OTHER
+    );
+    let cookie_a = fixture.runtime_cookie(fixture.grant)?;
+    let target = |origin: &str, grant: EndpointGrantId, path: &str| {
+        format!("{origin}/connect/{grant}{path}")
+    };
+
+    let plain = fixture
+        .client
+        .get(target(&fixture.runtime, fixture.grant, "/"))
+        .send()
+        .await?;
+    assert_eq!(plain.status(), StatusCode::OK);
+    let sse = fixture
+        .client
+        .get(target(&fixture.runtime, fixture.grant, "/sse"))
+        .send()
+        .await?;
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), sse.bytes_stream().next())
+        .await?
+        .ok_or("SSE ended before first event")??;
+    assert_eq!(first, Bytes::from_static(b"data: first\n\n"));
+    let download = fixture
+        .client
+        .get(target(&fixture.runtime, fixture.grant, "/download"))
+        .send()
+        .await?;
+    let first_download = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        download.bytes_stream().next(),
+    )
+    .await?
+    .ok_or("download ended before first chunk")??;
+    assert_eq!(first_download, Bytes::from_static(b"first-chunk"));
+
+    let cookie_response = fixture
+        .client
+        .get(target(&fixture.runtime, fixture.grant, "/cookie"))
+        .send()
+        .await?;
+    let set_cookie = cookie_response
+        .headers()
+        .get(header::SET_COOKIE)
+        .ok_or("runtime app cookie was not forwarded")?
+        .to_str()?;
+    assert!(!set_cookie.to_ascii_lowercase().contains("domain="));
+    let dangerous = fixture
+        .client
+        .get(target(&fixture.runtime, fixture.grant, "/dangerous"))
+        .send()
+        .await?;
+    assert!(!dangerous.status().is_redirection());
+    let cross_http = fixture
+        .client
+        .get(target(&fixture.runtime_b, fixture.grant_b, "/"))
+        .header(header::COOKIE, &cookie_a)
+        .send()
+        .await?;
+    assert_eq!(cross_http.status(), StatusCode::FORBIDDEN);
+
+    let mut ws_request = target(&fixture.runtime, fixture.grant, "/ws")
+        .replace("https://", "wss://")
+        .into_client_request()?;
+    ws_request
+        .headers_mut()
+        .insert(header::ORIGIN, fixture.runtime.parse()?);
+    ws_request
+        .headers_mut()
+        .insert(header::COOKIE, cookie_a.parse()?);
+    ws_request
+        .headers_mut()
+        .insert(header::SEC_WEBSOCKET_PROTOCOL, "runtime.test.v1".parse()?);
+    let mut roots = RootCertStore::empty();
+    for certificate in rustls_pemfile::certs(&mut std::io::Cursor::new(
+        fixture.certificate_pem.as_bytes(),
+    )) {
+        roots.add(certificate?)?;
+    }
+    let tls = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let (mut ws, _) = connect_async_tls_with_config(
+        ws_request,
+        None,
+        true,
+        Some(Connector::Rustls(Arc::new(tls))),
+    )
+    .await?;
+    ws.send(WsMessage::Text("echo".into())).await?;
+    assert_eq!(
+        ws.next().await.ok_or("WS closed")??,
+        WsMessage::Text("echo".into())
+    );
+
+    let mut cross_ws = target(&fixture.runtime_b, fixture.grant_b, "/ws")
+        .replace("https://", "wss://")
+        .into_client_request()?;
+    cross_ws
+        .headers_mut()
+        .insert(header::ORIGIN, fixture.runtime_b.parse()?);
+    cross_ws
+        .headers_mut()
+        .insert(header::COOKIE, cookie_a.parse()?);
+    cross_ws
+        .headers_mut()
+        .insert(header::SEC_WEBSOCKET_PROTOCOL, "runtime.test.v1".parse()?);
+    assert!(connect_async(cross_ws).await.is_err());
+    drop(ws);
     Ok(())
 }
 

@@ -285,11 +285,11 @@ fn browser_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/connect/{endpoint_grant_id}/",
-            axum::routing::any(runtime::connect),
+            get(runtime::connect_websocket).fallback(axum::routing::any(runtime::connect)),
         )
         .route(
             "/connect/{endpoint_grant_id}/{*runtime_path}",
-            axum::routing::any(runtime::connect),
+            get(runtime::connect_websocket).fallback(axum::routing::any(runtime::connect)),
         )
         .merge(resource_browser_router())
 }

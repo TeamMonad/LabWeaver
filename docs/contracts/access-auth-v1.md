@@ -78,11 +78,14 @@ HTTP/1 Host 与 HTTP/2 URI authority 冲突、缺失、未知主机一律拒绝�
 运行时 host 不提供 `/api/v1`、`/auth` 或 Console。门户 API 拒绝运行时 Origin，不开放 CORS。
 运行时跨 origin 请求即使来自同站的另一个 grant、浏览器自动附带目标 Cookie，仍拒绝并且不访问上游；
 Fetch Metadata 同时拒绝省略 Origin 的跨主机 no-cors 资源请求，顶层交接导航仍可完成。
-写方法要求该 grant 自己的规范化 HTTPS Origin 和 Edit 动作，不使用门户 CSRF；门户交接 POST 本身
-仍须门户 CSRF。响应带 `Cross-Origin-Resource-Policy: same-origin`、opener 隔离与
-`Origin-Agent-Cluster: ?1`，运行时文档保持 origin-keyed，不依赖 Cookie Path 或同站属性隔离脚本。
-上游不接收 BFF/capability Cookie 或 Authorization，Set-Cookie 不转发；根相对重定向保持当前 host
-及 grant 路径，外部重定向拒绝。BFF `__Host-labweaver_session` 保持 host-only，只发给门户。
+写请求要求该 grant 自己的规范化 HTTPS Origin 和 Edit 动作，不使用门户 CSRF；门户交接 POST 本身仍须门户 CSRF。响应带
+`Cross-Origin-Resource-Policy: same-origin`、opener 隔离与 `Origin-Agent-Cluster: ?1`，运行时文档保持
+origin-keyed，不依赖 Cookie Path 或同站属性隔离脚本。HTTP 响应按流转发，响应内存受配置的最大响应字节数约束，
+因此 SSE 可在上游结束前逐块到达，超限流会中止；客户端断开会取消上游请求。WebSocket upgrade 仅经同一
+grant/capability、成员、端点和 deadline 检查后转发，grant 或成员撤销由最多 5 秒一次的权威重检关闭长连接。
+上游不接收 BFF/capability Cookie 或 Authorization。应用 `Set-Cookie` 会转发到当前 grant host，并剥除
+`Domain` 属性以禁止扩大到门户或其他 grant；根相对重定向保持当前 host 及 grant 路径，外部重定向拒绝。
+BFF `__Host-labweaver_session` 保持 host-only，只发给门户。
 
 | 条件 | HTTP | diagnosticCode |
 | --- | ---: | --- |
