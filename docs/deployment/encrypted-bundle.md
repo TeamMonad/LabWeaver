@@ -172,11 +172,11 @@ Agent 的四项 `LABWEAVER_CONTROL_SERVICE_BASE_URI`、`CA_PATH`、`AUDIENCE`、
 
 Agent 保留自己的 service client ID、OIDC CA 与 client secret。其 `mtls-ca.pem` 必须和已有 Control 连接引用同一源文件；不复制 Environment 的身份。Agent scope 输入包含已有 `control.agent_run.read`，Control caller 输入包含该 Agent client ID。该名称已用于 Environment→Control 读取，本次不增加新 scope 或通配权限。
 
-Bundle 静态 inventory 可通过原 `identity_service_role_assignments` 传递已评审配置；本 PR 不新增 Agent→Control role assignment，不签发凭据或修改真实身份。自定义 assignment 必须由 #216/#207 owner 在其消费者 PR 中校验 caller、target、service client、audience 和 scope。
+Bundle 静态 inventory 通过 `identity_service_role_assignments` 配置最小 Agent→Control assignment：`labweaver-agent` 对 `labweaver-control` 仅获 `control.agent_run.read`，对应 Agent 模型输入授权读取。该默认供生产与 `tools/local_dev.py` 共用；本切片不签发凭据或修改真实身份提供方。
 
 角色变更实施前，由维护者确认真实 issuer/client/audience、受信 CA、既有密钥挂载、最小角色 assignment、Control caller 与网络可达性，再由既有操作者在批准窗口执行。不要因为 scope 字符串或渲染成功就宣称服务已获授权。本切片没有执行 identity Job、修改真实权限或部署。
 
-Agent→Control 的实际授权和消费者测试属于 #216/#207，不在本 PR 内实现。当前 PR 只从同一 Bundle 派生 HTTPS origin、CA、audience、timeout、caller 和 scope 输入，并在 Bundle/Helm 边界拒绝独立覆盖。渲染这些输入不会证明 Keycloak 已存在该授权，也不会签发凭据；维护者必须在目标 owner PR 和批准窗口中验证真实 role assignment、issuer、client、audience、CA、网络和服务镜像。
+Agent→Control 的实际授权现由身份默认角色 assignment 提供；消费者仅请求 `control.agent_run.read`，Control caller allowlist 与网络访问仍须匹配。渲染这些输入不会证明 Keycloak 已部署该授权，也不会签发凭据；维护者须在批准窗口验证真实 role assignment、issuer、client、audience、CA、网络和服务镜像。
 
 
 ### 项目列表游标签名 Secret
