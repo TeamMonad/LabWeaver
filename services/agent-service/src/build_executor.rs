@@ -288,7 +288,7 @@ impl ProductionBuildExecutor {
         // Reserve once before opening the object body. Gzip reserves the full cap rather than
         // trusting its compressed size or ISIZE trailer; the permit outlives the object file,
         // workspace and BuildKit spool (including the mmap upload owner).
-        let _context_budget = self
+        let context_budget = self
             .acquire_context_budget(
                 build_context.size_bytes,
                 &build_context.media_type,
@@ -331,7 +331,7 @@ impl ProductionBuildExecutor {
             input,
             &build_context.media_type,
             workspace.path(),
-            u64::try_from(_context_budget.num_permits()).map_err(|_| rejected())?,
+            u64::try_from(context_budget.num_permits()).map_err(|_| rejected())?,
         ) {
             tracing::warn!(
                 event = "agent.build_executor.context_unpack_rejected",
@@ -1740,7 +1740,7 @@ fn ensure_global_service_image_arg(
     std::fs::write(&path, updated).map_err(|_| rejected())
 }
 
-/// Pack the unpacked build workspace into a private spool file, then expose it to BuildKit through
+/// Pack the unpacked build workspace into a private spool file, then expose it to `BuildKit` through
 /// an owner-backed `Bytes` view. The tar archive is never copied into a heap `Vec`.
 fn tar_context(workspace: &Path) -> Result<(tempfile::TempPath, Bytes), BuildProviderFailure> {
     let parent = workspace.parent().ok_or_else(rejected)?;
@@ -2547,8 +2547,7 @@ mod tests {
             .expect("permit");
         assert_eq!(budget.available_permits(), 60);
         let cancelled = CancellationToken::new();
-        let waiting = budget.clone().acquire_many_owned(70);
-        tokio::pin!(waiting);
+        let mut waiting = Box::pin(budget.clone().acquire_many_owned(70));
         cancelled.cancel();
         tokio::select! {
             biased;
