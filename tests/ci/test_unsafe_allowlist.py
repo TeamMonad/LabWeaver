@@ -2,7 +2,6 @@
 from pathlib import Path
 import re
 import subprocess
-import tomllib
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -36,7 +35,10 @@ def allow_sites(sources):
 
 
 def workspace_denies_unsafe(manifest):
-    return tomllib.loads(manifest)["workspace"]["lints"]["rust"].get("unsafe_code") == "deny"
+    table = re.search(r"(?ms)^\[workspace\.lints\.rust\]\s*\n(.*?)(?=^\[|\Z)", manifest)
+    return table is not None and re.search(
+        r'(?m)^unsafe_code\s*=\s*"deny"\s*(?:#.*)?$', table.group(1)
+    ) is not None
 
 
 class UnsafeAllowlistTests(unittest.TestCase):
