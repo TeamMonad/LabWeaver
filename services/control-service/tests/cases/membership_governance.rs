@@ -515,22 +515,22 @@ async fn course_calendar_and_roster_import_are_revisioned_and_idempotent() -> Te
     instructor(&pool, course, &teacher).await?;
     let due: UtcTimestamp = "2026-10-01T10:00:00.000Z".parse()?;
     let open: UtcTimestamp = "2026-10-01T09:00:00.000Z".parse()?;
+    let input = serde_json::from_value(serde_json::json!({
+        "openAt":"2026-10-01T11:00:00.000+02:00",
+        "dueAt":"2026-10-01T12:00:00.000+02:00",
+        "timeZone":"Europe/Berlin",
+        "latePolicy":"allow_with_mark",
+        "lateUntil":"2026-10-01T13:00:00.000+02:00"
+    }))?;
     let calendar = service
-        .update_course_calendar(
-            &teacher,
-            course,
-            &contracts::membership_governance::UpdateCourseCalendar {
-                open_at: Some(open),
-                due_at: due,
-                time_zone: "Asia/Shanghai".to_owned(),
-                late_policy: contracts::membership_governance::CourseLatePolicy::AllowWithMark,
-                late_until: Some("2026-10-01T11:00:00.000Z".parse()?),
-            },
-            None,
-        )
+        .update_course_calendar(&teacher, course, &input, None)
         .await?;
     assert_eq!(calendar.open_at, Some(open));
-    assert_eq!(calendar.time_zone, "Asia/Shanghai");
+    assert_eq!(calendar.time_zone, "Europe/Berlin");
+    assert_eq!(
+        calendar.state,
+        contracts::membership_governance::CourseCalendarState::Closed
+    );
     assert_eq!(calendar.due_at, due);
     let stored_due: time::OffsetDateTime =
         sqlx::query_scalar("SELECT due_at FROM control.course_calendars WHERE course_id=$1")
@@ -538,14 +538,17 @@ async fn course_calendar_and_roster_import_are_revisioned_and_idempotent() -> Te
             .fetch_one(&pool)
             .await?;
     assert_eq!(stored_due, due.get());
-    let local_due = time::OffsetDateTime::parse(
-        "2026-10-01T12:00:00.000+02:00",
-        &time::format_description::well_known::Rfc3339,
-    )?;
     assert_eq!(
-        local_due,
-        due.get().to_offset(local_due.offset()),
-        "time-zone offsets resolve to the same stored UTC instant"
+        calendar.state_at(open),
+        contracts::membership_governance::CourseCalendarState::Open
+    );
+    assert_eq!(
+        calendar.state_at(due),
+        contracts::membership_governance::CourseCalendarState::Late
+    );
+    assert_eq!(
+        calendar.state_at("2026-10-01T11:00:00.000Z".parse()?),
+        contracts::membership_governance::CourseCalendarState::Closed
     );
     assert!(
         service
@@ -615,6 +618,66 @@ async fn course_calendar_and_roster_import_are_revisioned_and_idempotent() -> Te
     .fetch_one(&pool)
     .await?;
     assert_eq!(count, 1, "re-import must not create another member row");
+    let first_event_count: i64 = sqlx::query_scalar("SELECT count(*) FROM control.sse_events WHERE course_id=$1 AND event_type='member_authorization.changed.v1' AND aggregate_id=$2")
+        .bind(course.as_uuid()).bind(student.actor_id.as_uuid()).fetch_one(&pool).await?;
+    assert_eq!(first_event_count, 1, "one change event per imported actor");
+    let removed = service
+        .remove_course_membership(
+            &teacher,
+            course,
+            student.actor_id,
+            &removal(Revision::new(1)?),
+            &IdempotencyKey::parse("remove-imported-student")?,
+        )
+        .await?;
+    assert_eq!(removed.revision, Revision::new(2)?);
+    let reimported = service
+        .import_course_roster(
+            &teacher,
+            course,
+            &request,
+            &IdempotencyKey::parse("reimport-revoked-student")?,
+        )
+        .await?;
+    assert_eq!(
+        reimported.rows[0].result,
+        CourseRosterImportRowState::Imported
+    );
+    assert_eq!(reimported.revision, Revision::new(3)?);
+    let active: (String, i64) = sqlx::query_as(
+        "SELECT state,revision FROM control.course_memberships WHERE course_id=$1 AND actor_id=$2",
+    )
+    .bind(course.as_uuid())
+    .bind(student.actor_id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(active, ("active".to_owned(), 3));
+    let events: i64 = sqlx::query_scalar("SELECT count(*) FROM control.sse_events WHERE course_id=$1 AND event_type='member_authorization.changed.v1' AND aggregate_id=$2")
+        .bind(course.as_uuid()).bind(student.actor_id.as_uuid()).fetch_one(&pool).await?;
+    assert_eq!(
+        events, 3,
+        "import, revoke, reactivation each emit authorization change"
+    );
+    let again = service
+        .import_course_roster(
+            &teacher,
+            course,
+            &request,
+            &IdempotencyKey::parse("reimport-active-student")?,
+        )
+        .await?;
+    assert_eq!(
+        again.rows[0].result,
+        CourseRosterImportRowState::AlreadyMember
+    );
+    let events_after: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM control.sse_events WHERE course_id=$1 AND aggregate_id=$2",
+    )
+    .bind(course.as_uuid())
+    .bind(student.actor_id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(events_after, events);
     Ok(())
 }
 

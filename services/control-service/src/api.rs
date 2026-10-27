@@ -299,7 +299,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/api/v1/courses/{course_id}/events", get(events))
         .route(
             "/api/v1/courses/{course_id}/calendar",
-            get(get_course_calendar).put(update_course_calendar),
+            get(get_course_calendar).patch(update_course_calendar),
         )
         .route(
             "/api/v1/courses/{course_id}/roster/import",
@@ -3356,12 +3356,14 @@ impl From<ControlError> for ApiError {
         let status = match error {
             ControlError::CursorInvalid => StatusCode::BAD_REQUEST,
             ControlError::InvitationNotFound
+            | ControlError::CourseCalendarNotFound
             | ControlError::UploadNotFound
             | ControlError::CandidateNotFound
             | ControlError::ReleaseNotFound
             | ControlError::NotFound
             | ControlError::PolicyNotFound => StatusCode::NOT_FOUND,
             ControlError::InvitationStateConflict
+            | ControlError::CourseCalendarConflict
             | ControlError::CourseInstructorProtected
             | ControlError::IdempotencyConflict
             | ControlError::OperationInProgress
@@ -3380,6 +3382,7 @@ impl From<ControlError> for ApiError {
             | ControlError::ProjectGovernanceDenied
             | ControlError::InvitationDenied
             | ControlError::CourseGovernanceDenied
+            | ControlError::CourseRosterGovernanceDenied
             | ControlError::CourseMismatch
             | ControlError::ProjectMismatch => StatusCode::FORBIDDEN,
             ControlError::ConfigurationInvalid

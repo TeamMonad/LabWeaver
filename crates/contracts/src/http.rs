@@ -3110,7 +3110,7 @@ pub const OPERATIONS: &[OperationContract] = &[
     ),
     op!(
         Public,
-        Put,
+        Patch,
         "/api/v1/courses/{courseId}/calendar",
         "updateCourseCalendar",
         "course_calendar:write",

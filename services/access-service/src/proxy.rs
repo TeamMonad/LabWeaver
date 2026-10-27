@@ -598,7 +598,7 @@ async fn authorize_evaluation_release_path(
         (method, ["", "api", "v1", "courses", course, "calendar"]) if *method == Method::GET => {
             (*course, "getCourseCalendar")
         }
-        (method, ["", "api", "v1", "courses", course, "calendar"]) if *method == Method::PUT => {
+        (method, ["", "api", "v1", "courses", course, "calendar"]) if *method == Method::PATCH => {
             (*course, "updateCourseCalendar")
         }
         (method, ["", "api", "v1", "courses", course, "roster", "import"])

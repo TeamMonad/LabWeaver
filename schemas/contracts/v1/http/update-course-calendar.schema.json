@@ -30,7 +30,8 @@
         {
           "type": "null"
         }
-      ]
+      ],
+      "default": null
     },
     "openAt": {
       "anyOf": [
@@ -40,7 +41,8 @@
         {
           "type": "null"
         }
-      ]
+      ],
+      "default": null
     },
     "timeZone": {
       "type": "string"

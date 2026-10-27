@@ -440,7 +440,7 @@ export const getCourseCalendar = <ThrowOnError extends boolean = false>(options:
  *
  * Permission: course_calendar:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
  */
-export const updateCourseCalendar = <ThrowOnError extends boolean = false>(options: Options<UpdateCourseCalendarData, ThrowOnError>): RequestResult<UpdateCourseCalendarResponses, UpdateCourseCalendarErrors, ThrowOnError> => (options.client ?? client).put<UpdateCourseCalendarResponses, UpdateCourseCalendarErrors, ThrowOnError>({
+export const updateCourseCalendar = <ThrowOnError extends boolean = false>(options: Options<UpdateCourseCalendarData, ThrowOnError>): RequestResult<UpdateCourseCalendarResponses, UpdateCourseCalendarErrors, ThrowOnError> => (options.client ?? client).patch<UpdateCourseCalendarResponses, UpdateCourseCalendarErrors, ThrowOnError>({
     responseType: 'json',
     security: [{
             key: 'oidc',
@@ -592,7 +592,11 @@ export const createCourseMembershipInvitation = <ThrowOnError extends boolean = 
             type: 'http'
         }],
     url: '/api/v1/courses/{courseId}/member-invitations',
-    ...options
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**
@@ -1999,7 +2003,11 @@ export const createProjectMembershipInvitation = <ThrowOnError extends boolean =
             type: 'http'
         }],
     url: '/api/v1/projects/{projectId}/member-invitations',
-    ...options
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**

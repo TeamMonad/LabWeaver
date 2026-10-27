@@ -859,3 +859,91 @@ async fn access_boundary_exploded_list_queries_for_every_role() -> Result<(), Bo
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn course_calendar_patch_reaches_real_control_and_rejects_stale_revision()
+-> Result<(), Box<dyn Error>> {
+    let fixture = ListFixture::new().await?;
+    let teacher = &fixture.sessions[1];
+    let student = &fixture.sessions[2];
+    let course = contracts::CourseId::new();
+    sqlx::query("INSERT INTO control.course_memberships(course_id,actor_id,role,object_role,state,revision) VALUES($1,$2,'teacher','instructor','active',1)")
+        .bind(course.as_uuid()).bind(teacher.actor_id).execute(&fixture.app.pool).await?;
+    sqlx::query("INSERT INTO control.course_memberships(course_id,actor_id,role,object_role,state,revision) VALUES($1,$2,'student','participant','active',1)")
+        .bind(course.as_uuid()).bind(student.actor_id).execute(&fixture.app.pool).await?;
+    let path = format!("api/v1/courses/{course}/calendar");
+    assert_diagnostic(
+        fixture.browser_get(&path, teacher).send().await?,
+        StatusCode::NOT_FOUND,
+        "LW_COURSE_CALENDAR_NOT_FOUND",
+    )
+    .await?;
+    let body = json!({
+        "openAt":"2026-10-01T11:00:00.000+02:00",
+        "dueAt":"2026-10-01T12:00:00.000+02:00",
+        "timeZone":"Europe/Berlin",
+        "latePolicy":"hard_close",
+        "lateUntil":null
+    });
+    let patch = |session: &BffSession, etag: Option<&str>| {
+        let request = fixture
+            .http
+            .patch(format!("{}{path}", fixture.access))
+            .header(
+                header::COOKIE,
+                format!(
+                    "{}={}",
+                    fixture.app.deployment.browser.session_cookie_name, session.session_id
+                ),
+            )
+            .header(header::ORIGIN, fixture.access.trim_end_matches('/'))
+            .header("x-csrf-token", session.csrf_token.expose())
+            .json(&body);
+        if let Some(etag) = etag {
+            request.header(header::IF_MATCH, etag)
+        } else {
+            request
+        }
+    };
+    assert_diagnostic(
+        patch(student, None).send().await?,
+        StatusCode::FORBIDDEN,
+        "LW_AUTH_SCOPE_DENIED",
+    )
+    .await?;
+    let created = patch(teacher, None).send().await?;
+    let status = created.status();
+    let etag = created
+        .headers()
+        .get(header::ETAG)
+        .ok_or("calendar etag missing")?
+        .to_str()?
+        .to_owned();
+    let created: Value = created.json().await?;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["revision"], 1);
+    assert_eq!(created["dueAt"], "2026-10-01T10:00:00.000Z");
+    assert_eq!(created["state"], "closed");
+    assert_eq!(
+        fixture.browser_get(&path, teacher).send().await?.status(),
+        StatusCode::OK
+    );
+    let updated = patch(teacher, Some(&etag)).send().await?;
+    let status = updated.status();
+    let updated: Value = updated.json().await?;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["revision"], 2);
+    assert_diagnostic(
+        patch(teacher, Some(&etag)).send().await?,
+        StatusCode::CONFLICT,
+        "LW_COURSE_CALENDAR_CONFLICT",
+    )
+    .await?;
+    let stored: i64 =
+        sqlx::query_scalar("SELECT revision FROM control.course_calendars WHERE course_id=$1")
+            .bind(course.as_uuid())
+            .fetch_one(&fixture.app.pool)
+            .await?;
+    assert_eq!(stored, 2);
+    Ok(())
+}

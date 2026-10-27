@@ -1891,6 +1891,28 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 "LW_REVISION_CONFLICT"
             ]);
         }
+        if matches!(
+            operation.operation_id,
+            "getCourseCalendar"
+                | "updateCourseCalendar"
+                | "getCourseStudentView"
+                | "importCourseRoster"
+        ) {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_CONTRACT_DOCUMENT_INVALID",
+                "LW_AUTH_SCOPE_DENIED",
+                "LW_COURSE_GOVERNANCE_DENIED",
+                "LW_COURSE_CALENDAR_NOT_FOUND",
+                "LW_COURSE_CALENDAR_INVALID",
+                "LW_COURSE_CALENDAR_CONFLICT",
+                "LW_COURSE_ROSTER_IMPORT_INVALID",
+                "LW_COURSE_ROSTER_ROW_INVALID",
+                "LW_COURSE_ROSTER_ROLE_INVALID",
+                "LW_COURSE_ROSTER_ACCOUNT_NOT_FOUND",
+                "LW_COURSE_ROSTER_GOVERNANCE_DENIED",
+                "LW_IDEMPOTENCY_CONFLICT"
+            ]);
+        }
         if operation.operation_id == "getProjectAvailableActions" {
             operation_json["x-labweaver-errors"] = json!([
                 "LW_CONTRACT_DOCUMENT_INVALID",
@@ -2440,6 +2462,8 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "reportPlatformConfigurationApply" => "http/report-platform-configuration-apply-request",
         "updateCourseCalendar" => "http/update-course-calendar",
         "importCourseRoster" => "http/course-roster-import-request",
+        "createProjectMembershipInvitation" => "http/create-project-membership-invitation",
+        "createCourseMembershipInvitation" => "http/create-course-membership-invitation",
         "acceptMembershipInvitation" => "http/accept-membership-invitation",
         "revokeMembershipInvitation" | "removeCourseMembership" | "removeProjectMembership" => {
             "http/remove-project-membership-request"

@@ -5409,6 +5409,26 @@ export type CreateAgentRunRequestSchemaProjectId = string;
 export type CreateAgentRunRequestSchemaRevision = number;
 
 /**
+ * CreateCourseMembershipInvitation
+ */
+export type CreateCourseMembershipInvitationSchema = {
+    expiresAt: CreateCourseMembershipInvitationSchemaUtcTimestamp;
+    membershipExpiresAt?: CreateCourseMembershipInvitationSchemaUtcTimestamp | null;
+    objectRole: CreateCourseMembershipInvitationSchemaCourseObjectRole;
+    username: string;
+};
+
+/**
+ * Course responsibility does not change the actor's verified platform identity.
+ */
+export type CreateCourseMembershipInvitationSchemaCourseObjectRole = 'instructor' | 'teaching_assistant' | 'participant';
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type CreateCourseMembershipInvitationSchemaUtcTimestamp = string;
+
+/**
  * CreateEnvironmentRequest
  */
 export type CreateEnvironmentRequestSchema = {
@@ -5834,6 +5854,28 @@ export type CreateProblemPackageUploadRequestSchemaProjectId = string;
  * Monotonic aggregate revision. Zero is never a persisted revision.
  */
 export type CreateProblemPackageUploadRequestSchemaRevision = number;
+
+/**
+ * CreateProjectMembershipInvitation
+ *
+ * The recipient must use this exact campus username. Access resolves it before forwarding.
+ */
+export type CreateProjectMembershipInvitationSchema = {
+    expiresAt: CreateProjectMembershipInvitationSchemaUtcTimestamp;
+    membershipExpiresAt?: CreateProjectMembershipInvitationSchemaUtcTimestamp | null;
+    objectRole: CreateProjectMembershipInvitationSchemaProjectObjectRole;
+    username: string;
+};
+
+/**
+ * Responsibilities granted by Control in one project, independent of Teacher/Student identity.
+ */
+export type CreateProjectMembershipInvitationSchemaProjectObjectRole = 'viewer' | 'operator' | 'editor' | 'manager' | 'owner';
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type CreateProjectMembershipInvitationSchemaUtcTimestamp = string;
 
 /**
  * CreateProjectRequest
@@ -16618,7 +16660,7 @@ export type ListCourseMembershipInvitationsResponses = {
 export type ListCourseMembershipInvitationsResponse = ListCourseMembershipInvitationsResponses[keyof ListCourseMembershipInvitationsResponses];
 
 export type CreateCourseMembershipInvitationData = {
-    body?: never;
+    body: CreateCourseMembershipInvitationSchema;
     headers: {
         'Idempotency-Key': string;
     };
@@ -22296,7 +22338,7 @@ export type ListProjectMembershipInvitationsResponses = {
 export type ListProjectMembershipInvitationsResponse = ListProjectMembershipInvitationsResponses[keyof ListProjectMembershipInvitationsResponses];
 
 export type CreateProjectMembershipInvitationData = {
-    body?: never;
+    body: CreateProjectMembershipInvitationSchema;
     headers: {
         'Idempotency-Key': string;
     };

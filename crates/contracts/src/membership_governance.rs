@@ -189,11 +189,46 @@ impl CourseLatePolicy {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateCourseCalendar {
+    #[serde(default, deserialize_with = "deserialize_optional_calendar_instant")]
     pub open_at: Option<UtcTimestamp>,
+    #[serde(deserialize_with = "deserialize_calendar_instant")]
     pub due_at: UtcTimestamp,
     pub time_zone: String,
     pub late_policy: CourseLatePolicy,
+    #[serde(default, deserialize_with = "deserialize_optional_calendar_instant")]
     pub late_until: Option<UtcTimestamp>,
+}
+
+fn deserialize_calendar_instant<'de, D>(deserializer: D) -> Result<UtcTimestamp, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let input = String::deserialize(deserializer)?;
+    let instant =
+        time::OffsetDateTime::parse(&input, &time::format_description::well_known::Rfc3339)
+            .map_err(D::Error::custom)?
+            .to_offset(time::UtcOffset::UTC);
+    let millis = instant.nanosecond() / 1_000_000 * 1_000_000;
+    UtcTimestamp::from_utc(
+        instant
+            .replace_nanosecond(millis)
+            .map_err(D::Error::custom)?,
+    )
+    .map_err(D::Error::custom)
+}
+
+fn deserialize_optional_calendar_instant<'de, D>(
+    deserializer: D,
+) -> Result<Option<UtcTimestamp>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct CalendarInstant(
+        #[serde(deserialize_with = "deserialize_calendar_instant")] UtcTimestamp,
+    );
+    Option::<CalendarInstant>::deserialize(deserializer).map(|instant| instant.map(|value| value.0))
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

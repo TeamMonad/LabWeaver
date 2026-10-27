@@ -839,7 +839,7 @@ impl ControlService {
             }
             Revision::new(1).map_err(|_| ControlError::CourseCalendarInvalid)?
         };
-        let calendar = CourseCalendar {
+        let mut calendar = CourseCalendar {
             course_id,
             revision,
             open_at: request.open_at,
@@ -849,6 +849,7 @@ impl ControlService {
             late_policy: request.late_policy,
             late_until: request.late_until,
         };
+        calendar.state = calendar.state_at(now);
         let value =
             serde_json::to_value(&calendar).map_err(|_| ControlError::CourseCalendarInvalid)?;
         sqlx::query("INSERT INTO control.course_calendars(course_id,revision,open_at,due_at,time_zone,late_policy,late_until,contract,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$9) ON CONFLICT(course_id) DO UPDATE SET revision=EXCLUDED.revision,open_at=EXCLUDED.open_at,due_at=EXCLUDED.due_at,time_zone=EXCLUDED.time_zone,late_policy=EXCLUDED.late_policy,late_until=EXCLUDED.late_until,contract=EXCLUDED.contract,updated_at=EXCLUDED.updated_at")
@@ -891,27 +892,46 @@ impl ControlService {
         let mut max_revision = 1_u64;
         for row in &request.rows {
             let duplicate = !seen.insert(row.actor_id);
-            let current: Option<i64> = sqlx::query_scalar("SELECT revision FROM control.course_memberships WHERE course_id=$1 AND actor_id=$2 FOR UPDATE").bind(course_id.as_uuid()).bind(row.actor_id.as_uuid()).fetch_optional(&mut *tx).await.map_err(db)?;
+            let current = sqlx::query("SELECT revision,state,expires_at FROM control.course_memberships WHERE course_id=$1 AND actor_id=$2 FOR UPDATE")
+                .bind(course_id.as_uuid()).bind(row.actor_id.as_uuid())
+                .fetch_optional(&mut *tx).await.map_err(db)?;
+            let active = if let Some(member) = &current {
+                member.try_get::<&str, _>("state").map_err(db)? == "active"
+                    && member
+                        .try_get::<Option<time::OffsetDateTime>, _>("expires_at")
+                        .map_err(db)?
+                        .is_none_or(|expiry| expiry > now.get())
+            } else {
+                false
+            };
             let result = if duplicate {
                 CourseRosterImportRowState::DuplicateInFile
-            } else if current.is_some() {
+            } else if active {
                 CourseRosterImportRowState::AlreadyMember
             } else {
                 CourseRosterImportRowState::Imported
             };
-            let member_revision = current.unwrap_or(1);
-            let member_revision = Revision::new(
-                u64::try_from(member_revision)
-                    .map_err(|_| ControlError::CourseRosterImportInvalid)?,
-            )
-            .map_err(|_| ControlError::CourseRosterImportInvalid)?;
+            let member_revision = if let Some(member) = &current {
+                let existing = revision(member.try_get("revision").map_err(db)?)?;
+                if result == CourseRosterImportRowState::Imported {
+                    next_revision(Some(existing))?
+                } else {
+                    existing
+                }
+            } else {
+                Revision::new(1).map_err(|_| ControlError::CourseRosterImportInvalid)?
+            };
             max_revision = max_revision.max(member_revision.get());
             if result == CourseRosterImportRowState::Imported {
                 let object_role = match row.role {
-                    CourseRosterRole::Participant => "participant",
-                    CourseRosterRole::TeachingAssistant => "teaching_assistant",
+                    CourseRosterRole::Participant => CourseObjectRole::Participant,
+                    CourseRosterRole::TeachingAssistant => CourseObjectRole::TeachingAssistant,
                 };
-                sqlx::query("INSERT INTO control.course_memberships(course_id,actor_id,role,object_role,state,revision,updated_at) VALUES($1,$2,'student',$3,'active',$4,$5) ON CONFLICT(course_id,actor_id) DO UPDATE SET object_role=EXCLUDED.object_role,state='active',revision=EXCLUDED.revision,updated_at=EXCLUDED.updated_at").bind(course_id.as_uuid()).bind(row.actor_id.as_uuid()).bind(object_role).bind(i64_revision(member_revision)?).bind(now.get()).execute(&mut *tx).await.map_err(db)?;
+                sqlx::query("INSERT INTO control.course_memberships(course_id,actor_id,role,object_role,state,revision,updated_at) VALUES($1,$2,'student',$3,'active',$4,$5) ON CONFLICT(course_id,actor_id) DO UPDATE SET role='student',object_role=EXCLUDED.object_role,state='active',revision=EXCLUDED.revision,expires_at=NULL,updated_at=EXCLUDED.updated_at")
+                    .bind(course_id.as_uuid()).bind(row.actor_id.as_uuid()).bind(object_role.as_str())
+                    .bind(i64_revision(member_revision)?).bind(now.get()).execute(&mut *tx).await.map_err(db)?;
+                event(&mut tx,&MembershipInvitationScope::Course {course_id,object_role},row.actor_id.as_uuid(),member_revision,
+                    json!({"courseId":course_id,"actorId":row.actor_id,"performedBy":actor.actor_id,"revision":member_revision,"state":MembershipState::Active,"objectRole":object_role})).await?;
             }
             results.push(CourseRosterImportRowResult {
                 row_number: row.row_number,
