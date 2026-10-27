@@ -91,6 +91,25 @@ enum TestSuite {
     Integration,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum DeploymentMode {
+    Install,
+    Adopt,
+    Upgrade,
+    Wipe,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum DeploymentStage {
+    All,
+    Preflight,
+    Infrastructure,
+    Identity,
+    Storage,
+    Services,
+    Route,
+}
+
 #[derive(Debug, Args)]
 struct EnvironmentArgs {
     #[arg(long)]
@@ -101,6 +120,19 @@ struct EnvironmentArgs {
     yes: bool,
     #[arg(long)]
     package_manifest: Option<PathBuf>,
+    #[arg(long)]
+    resource_package_manifest: Option<PathBuf>,
+    #[arg(long, value_enum)]
+    mode: Option<DeploymentMode>,
+    /// Re-enter one completed stage, or run all stages in order.
+    #[arg(long, value_enum, default_value_t = DeploymentStage::All)]
+    stage: DeploymentStage,
+    /// Explicit wipe target; required with --mode wipe.
+    #[arg(long)]
+    target: Option<String>,
+    /// Explicit wipe scope; required with --mode wipe.
+    #[arg(long)]
+    scope: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -532,6 +564,9 @@ fn write_contract_artifacts(root: &Path) -> Result<(), AppError> {
 }
 
 fn deploy(args: &EnvironmentArgs) -> Result<(), AppError> {
+    if let Some(mode) = args.mode {
+        return deploy_mode(args, mode);
+    }
     if !args.yes {
         return Err(AppError::ConfirmationRequired { command: "deploy" });
     }
@@ -544,13 +579,252 @@ fn deploy(args: &EnvironmentArgs) -> Result<(), AppError> {
             })?;
         return platform_images::deploy(&args.env, manifest, &repository_root());
     }
-    if args.package_manifest.is_some() {
-        return Err(AppError::InvalidArgument {
-            role: "infrastructure deployment does not accept --package-manifest",
+    Err(AppError::InvalidArgument {
+        role: "infrastructure deploy requires --mode install, adopt, upgrade, or wipe",
+    })
+}
+
+fn deploy_mode(args: &EnvironmentArgs, mode: DeploymentMode) -> Result<(), AppError> {
+    require_infrastructure(args, "deploy --infra --mode")?;
+    if !args.yes {
+        return Err(AppError::ConfirmationRequired {
+            command: "deploy --mode",
         });
     }
-    validate_environment_name(&args.env)?;
-    run_infrastructure(&args.env, "95-harbor.yml", "deploy --infra")
+    let installation_id = bundle_mode_inputs(args, mode)?;
+    if mode == DeploymentMode::Wipe {
+        if args.package_manifest.is_some()
+            || args.resource_package_manifest.is_some()
+            || args.target.as_deref().is_none()
+            || args.scope.as_deref().is_none()
+            || !matches!(
+                args.stage,
+                DeploymentStage::All | DeploymentStage::Preflight
+            )
+        {
+            return Err(AppError::InvalidArgument {
+                role: "wipe requires --target and --scope, with no package or partial stage",
+            });
+        }
+        let extra_environment = [
+            ("LW_BUNDLE_INSTALLATION_ID", installation_id.clone()),
+            ("LABWEAVER_DEPLOY_MODE", "wipe".to_owned()),
+            (
+                "LABWEAVER_WIPE_TARGET",
+                args.target.clone().unwrap_or_default(),
+            ),
+            (
+                "LABWEAVER_WIPE_SCOPE",
+                args.scope.clone().unwrap_or_default(),
+            ),
+        ];
+        return execute_deployment_plan(mode, args.stage, |playbook, _| {
+            run_infrastructure_with_package(
+                &args.env,
+                playbook,
+                "deploy --mode wipe",
+                None,
+                &extra_environment,
+            )
+        });
+    }
+    let package_manifest = args
+        .package_manifest
+        .as_deref()
+        .ok_or(AppError::InvalidArgument {
+            role: "unified deployment package manifest",
+        })?
+        .canonicalize()
+        .map_err(|error| AppError::Io {
+            role: "resolve unified deployment package manifest",
+            detail: error.to_string(),
+        })?;
+    platform_images::validate(&package_manifest, false, None, &repository_root())?;
+    let resource_manifest = args
+        .resource_package_manifest
+        .as_deref()
+        .ok_or(AppError::InvalidArgument {
+            role: "unified Resource package manifest",
+        })?
+        .canonicalize()
+        .map_err(|error| AppError::Io {
+            role: "resolve unified Resource package manifest",
+            detail: error.to_string(),
+        })?;
+    platform_images::validate_profile(&resource_manifest, "resource", &repository_root())?;
+    // Each re-entry executes the same full preflight; a failed stage stops the plan.
+    execute_deployment_plan(mode, args.stage, |playbook, needs_package| {
+        let selected_package = if playbook == "94-resource-application.yml" {
+            resource_manifest.as_path()
+        } else {
+            package_manifest.as_path()
+        };
+        run_infrastructure_with_package(
+            &args.env,
+            playbook,
+            "unified deployment stage",
+            needs_package.then_some(selected_package),
+            &[
+                (
+                    "LABWEAVER_DEPLOY_MODE",
+                    deployment_mode_name(mode).to_owned(),
+                ),
+                ("LW_BUNDLE_INSTALLATION_ID", installation_id.clone()),
+            ],
+        )
+    })
+}
+
+/// Bind the mode to the authenticated Bundle snapshot, not ambient inventory or manifests.
+fn bundle_mode_inputs(args: &EnvironmentArgs, mode: DeploymentMode) -> Result<String, AppError> {
+    let invalid = || AppError::InvalidArgument {
+        role: "authenticated deployment Bundle source",
+    };
+    let root = std::env::var("LW_BUNDLE_ROOT").map_err(|_| invalid())?;
+    let rendered = std::env::var("LW_BUNDLE_RENDERED_ROOT").map_err(|_| invalid())?;
+    let root = PathBuf::from(root).canonicalize().map_err(|_| invalid())?;
+    let rendered = PathBuf::from(rendered)
+        .canonicalize()
+        .map_err(|_| invalid())?;
+    if !rendered.join("infrastructure/inventory.yaml").is_file() {
+        return Err(invalid());
+    }
+    let model: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(root.join("config/bundle.yaml")).map_err(|_| invalid())?)
+            .map_err(|_| invalid())?;
+    let id = model["target"]["installationId"]
+        .as_str()
+        .ok_or_else(invalid)?;
+    if !uuid::Uuid::parse_str(id).is_ok_and(|value| value.to_string() == id)
+        || std::env::var("LW_BUNDLE_INSTALLATION_ID").as_deref() != Ok(id)
+    {
+        return Err(invalid());
+    }
+    if mode != DeploymentMode::Wipe {
+        for (argument, key) in [
+            (
+                args.package_manifest.as_deref(),
+                &model["versions"]["packageFile"],
+            ),
+            (
+                args.resource_package_manifest.as_deref(),
+                &model["resource"]["packageFile"],
+            ),
+        ] {
+            let relative = key.as_str().ok_or_else(invalid)?;
+            if !relative.starts_with("versions/")
+                || relative.contains("..")
+                || argument.and_then(|path| path.canonicalize().ok())
+                    != root.join(relative).canonicalize().ok()
+            {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(id.to_owned())
+}
+
+fn deployment_mode_name(mode: DeploymentMode) -> &'static str {
+    match mode {
+        DeploymentMode::Install => "install",
+        DeploymentMode::Adopt => "adopt",
+        DeploymentMode::Upgrade => "upgrade",
+        DeploymentMode::Wipe => "wipe",
+    }
+}
+
+fn deployment_plan(mode: DeploymentMode, stage: DeploymentStage) -> Vec<(&'static str, bool)> {
+    let mut plan = vec![("00-preflight.yml", false)];
+    if mode == DeploymentMode::Wipe {
+        if stage == DeploymentStage::All {
+            plan.push(("94-platform-clean-redeploy.yml", false));
+        }
+        return plan;
+    }
+    let install_or_adopt = mode == DeploymentMode::Install || mode == DeploymentMode::Adopt;
+    let stages = match stage {
+        DeploymentStage::Preflight => Vec::new(),
+        DeploymentStage::Infrastructure => {
+            if mode == DeploymentMode::Install {
+                vec![("site.yml", false)]
+            } else if install_or_adopt {
+                vec![
+                    ("92-platform-foundation.yml", false),
+                    ("95-harbor.yml", false),
+                    ("92-platform-buildkit.yml", false),
+                ]
+            } else {
+                Vec::new()
+            }
+        }
+        DeploymentStage::Identity => vec![(
+            if mode == DeploymentMode::Upgrade {
+                "92-identity-foundation-verify.yml"
+            } else {
+                "91-identity-foundation.yml"
+            },
+            false,
+        )],
+        DeploymentStage::Storage => {
+            if install_or_adopt {
+                vec![("92-platform-foundation.yml", false)]
+            } else {
+                Vec::new()
+            }
+        }
+        DeploymentStage::Services => {
+            if mode == DeploymentMode::Upgrade || install_or_adopt {
+                vec![
+                    ("93-platform-application.yml", true),
+                    ("94-resource-application.yml", true),
+                ]
+            } else {
+                Vec::new()
+            }
+        }
+        DeploymentStage::Route => vec![("92-platform-harbor-route.yml", false)],
+        DeploymentStage::All => match mode {
+            DeploymentMode::Install => vec![
+                ("site.yml", false),
+                ("95-harbor.yml", false),
+                ("92-platform-foundation.yml", false),
+                ("92-platform-buildkit.yml", false),
+                ("92-platform-harbor-route.yml", false),
+                ("91-identity-foundation.yml", false),
+                ("93-platform-application.yml", true),
+                ("94-resource-application.yml", true),
+            ],
+            DeploymentMode::Adopt => vec![
+                ("92-platform-foundation.yml", false),
+                ("95-harbor.yml", false),
+                ("92-platform-buildkit.yml", false),
+                ("92-platform-harbor-route.yml", false),
+                ("91-identity-foundation.yml", false),
+                ("93-platform-application.yml", true),
+                ("94-resource-application.yml", true),
+            ],
+            DeploymentMode::Upgrade => vec![
+                ("92-identity-foundation-verify.yml", false),
+                ("93-platform-application.yml", true),
+                ("94-resource-application.yml", true),
+            ],
+            DeploymentMode::Wipe => Vec::new(),
+        },
+    };
+    plan.extend(stages);
+    plan
+}
+
+/// Stop immediately on preflight or stage failure; never execute a later mutation.
+fn execute_deployment_plan(
+    mode: DeploymentMode,
+    stage: DeploymentStage,
+    mut run: impl FnMut(&'static str, bool) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    for (playbook, needs_package) in deployment_plan(mode, stage) {
+        run(playbook, needs_package)?;
+    }
+    Ok(())
 }
 
 fn preflight(args: &EnvironmentArgs) -> Result<(), AppError> {
@@ -1135,9 +1409,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     use super::is_uuid_v7_run_id;
     use super::{
-        EnvironmentArgs, IdentityFoundationAction, IdentityFoundationArgs, deploy,
-        identity_foundation, platform_application, platform_buildkit, platform_foundation,
-        platform_harbor_route,
+        DeploymentMode, DeploymentStage, EnvironmentArgs, IdentityFoundationAction,
+        IdentityFoundationArgs, deploy, identity_foundation, platform_application,
+        platform_buildkit, platform_foundation, platform_harbor_route,
     };
     #[test]
     fn unregistered_internal_contract_is_an_orphan() {
@@ -1289,6 +1563,11 @@ mod tests {
                 infra,
                 yes,
                 package_manifest: None,
+                resource_package_manifest: None,
+                mode: None,
+                stage: DeploymentStage::All,
+                target: None,
+                scope: None,
             },
             action: IdentityFoundationAction::Deploy,
         }
@@ -1301,6 +1580,11 @@ mod tests {
             infra: true,
             yes: false,
             package_manifest: None,
+            resource_package_manifest: None,
+            mode: None,
+            stage: DeploymentStage::All,
+            target: None,
+            scope: None,
         }) else {
             return Err("an infrastructure deployment without --yes must fail".into());
         };
@@ -1321,6 +1605,11 @@ mod tests {
             infra: false,
             yes: true,
             package_manifest: None,
+            resource_package_manifest: None,
+            mode: None,
+            stage: DeploymentStage::All,
+            target: None,
+            scope: None,
         }) else {
             return Err(
                 "a product deployment must not silently run infrastructure reconciliation".into(),
@@ -1347,6 +1636,11 @@ mod tests {
             infra: true,
             yes: true,
             package_manifest: None,
+            resource_package_manifest: None,
+            mode: None,
+            stage: DeploymentStage::All,
+            target: None,
+            scope: None,
         }) else {
             return Err("non-Linux infrastructure deployment must fail".into());
         };
@@ -1381,6 +1675,11 @@ mod tests {
             infra: true,
             yes: false,
             package_manifest: None,
+            resource_package_manifest: None,
+            mode: None,
+            stage: DeploymentStage::All,
+            target: None,
+            scope: None,
         }) else {
             return Err("Sprint 2 foundation without --yes must fail".into());
         };
@@ -1395,6 +1694,11 @@ mod tests {
             infra: true,
             yes: false,
             package_manifest: None,
+            resource_package_manifest: None,
+            mode: None,
+            stage: DeploymentStage::All,
+            target: None,
+            scope: None,
         }) else {
             return Err("Sprint 2 BuildKit without --yes must fail".into());
         };
@@ -1409,6 +1713,11 @@ mod tests {
             infra: true,
             yes: false,
             package_manifest: None,
+            resource_package_manifest: None,
+            mode: None,
+            stage: DeploymentStage::All,
+            target: None,
+            scope: None,
         }) else {
             return Err("Sprint 2 Harbor route adoption without --yes must fail".into());
         };
@@ -1423,10 +1732,79 @@ mod tests {
             infra: true,
             yes: false,
             package_manifest: None,
+            resource_package_manifest: None,
+            mode: None,
+            stage: DeploymentStage::All,
+            target: None,
+            scope: None,
         }) else {
             return Err("Sprint 2 application adoption without --yes must fail".into());
         };
         assert_eq!(error.diagnostic_code(), "XTASK_CONFIRMATION_REQUIRED");
         Ok(())
+    }
+    #[test]
+    fn deployment_plan_reenters_only_requested_stage() {
+        let stages = super::deployment_plan(DeploymentMode::Upgrade, DeploymentStage::Services);
+        assert_eq!(
+            stages,
+            vec![
+                ("00-preflight.yml", false),
+                ("93-platform-application.yml", true),
+                ("94-resource-application.yml", true),
+            ]
+        );
+        assert_eq!(
+            super::deployment_plan(DeploymentMode::Upgrade, DeploymentStage::Infrastructure),
+            vec![("00-preflight.yml", false)],
+        );
+        assert_eq!(
+            super::deployment_plan(DeploymentMode::Wipe, DeploymentStage::All),
+            vec![
+                ("00-preflight.yml", false),
+                ("94-platform-clean-redeploy.yml", false)
+            ],
+        );
+        assert_eq!(
+            super::deployment_plan(DeploymentMode::Upgrade, DeploymentStage::Services),
+            stages,
+        );
+    }
+
+    #[test]
+    fn failed_preflight_never_runs_mutating_stages() {
+        let mut observed = Vec::new();
+        let result = super::execute_deployment_plan(
+            DeploymentMode::Wipe,
+            DeploymentStage::All,
+            |playbook, _| {
+                observed.push(playbook);
+                Err(super::AppError::InvalidArgument {
+                    role: "synthetic preflight rejection",
+                })
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(observed, vec!["00-preflight.yml"]);
+    }
+
+    #[test]
+    fn wipe_requires_explicit_target_and_scope_before_running_ansible() {
+        let error = super::deploy_mode(
+            &EnvironmentArgs {
+                env: "demo".into(),
+                infra: true,
+                yes: true,
+                package_manifest: None,
+                resource_package_manifest: None,
+                mode: Some(DeploymentMode::Wipe),
+                stage: DeploymentStage::All,
+                target: None,
+                scope: None,
+            },
+            DeploymentMode::Wipe,
+        )
+        .expect_err("wipe without an explicit scope must fail");
+        assert_eq!(error.diagnostic_code(), "XTASK_INVALID_ARGUMENT");
     }
 }

@@ -24,6 +24,110 @@
       {{ lookup('ansible.builtin.file', resource_application_versions_lock_file) | from_yaml }}
   no_log: true
 
+- name: Require verified Resource installation identity before probing targets
+  ansible.builtin.assert:
+    that:
+      - resource_application_installation_id | default('') is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - resource_application_installation_id == lookup('ansible.builtin.env', 'LW_BUNDLE_INSTALLATION_ID')
+    fail_msg: RESOURCE_APPLICATION_INSTALLATION_ID_REQUIRED
+  changed_when: false
+- name: Read the existing Resource namespace before mutation
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ resource_application_kubeconfig | default('/etc/kubernetes/admin.conf') }}"
+    api_version: v1
+    kind: Namespace
+    name: "{{ resource_application_namespace | default('labweaver-system') }}"
+  register: resource_application_existing_namespace
+  changed_when: false
+  when: resource_application_kubeconfig is defined
+
+- name: Refuse to adopt an unowned Resource namespace
+  ansible.builtin.assert:
+    that:
+      - resource_application_existing_namespace.resources | length == 0 or
+        (
+          resource_application_existing_namespace.resources[0].metadata.labels['app.kubernetes.io/part-of'] | default('') == 'labweaver' and
+          resource_application_existing_namespace.resources[0].metadata.labels['labweaver.io/managed'] | default('') == 'true' and
+          resource_application_existing_namespace.resources[0].metadata.annotations['labweaver.io/installation-id']
+          | default('') == resource_application_installation_id
+        )
+    fail_msg: RESOURCE_APPLICATION_NAMESPACE_OWNERSHIP_CONFLICT
+  changed_when: false
+  when: resource_application_kubeconfig is defined
+
+
+- name: Refuse to adopt unowned Resource objects
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      {{ resource_application_kubectl }} --kubeconfig {{ resource_application_kubeconfig }}
+      --namespace {{ resource_application_namespace }} get all,configmap,secret,serviceaccount,role,rolebinding
+      --output json |
+      jq -e '[.items[] | select(.metadata.name != "default") |
+        select((((.metadata.annotations["meta.helm.sh/release-name"] // "") == "{{ resource_application_release_name }}"
+          and (.metadata.annotations["meta.helm.sh/release-namespace"] // "") == "{{ resource_application_namespace }}"
+          and (.metadata.labels["app.kubernetes.io/managed-by"] // "") == "Helm")
+          or ((.metadata.annotations["labweaver.io/installation-id"] // "") == "{{ resource_application_installation_id }}"
+          and (.metadata.labels["app.kubernetes.io/part-of"] // "") == "labweaver")
+          or (.kind == "Secret" and .metadata.name == "resource-service-secrets"
+              and (.metadata.labels["app.kubernetes.io/part-of"] // "") == "labweaver")) | not)] | length == 0'
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+  when: resource_application_kubeconfig is defined
+
+- name: Reject unowned Resource objects
+  ansible.builtin.assert:
+    that: resource_application_ownership_check.rc == 0
+    fail_msg: RESOURCE_APPLICATION_OBJECT_OWNERSHIP_CONFLICT
+  changed_when: false
+  when: resource_application_kubeconfig is defined
+- name: List the exact Resource Helm release before mutation
+  ansible.builtin.command:
+    argv:
+      - "{{ resource_application_helm }}"
+      - --kubeconfig
+      - "{{ resource_application_kubeconfig }}"
+      - list
+      - --all
+      - --namespace
+      - "{{ resource_application_namespace }}"
+      - --filter
+      - "^{{ resource_application_release_name }}$"
+      - --output
+      - json
+  register: resource_application_release_list
+  changed_when: false
+
+- name: Read existing Resource Helm release metadata
+  ansible.builtin.command:
+    argv:
+      - "{{ resource_application_helm }}"
+      - --kubeconfig
+      - "{{ resource_application_kubeconfig }}"
+      - get
+      - metadata
+      - "{{ resource_application_release_name }}"
+      - --namespace
+      - "{{ resource_application_namespace }}"
+      - --output
+      - json
+  register: resource_application_release_metadata
+  changed_when: false
+  when: resource_application_release_list.stdout | from_json | length == 1
+
+- name: Refuse a foreign Resource Helm installation
+  ansible.builtin.assert:
+    that:
+      - resource_application_release_list.stdout | from_json | length <= 1
+      - resource_application_release_list.stdout | from_json | length == 0 or
+        ((resource_application_release_metadata.stdout | from_json).name == resource_application_release_name and
+         (resource_application_release_metadata.stdout | from_json).namespace == resource_application_namespace and
+         (resource_application_release_metadata.stdout | from_json).description == 'labweaver-installation:' ~ resource_application_installation_id)
+    fail_msg: RESOURCE_APPLICATION_RELEASE_OWNERSHIP_CONFLICT
+  changed_when: false
+
 - name: Verify controller-owned Resource deployment inputs
   ansible.builtin.stat:
     path: "{{ item }}"
@@ -49,43 +153,6 @@
     resource_application_bundle_sha256: "sha256:{{ resource_application_inputs.results[1].stat.checksum }}"
   no_log: true
 
-- name: Load private Access bootstrap
-  ansible.builtin.set_fact:
-    resource_application_access_seed: >-
-      {{ lookup('ansible.builtin.file', resource_application_access_seed_file) | from_json }}
-  no_log: true
-  when: resource_application_access_seed_file | length > 0
-
-- name: Create bounded Resource bootstrap workspace
-  ansible.builtin.file:
-    path: "{{ resource_application_work_root }}"
-    state: directory
-    owner: root
-    group: root
-    mode: '0700'
-  become: true
-  when: resource_application_access_seed_file | length > 0
-
-- name: Render conflict-detecting Access bootstrap
-  ansible.builtin.template:
-    src: access-seed-adopt.sql.j2
-    dest: "{{ resource_application_work_root }}/access-seed-adopt.sql"
-    owner: root
-    group: root
-    mode: '0600'
-  become: true
-  no_log: true
-  when: resource_application_access_seed_file | length > 0
-
-- name: Apply or verify Resource Access bootstrap
-  labweaver_postgres_apply:
-    kubeconfig: "{{ resource_application_kubeconfig }}"
-    psql: "{{ resource_application_psql }}"
-    service_file: "{{ resource_application_postgres_service_file }}"
-    service: "{{ resource_application_postgres_service }}"
-    kubernetes_service: "{{ resource_application_postgres_kubernetes_service }}"
-    sql_file: "{{ resource_application_work_root }}/access-seed-adopt.sql"
-  when: resource_application_access_seed_file | length > 0
 
 - name: Enforce exact Resource package and configuration boundaries
   ansible.builtin.assert:
@@ -152,11 +219,68 @@
   loop_control:
     label: "{{ item.class }}"
   no_log: true
+- name: Read independently managed Resource credential without mutation
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ resource_application_kubeconfig }}"
+    api_version: v1
+    kind: Secret
+    namespace: "{{ resource_application_namespace }}"
+    name: resource-service-secrets
+  register: resource_application_retained_secret
+  no_log: true
+
+- name: Refuse credentials not matching the reviewed Bundle
+  ansible.builtin.assert:
+    that:
+      - resource_application_retained_secret.resources | length == 1
+      - resource_application_retained_secret.resources[0].data ==
+        (resource_application_bundle_objects | selectattr('kind', 'equalto', 'Secret') | first).data
+    fail_msg: RESOURCE_APPLICATION_SECRET_OWNERSHIP_CONFLICT
+  no_log: true
+
+- name: Load private Access bootstrap
+  ansible.builtin.set_fact:
+    resource_application_access_seed: >-
+      {{ lookup('ansible.builtin.file', resource_application_access_seed_file) | from_json }}
+  no_log: true
+  when: resource_application_access_seed_file | length > 0
+
+- name: Create bounded Resource bootstrap workspace
+  ansible.builtin.file:
+    path: "{{ resource_application_work_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  become: true
+  when: resource_application_access_seed_file | length > 0
+
+- name: Render conflict-detecting Access bootstrap
+  ansible.builtin.template:
+    src: access-seed-adopt.sql.j2
+    dest: "{{ resource_application_work_root }}/access-seed-adopt.sql"
+    owner: root
+    group: root
+    mode: '0600'
+  become: true
+  no_log: true
+  when: resource_application_access_seed_file | length > 0
+
+- name: Apply or verify Resource Access bootstrap
+  labweaver_postgres_apply:
+    kubeconfig: "{{ resource_application_kubeconfig }}"
+    psql: "{{ resource_application_psql }}"
+    service_file: "{{ resource_application_postgres_service_file }}"
+    service: "{{ resource_application_postgres_service }}"
+    kubernetes_service: "{{ resource_application_postgres_kubernetes_service }}"
+    sql_file: "{{ resource_application_work_root }}/access-seed-adopt.sql"
+  when: resource_application_access_seed_file | length > 0
 
 - name: Apply only the independently reviewed Resource configuration
   labweaver_resource_bundle_apply:
     kubeconfig: "{{ resource_application_kubeconfig }}"
     bundle: "{{ resource_application_configuration_bundle }}"
+    namespace: "{{ resource_application_namespace }}"
 
 - name: Build isolated Resource Helm arguments
   ansible.builtin.set_fact:
@@ -191,7 +315,8 @@
     argv: >-
       {{ [resource_application_helm, '--kubeconfig', resource_application_kubeconfig,
           'upgrade', '--install', resource_application_release_name, resource_application_chart_source,
-          '--namespace', resource_application_namespace, '--wait',
+          '--namespace', resource_application_namespace, '--description',
+          'labweaver-installation:' + resource_application_installation_id, '--wait',
           '--timeout', resource_application_rollout_timeout] + resource_application_helm_args }}
   changed_when: true
 
