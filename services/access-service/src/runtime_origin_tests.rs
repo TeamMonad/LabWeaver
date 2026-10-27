@@ -1064,7 +1064,7 @@ async fn runtime_proxy_protocols_are_streamed_and_fenced() -> Result<(), Box<dyn
         .execute(&fixture.state.pool)
         .await?;
     let ws_closed = tokio::time::timeout(std::time::Duration::from_secs(7), ws.next()).await?;
-    assert!(ws_closed.is_none() || ws_closed.is_some_and(|result| result.is_err()));
+    assert!(ws_closed.is_none_or(|result| result.is_err()));
     let sse_closed =
         tokio::time::timeout(std::time::Duration::from_secs(7), sse_stream.next()).await?;
     assert!(sse_closed.is_none());
