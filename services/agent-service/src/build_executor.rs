@@ -122,7 +122,7 @@ pub struct ProductionBuildExecutor {
 struct ContextResources {
     _object: tempfile::TempPath,
     workspace: TempDir,
-    _budget: OwnedSemaphorePermit,
+    budget: OwnedSemaphorePermit,
 }
 
 impl ContextResources {
@@ -134,7 +134,7 @@ impl ContextResources {
         Arc::new(Self {
             _object: object,
             workspace,
-            _budget: budget,
+            budget,
         })
     }
 }
@@ -327,19 +327,23 @@ impl ProductionBuildExecutor {
         };
         let workspace = TempDir::new_in(&self.config.work_directory).map_err(|_| unavailable())?;
         let input = std::fs::File::open(object.path()).map_err(|_| unavailable())?;
-        if let Err(failure) = unpack_context(
+        let resources = ContextResources::new(object.into_path(), workspace, context_budget);
+        let resources = unpack_context_in_worker(
             input,
-            &build_context.media_type,
-            workspace.path(),
-            u64::try_from(context_budget.num_permits()).map_err(|_| rejected())?,
-        ) {
+            build_context.media_type.clone(),
+            resources,
+            *context,
+            cancellation,
+        )
+        .await
+        .inspect_err(|failure| {
             tracing::warn!(
                 event = "agent.build_executor.context_unpack_rejected",
                 build_request_id = %context.build_request_id,
                 code = ?failure.code,
             );
-            return Err(failure);
-        }
+        })?;
+        let workspace = &resources.workspace;
         if let Err(failure) = validate_dockerfile(workspace.path(), dockerfile_path) {
             tracing::warn!(
                 event = "agent.build_executor.dockerfile_rejected",
@@ -356,7 +360,6 @@ impl ProductionBuildExecutor {
             );
             return Err(failure);
         }
-        let resources = ContextResources::new(object.into_path(), workspace, context_budget);
         let tag = candidate_tag(identity);
         let tagged = format!("{}:{tag}", command.request.output_repository);
         // BuildKit solves with a push-to-registry exporter. The authoritative
@@ -1402,27 +1405,98 @@ impl RepositoryIdentity {
     }
 }
 
+struct UnpackControl {
+    context: BuildProviderRequestContext,
+    cancellation: CancellationToken,
+}
+
+impl UnpackControl {
+    fn check(&self) -> Result<(), BuildProviderFailure> {
+        if self.cancellation.is_cancelled()
+            || time::OffsetDateTime::now_utc() >= self.context.deadline_at.get()
+        {
+            Err(stopped_failure(&self.context))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn failure(&self) -> BuildProviderFailure {
+        self.check().err().unwrap_or_else(rejected)
+    }
+}
+
+struct CheckedContextReader<'a, R> {
+    input: R,
+    control: &'a UnpackControl,
+}
+
+impl<R: Read> Read for CheckedContextReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.control
+            .check()
+            .map_err(|_| std::io::Error::other("build context unpack stopped"))?;
+        self.input.read(buffer)
+    }
+}
+
+async fn unpack_context_in_worker<R: Read + Send + 'static>(
+    input: R,
+    media_type: String,
+    resources: Arc<ContextResources>,
+    context: BuildProviderRequestContext,
+    cancellation: &CancellationToken,
+) -> Result<Arc<ContextResources>, BuildProviderFailure> {
+    let cancellation = cancellation.child_token();
+    // Aborting the async workflow cancels the worker too. The worker retains all disk owners
+    // and the reservation until it has stopped reading/writing and unwound its cleanup guards.
+    let _cancel_on_drop = cancellation.clone().drop_guard();
+    tokio::task::spawn_blocking(move || {
+        let control = UnpackControl {
+            context,
+            cancellation,
+        };
+        unpack_context(
+            input,
+            &media_type,
+            resources.workspace.path(),
+            u64::try_from(resources.budget.num_permits()).map_err(|_| rejected())?,
+            &control,
+        )?;
+        Ok(resources)
+    })
+    .await
+    .map_err(|_| unavailable())?
+}
+
 fn unpack_context<R: Read>(
     input: R,
     media_type: &str,
     destination: &Path,
     maximum_bytes: u64,
+    control: &UnpackControl,
 ) -> Result<(), BuildProviderFailure> {
-    let reader: Box<dyn Read> = match media_type {
+    control.check()?;
+    let input = CheckedContextReader { input, control };
+    let reader: Box<dyn Read + '_> = match media_type {
         "application/vnd.oci.image.layer.v1.tar+gzip" | "application/gzip" => {
             Box::new(GzDecoder::new(input))
         }
         "application/vnd.oci.image.layer.v1.tar" | "application/x-tar" => Box::new(input),
         _ => return Err(rejected()),
     };
-    let mut archive = tar::Archive::new(reader);
-    let entries = archive.entries().map_err(|_| rejected())?;
+    let mut archive = tar::Archive::new(CheckedContextReader {
+        input: reader,
+        control,
+    });
+    let entries = archive.entries().map_err(|_| control.failure())?;
     let mut total_bytes = 0_u64;
     for (index, entry) in entries.enumerate() {
+        control.check()?;
         if index >= MAX_CONTEXT_ENTRIES {
             return Err(rejected());
         }
-        let mut entry = entry.map_err(|_| rejected())?;
+        let mut entry = entry.map_err(|_| control.failure())?;
         total_bytes = total_bytes
             .checked_add(entry.size())
             .filter(|total| *total <= maximum_bytes)
@@ -1439,12 +1513,14 @@ fn unpack_context<R: Read>(
                     std::path::Component::ParentDir | std::path::Component::Prefix(_)
                 )
             })
-            || !entry.unpack_in(destination).map_err(|_| rejected())?
+            || !entry
+                .unpack_in(destination)
+                .map_err(|_| control.failure())?
         {
             return Err(rejected());
         }
     }
-    Ok(())
+    control.check()
 }
 
 fn validate_dockerfile(root: &Path, relative: &str) -> Result<(), BuildProviderFailure> {
@@ -2497,6 +2573,118 @@ mod tests {
         );
     }
 
+    fn unpack_control_fixture() -> UnpackControl {
+        UnpackControl {
+            context: history_fixture().0,
+            cancellation: CancellationToken::new(),
+        }
+    }
+
+    struct PausedContextReader {
+        input: std::fs::File,
+        read_bytes: usize,
+        reached: Option<tokio::sync::oneshot::Sender<()>>,
+        resume: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl Read for PausedContextReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.input.read(buffer)?;
+            self.read_bytes += count;
+            if self.read_bytes >= 128 * 1024 {
+                if let Some(reached) = self.reached.take() {
+                    reached
+                        .send(())
+                        .map_err(|()| std::io::Error::other("test receiver dropped"))?;
+                    self.resume
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .map_err(std::io::Error::other)?;
+                }
+            }
+            Ok(count)
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_large_context_unpack_stops_worker_and_cleans_files_and_budget() {
+        let parent = tempfile::tempdir().expect("private parent");
+        let object = NamedTempFile::new_in(parent.path()).expect("object");
+        {
+            let mut archive = tar::Builder::new(object.reopen().expect("object writer"));
+            let payload = vec![b'x'; 64 * 1024];
+            for index in 0..64 {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(u64::try_from(payload.len()).expect("payload size"));
+                header.set_mode(0o644);
+                header.set_cksum();
+                archive
+                    .append_data(&mut header, format!("payload-{index}"), &payload[..])
+                    .expect("append payload");
+            }
+            archive.finish().expect("finish archive");
+        }
+        let object_path = object.path().to_path_buf();
+        let workspace = TempDir::new_in(parent.path()).expect("workspace");
+        let workspace_path = workspace.path().to_path_buf();
+        let budget = Arc::new(Semaphore::new(8 * 1024 * 1024));
+        let permit = budget
+            .clone()
+            .acquire_many_owned(8 * 1024 * 1024)
+            .await
+            .expect("reservation");
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let input = PausedContextReader {
+            input: object.reopen().expect("object reader"),
+            read_bytes: 0,
+            reached: Some(reached_tx),
+            resume: resume_rx,
+        };
+        let resources = ContextResources::new(object.into_temp_path(), workspace, permit);
+        let cancellation = CancellationToken::new();
+        let worker_cancellation = cancellation.clone();
+        let task = tokio::spawn(async move {
+            unpack_context_in_worker(
+                input,
+                "application/x-tar".to_owned(),
+                resources,
+                history_fixture().0,
+                &worker_cancellation,
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), reached_rx)
+            .await
+            .expect("async runtime remains responsive")
+            .expect("worker reached payload");
+        assert!(
+            workspace_path.join("payload-0").exists(),
+            "cancel after actual extraction starts"
+        );
+        assert!(object_path.exists());
+        assert_eq!(
+            budget.available_permits(),
+            0,
+            "worker still owns full reservation"
+        );
+        cancellation.cancel();
+        resume_tx.send(()).expect("resume worker");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .expect("worker stops promptly")
+            .expect("worker task joined");
+        let Err(failure) = result else {
+            panic!("cancelled extraction must not succeed")
+        };
+        assert_eq!(failure.code, BuildProviderFailureCode::Cancelled);
+        assert!(!object_path.exists(), "cancelled object file removed");
+        assert!(
+            !workspace_path.exists(),
+            "partially extracted workspace removed"
+        );
+        assert_eq!(budget.available_permits(), 8 * 1024 * 1024);
+    }
+
     fn context_resources_fixture(
         parent: &Path,
         budget: &Arc<Semaphore>,
@@ -2704,8 +2892,14 @@ mod tests {
             "payload should be highly compressible"
         );
         let workspace = tempfile::tempdir().expect("workspace");
-        let failure = unpack_context(&compressed[..], "application/gzip", workspace.path(), 1024)
-            .expect_err("expanded payload exceeds reservation");
+        let failure = unpack_context(
+            &compressed[..],
+            "application/gzip",
+            workspace.path(),
+            1024,
+            &unpack_control_fixture(),
+        )
+        .expect_err("expanded payload exceeds reservation");
         assert_eq!(failure.code, BuildProviderFailureCode::Rejected);
         drop(workspace);
         drop(permit);
@@ -2852,6 +3046,7 @@ mod tests {
                 "application/x-tar",
                 directory.path(),
                 1024,
+                &unpack_control_fixture(),
             )
             .is_ok()
         );
@@ -2863,7 +3058,14 @@ mod tests {
         header.set_cksum();
         traversal[..512].copy_from_slice(header.as_bytes());
         assert!(
-            unpack_context(&traversal[..], "application/x-tar", directory.path(), 1024).is_err()
+            unpack_context(
+                &traversal[..],
+                "application/x-tar",
+                directory.path(),
+                1024,
+                &unpack_control_fixture()
+            )
+            .is_err()
         );
         assert!(
             !directory
@@ -2893,6 +3095,7 @@ mod tests {
                 "application/x-tar",
                 directory.path(),
                 1024,
+                &unpack_control_fixture(),
             )
             .is_err()
         );
@@ -2923,6 +3126,7 @@ mod tests {
                 "application/vnd.oci.image.layer.v1.tar+gzip",
                 directory.path(),
                 1024,
+                &unpack_control_fixture(),
             )
             .is_ok()
         );

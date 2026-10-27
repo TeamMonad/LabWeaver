@@ -133,6 +133,7 @@ fixture 使用现有安全 JSON 日志格式，只输出固定阶段、身份、
 优先覆盖用户行为、输入约束、负向权限、幂等、取消、恢复和资源释放。删除仅证明文件、类型或旧报告存在的测试；保留部署渲染后的实际权限和网络检查。
 
 Workspace 的 `unsafe_code` 从 `forbid` 调整为 `deny`，仅允许 `services/agent-service/src/build_executor.rs` 的 `map_spool` 使用一次函数级 `#[allow(unsafe_code)]`，用于将已完成且不再修改的私有 BuildKit spool 文件映射到内存。该函数必须附带 SAFETY 论证；映射所有者保留临时文件、解包目录和字节预算，直到最后一个上传 `Bytes` 被释放。`tests/ci/test_unsafe_allowlist.py` 扫描 Git 跟踪的 Rust 文件，拒绝任何第二处或移到其他函数的例外。
+CI 同时拒绝 `cfg_attr` 嵌套、跨行、内部属性 `#![...]` 中的 `allow/expect/warn(unsafe_code)`，并在隔离 Git 仓库执行负例，避免条件属性绕过唯一例外限制。
 
 测试输出用于排障和 PR 说明，不形成运行时准入报告。真实 GPU、KubeVirt、外部连接和集群部署未运行时必须写清未验证，不能以边界 Mock 代替。
 

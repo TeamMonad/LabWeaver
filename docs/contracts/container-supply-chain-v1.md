@@ -133,6 +133,11 @@ potentially across concurrent builds; `maxUnpackedContextBytes` does not cap tha
 Temp-file owners clean up on success, rejection and cancellation. Archive paths, parent traversal
 and links remain rejected.
 
+Extraction runs in a blocking worker rather than on the async executor. It checks cancellation
+and the original deadline at each entry and payload read; a stopped worker removes its partial
+workspace and object file before returning the full reservation. Aborting the workflow also
+signals that worker to stop, while the worker retains its cleanup guards until it exits.
+
 ## Build network posture
 
 `BuildRequest.network` is an explicit per-request posture:
