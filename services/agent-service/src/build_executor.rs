@@ -648,13 +648,7 @@ impl ProductionBuildExecutor {
         )
         .await
         .map_err(|_| execution_unknown())??;
-        match outcome {
-            Some(true) if record.error.is_none() => {
-                history_record_digest(&record).ok_or_else(output_invalid)
-            }
-            Some(_) => Err(unavailable()),
-            None => Err(stopped_failure(request_context)),
-        }
+        buildkit_solve_result(outcome, &record, request_context)
     }
 
     /// Build a mutually-authenticated `tonic` endpoint for the `BuildKit` daemon.
@@ -1639,6 +1633,22 @@ fn history_identity_matches(
                 .get("name")
                 .is_some_and(|name| name == tagged)
         })
+}
+
+/// Interpret the solve and its authoritative terminal history together, never accepting a
+/// registry digest from a failed or cancelled solve.
+fn buildkit_solve_result(
+    outcome: Option<bool>,
+    record: &bollard_buildkit_proto::moby::buildkit::v1::BuildHistoryRecord,
+    request_context: &BuildProviderRequestContext,
+) -> Result<String, BuildProviderFailure> {
+    match outcome {
+        Some(true) if record.error.is_none() => {
+            history_record_digest(record).ok_or_else(output_invalid)
+        }
+        Some(_) => Err(unavailable()),
+        None => Err(stopped_failure(request_context)),
+    }
 }
 
 fn history_record_digest(
