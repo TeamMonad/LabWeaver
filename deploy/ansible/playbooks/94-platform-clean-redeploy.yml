@@ -1,83 +1,214 @@
 ---
+# Wipe is a separately authorized operation. The full host preflight runs even
+# when invoked directly, before inspecting the destructive scope.
 - import_playbook: 00-preflight.yml
-  vars:
-    labweaver_preflight_scope: platform-application
-    labweaver_preflight_validate_remote_hosts: false
 
-- name: Clean the platform layer with an exact reviewed scope
+- name: Clean only the exact installation-owned platform scope
   hosts: control_plane
   gather_facts: false
   become: true
   vars:
     platform_clean_redeploy_kubeconfig: /etc/kubernetes/admin.conf
     platform_clean_redeploy_helm: /usr/local/bin/helm
+    platform_clean_redeploy_kubectl: /usr/bin/kubectl
     platform_clean_redeploy_rollout_timeout: 10m
     platform_clean_redeploy_namespaces:
       - labweaver-system
       - labweaver-data
       - labweaver-demo
       - labweaver-evaluation
+    platform_clean_redeploy_target: "{{ lookup('ansible.builtin.env', 'LABWEAVER_WIPE_TARGET') }}"
+    platform_clean_redeploy_scope: "{{ lookup('ansible.builtin.env', 'LABWEAVER_WIPE_SCOPE') }}"
   tasks:
-    - name: Require the reviewed platform namespace set
+    - name: Require the explicit installation, target and destructive scope
       ansible.builtin.assert:
         that:
-          - labweaver_namespaces | sort == ['labweaver-build', 'labweaver-data', 'labweaver-demo', 'labweaver-evaluation', 'labweaver-system']
-        fail_msg: PLATFORM_CLEAN_REDEPLOY_NAMESPACES_INVALID
+          - lookup('ansible.builtin.env', 'LABWEAVER_DEPLOY_MODE') == 'wipe'
+          - platform_clean_redeploy_target == 'labweaver'
+          - platform_clean_redeploy_scope == 'platform'
+          - labweaver_installation_id | default('') is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+          - labweaver_installation_id == lookup('ansible.builtin.env', 'LW_BUNDLE_INSTALLATION_ID')
+        fail_msg: PLATFORM_WIPE_EXPLICIT_TARGET_SCOPE_REQUIRED
 
-    - name: Uninstall the platform Helm releases
-      ansible.builtin.command:
-        argv:
-          - "{{ platform_clean_redeploy_helm }}"
-          - --kubeconfig
-          - "{{ platform_clean_redeploy_kubeconfig }}"
-          - uninstall
-          - labweaver
-          - labweaver-resource
-          - --ignore-not-found
-          - --wait
-          - "--timeout={{ platform_clean_redeploy_rollout_timeout }}"
-      changed_when: true
-
-    - name: Read the platform namespaces
+    - name: Read namespaces before any mutation
       kubernetes.core.k8s_info:
         kubeconfig: "{{ platform_clean_redeploy_kubeconfig }}"
         api_version: v1
         kind: Namespace
       register: platform_clean_redeploy_namespace_list
 
-    - name: Delete the reviewed platform namespaces
-      kubernetes.core.k8s:
-        kubeconfig: "{{ platform_clean_redeploy_kubeconfig }}"
-        api_version: v1
-        kind: Namespace
-        name: "{{ item }}"
-        state: absent
-        wait: true
-        wait_timeout: 300
-      loop: "{{ platform_clean_redeploy_namespaces }}"
-
-    - name: Delete stale user environment namespaces
-      kubernetes.core.k8s:
-        kubeconfig: "{{ platform_clean_redeploy_kubeconfig }}"
-        api_version: v1
-        kind: Namespace
-        name: "{{ item.metadata.name }}"
-        state: absent
-        wait: true
-        wait_timeout: 300
+    - name: Reject static namespaces belonging to another installation
+      ansible.builtin.assert:
+        that:
+          - item.metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id
+        fail_msg: PLATFORM_WIPE_NAMESPACE_OWNERSHIP_CONFLICT
       loop: >-
         {{ platform_clean_redeploy_namespace_list.resources
-           | selectattr('metadata.name', 'match', '^lw-env-')
-           | list }}
+           | selectattr('metadata.name', 'in', platform_clean_redeploy_namespaces) | list }}
+      loop_control:
+        label: "{{ item.metadata.name }}"
 
-    - name: Read persistent volumes bound to the platform namespaces
+    - name: Select only installation-owned environment namespaces
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/jq
+          - --compact-output
+          - --arg
+          - installation
+          - "{{ labweaver_installation_id }}"
+          - >-
+            [.[] | select((.metadata.name | startswith("lw-env-")) and
+            (.metadata.annotations["labweaver.io/installation-id"] // "") == $installation)
+            | .metadata.name]
+        stdin: "{{ platform_clean_redeploy_namespace_list.resources | to_json }}"
+      register: platform_clean_redeploy_environment_scope
+      changed_when: false
+
+    - name: Bind exact reviewed namespace scope
+      ansible.builtin.set_fact:
+        platform_clean_redeploy_owned_namespaces: >-
+          {{ (platform_clean_redeploy_namespace_list.resources
+              | selectattr('metadata.name', 'in', platform_clean_redeploy_namespaces)
+              | map(attribute='metadata.name') | list)
+             + (platform_clean_redeploy_environment_scope.stdout | from_json) }}
+
+    - name: Read all persistent volumes before any mutation
       kubernetes.core.k8s_info:
         kubeconfig: "{{ platform_clean_redeploy_kubeconfig }}"
         api_version: v1
         kind: PersistentVolume
       register: platform_clean_redeploy_persistent_volumes
 
-    - name: Delete persistent volumes owned by the platform namespaces
+    - name: Reject unowned volumes in the destructive namespace scope
+      ansible.builtin.assert:
+        that:
+          - item.spec.claimRef.namespace | default('') not in platform_clean_redeploy_owned_namespaces or
+            item.metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id
+        fail_msg: PLATFORM_WIPE_VOLUME_OWNERSHIP_CONFLICT
+      loop: "{{ platform_clean_redeploy_persistent_volumes.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+
+    - name: List all Helm releases in the namespace scope
+      ansible.builtin.command:
+        argv:
+          - "{{ platform_clean_redeploy_helm }}"
+          - --kubeconfig
+          - "{{ platform_clean_redeploy_kubeconfig }}"
+          - list
+          - --all
+          - --namespace
+          - "{{ item }}"
+          - --output
+          - json
+      loop: "{{ platform_clean_redeploy_owned_namespaces }}"
+      register: platform_clean_redeploy_release_lists
+      changed_when: false
+
+    - name: Refuse unrelated releases before deleting their namespaces
+      ansible.builtin.assert:
+        that:
+          - >-
+            (item.stdout | from_json | map(attribute='name') | list
+             | difference(['labweaver', 'labweaver-resource'] if item.item == 'labweaver-system' else [])) | length == 0
+        fail_msg: PLATFORM_WIPE_FOREIGN_RELEASE
+      loop: "{{ platform_clean_redeploy_release_lists.results }}"
+      changed_when: false
+
+    - name: Read metadata only for installed platform releases
+      ansible.builtin.command:
+        argv:
+          - "{{ platform_clean_redeploy_helm }}"
+          - --kubeconfig
+          - "{{ platform_clean_redeploy_kubeconfig }}"
+          - get
+          - metadata
+          - "{{ item.name }}"
+          - --namespace
+          - labweaver-system
+          - --output
+          - json
+      loop: >-
+        {{ (platform_clean_redeploy_release_lists.results
+            | selectattr('item', 'equalto', 'labweaver-system')
+            | map(attribute='stdout') | first | default('[]')) | from_json }}
+      register: platform_clean_redeploy_release_metadata
+      changed_when: false
+
+    - name: Reject releases without the exact installation identity
+      ansible.builtin.assert:
+        that:
+          - (item.stdout | from_json).name == item.item.name
+          - (item.stdout | from_json).namespace == 'labweaver-system'
+          - (item.stdout | from_json).description == 'labweaver-installation:' ~ labweaver_installation_id
+        fail_msg: PLATFORM_WIPE_RELEASE_OWNERSHIP_CONFLICT
+      loop: "{{ platform_clean_redeploy_release_metadata.results }}"
+      changed_when: false
+
+    - name: Verify namespace resources before namespace deletion
+      ansible.builtin.command:
+        argv:
+          - "{{ platform_clean_redeploy_kubectl }}"
+          - --kubeconfig
+          - "{{ platform_clean_redeploy_kubeconfig }}"
+          - --namespace
+          - "{{ item }}"
+          - get
+          - all,configmap,secret,serviceaccount,role,rolebinding,pvc,networkpolicy
+          - --output
+          - json
+      loop: "{{ platform_clean_redeploy_owned_namespaces }}"
+      register: platform_clean_redeploy_object_inventory
+      changed_when: false
+      no_log: true
+
+    - name: Reject namespaces containing unowned resources
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/jq
+          - --exit-status
+          - --arg
+          - installation
+          - "{{ labweaver_installation_id }}"
+          - --arg
+          - scope
+          - "{{ item.item }}"
+          - --argjson
+          - releases
+          - "{{ (platform_clean_redeploy_release_metadata.results | map(attribute='item.name') | list) | to_json }}"
+          - >-
+            [.items[] |
+              select(.kind != "ServiceAccount" or .metadata.name != "default") |
+              select((
+                ((.metadata.annotations["labweaver.io/installation-id"] // "") == $installation)
+                or (
+                  ((.metadata.annotations["meta.helm.sh/release-name"] // "") as $release |
+                    $releases | index($release)) != null and
+                  (.metadata.annotations["meta.helm.sh/release-namespace"] // "") == $scope and
+                  (.metadata.labels["app.kubernetes.io/managed-by"] // "") == "Helm"
+                )
+              ) | not)] | length == 0
+        stdin: "{{ item.stdout }}"
+      loop: "{{ platform_clean_redeploy_object_inventory.results }}"
+      changed_when: false
+      no_log: true
+
+    - name: Uninstall only proven Helm releases
+      ansible.builtin.command:
+        argv:
+          - "{{ platform_clean_redeploy_helm }}"
+          - --kubeconfig
+          - "{{ platform_clean_redeploy_kubeconfig }}"
+          - uninstall
+          - "{{ item.item.name }}"
+          - --namespace
+          - labweaver-system
+          - --wait
+          - "--timeout={{ platform_clean_redeploy_rollout_timeout }}"
+      loop: "{{ platform_clean_redeploy_release_metadata.results }}"
+      changed_when: true
+
+    - name: Delete only installation-owned persistent volumes
       kubernetes.core.k8s:
         kubeconfig: "{{ platform_clean_redeploy_kubeconfig }}"
         api_version: v1
@@ -89,48 +220,33 @@
       loop: >-
         {{ platform_clean_redeploy_persistent_volumes.resources
            | selectattr('spec.claimRef.namespace', 'defined')
-           | selectattr('spec.claimRef.namespace', 'in', platform_clean_redeploy_namespaces)
+           | selectattr('spec.claimRef.namespace', 'in', platform_clean_redeploy_owned_namespaces)
            | list }}
+      loop_control:
+        label: "{{ item.metadata.name }}"
 
-    - name: Read leftover node debugger pods
-      kubernetes.core.k8s_info:
-        kubeconfig: "{{ platform_clean_redeploy_kubeconfig }}"
-        api_version: v1
-        kind: Pod
-        namespace: default
-      register: platform_clean_redeploy_default_pods
-
-    - name: Delete leftover node debugger pods
+    - name: Delete only installation-owned namespaces
       kubernetes.core.k8s:
         kubeconfig: "{{ platform_clean_redeploy_kubeconfig }}"
         api_version: v1
-        kind: Pod
-        namespace: default
-        name: "{{ item.metadata.name }}"
+        kind: Namespace
+        name: "{{ item }}"
         state: absent
         wait: true
-        wait_timeout: 120
-      loop: >-
-        {{ platform_clean_redeploy_default_pods.resources
-           | selectattr('metadata.name', 'match', '^node-debugger-')
-           | list }}
+        wait_timeout: 300
+      loop: "{{ platform_clean_redeploy_owned_namespaces }}"
 
-    - name: Read the remaining namespaces
+    - name: Read remaining namespaces
       kubernetes.core.k8s_info:
         kubeconfig: "{{ platform_clean_redeploy_kubeconfig }}"
         api_version: v1
         kind: Namespace
       register: platform_clean_redeploy_readback
 
-    - name: Require an empty platform scope
+    - name: Require only the authorized scope to have disappeared
       ansible.builtin.assert:
         that:
           - >-
-            platform_clean_redeploy_readback.resources
-            | map(attribute='metadata.name')
-            | intersect(platform_clean_redeploy_namespaces) | length == 0
-          - >-
-            platform_clean_redeploy_readback.resources
-            | map(attribute='metadata.name')
-            | select('match', '^lw-env-') | list | length == 0
+            platform_clean_redeploy_readback.resources | map(attribute='metadata.name')
+            | intersect(platform_clean_redeploy_owned_namespaces) | length == 0
         fail_msg: PLATFORM_CLEAN_REDEPLOY_READBACK_FAILED

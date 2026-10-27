@@ -1,28 +1,4 @@
 ---
-- name: Derive HA resources from the decrypted Bundle inventory
-  ansible.builtin.command:
-    argv:
-      - "{{ ansible_playbook_python }}"
-      - "{{ role_path }}/../../../../tools/ha_foundation.py"
-    stdin: >-
-      {{ {'configuration': platform_foundation_ha,
-          'lock': platform_foundation_lock,
-          'foundation': platform_foundation_objects,
-          'applicationNamespace': platform_foundation_application_namespace,
-          'resourceNamespace': platform_foundation_resource_namespace,
-          'databaseName': platform_foundation_postgres_database,
-          'adminRole': platform_foundation_postgres_admin_role,
-          'freezeCoordinator': platform_foundation_freeze_coordinator} | to_json }}
-  delegate_to: localhost
-  become: false
-  changed_when: false
-  register: platform_foundation_ha_render
-  no_log: true
-
-- name: Retain the single derived HA projection
-  ansible.builtin.set_fact:
-    platform_foundation_ha_projection: "{{ platform_foundation_ha_render.stdout | from_json }}"
-  no_log: true
 
 
 - name: Require three distinct Ready storage hosts
@@ -78,7 +54,7 @@
 - name: Apply the derived authenticated NATS cluster configuration
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_foundation_kubeconfig }}"
-    definition: "{{ item }}"
+    definition: "{{ item | combine({'metadata': {'annotations': {'labweaver.io/installation-id': labweaver_installation_id}}}, recursive=True) }}"
   loop: "{{ platform_foundation_ha_projection.foundation | selectattr('kind', 'equalto', 'ConfigMap') | list }}"
   no_log: true
 
@@ -97,6 +73,8 @@
       kind: Namespace
       metadata:
         name: "{{ item }}"
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
         labels:
           pod-security.kubernetes.io/enforce: "{{ 'privileged' if item == 'rook-ceph' else 'restricted' }}"
           labweaver.io/infrastructure: "true"
@@ -111,15 +89,27 @@
   loop: [rook, cnpg, barman]
   environment: "{{ labweaver_controller_proxy_env | default({}) }}"
 
-- name: Install checksum-locked HA operators
-  kubernetes.core.helm:
-    kubeconfig: "{{ platform_foundation_kubeconfig }}"
-    name: "{{ item.name }}"
-    chart_ref: "/var/tmp/labweaver-{{ item.key }}-{{ platform_foundation_lock.high_availability[item.key].chart }}.tgz"
-    release_namespace: "{{ item.namespace }}"
-    values: "{{ platform_foundation_ha_projection.charts[item.key] }}"
-    wait: true
-    timeout: 600s
+- name: Install checksum-locked HA operators with immutable installation identity
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/helm
+      - --kubeconfig
+      - "{{ platform_foundation_kubeconfig }}"
+      - upgrade
+      - --install
+      - "{{ item.name }}"
+      - "/var/tmp/labweaver-{{ item.key }}-{{ platform_foundation_lock.high_availability[item.key].chart }}.tgz"
+      - --namespace
+      - "{{ item.namespace }}"
+      - --values
+      - /dev/stdin
+      - --description
+      - "labweaver-installation:{{ labweaver_installation_id }}"
+      - --wait
+      - --timeout
+      - 600s
+    stdin: "{{ platform_foundation_ha_projection.charts[item.key] | to_nice_yaml }}"
+  changed_when: true
   loop:
     - {key: rook, name: rook-ceph, namespace: rook-ceph}
     - {key: cnpg, name: cnpg, namespace: cnpg-system}
@@ -129,7 +119,7 @@
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_foundation_kubeconfig }}"
     state: present
-    definition: "{{ item }}"
+    definition: "{{ item | combine({'metadata': {'annotations': {'labweaver.io/installation-id': labweaver_installation_id}}}, recursive=True) }}"
   loop: "{{ platform_foundation_ha_projection.objects }}"
   no_log: true
 

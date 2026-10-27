@@ -1,8 +1,39 @@
 ---
+
 - name: Load immutable Sprint 2 foundation identities
   ansible.builtin.set_fact:
     platform_foundation_lock: >-
       {{ lookup('ansible.builtin.file', labweaver_versions_lock_file | default(playbook_dir ~ '/../../versions.lock.yml')) | from_yaml }}
+
+- name: Require verified foundation installation identity
+  ansible.builtin.assert:
+    that:
+      - labweaver_installation_id | default('') is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - labweaver_installation_id == lookup('ansible.builtin.env', 'LW_BUNDLE_INSTALLATION_ID')
+    fail_msg: PLATFORM_FOUNDATION_INSTALLATION_ID_REQUIRED
+  when: platform_foundation_kubeconfig is defined
+- name: Read the existing foundation namespace before mutation
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_foundation_kubeconfig | default('/etc/kubernetes/admin.conf') }}"
+    api_version: v1
+    kind: Namespace
+    name: "{{ platform_foundation_namespace | default('labweaver-data') }}"
+  register: platform_foundation_existing_namespace
+  changed_when: false
+  when: platform_foundation_kubeconfig is defined
+
+- name: Refuse to adopt an unowned foundation namespace
+  ansible.builtin.assert:
+    that:
+      - platform_foundation_existing_namespace.resources | length == 0 or
+        (
+          platform_foundation_existing_namespace.resources[0].metadata.labels['app.kubernetes.io/part-of'] | default('') == 'labweaver-infrastructure' and
+          platform_foundation_existing_namespace.resources[0].metadata.labels['labweaver.io/infrastructure'] | default('') == 'true' and
+          platform_foundation_existing_namespace.resources[0].metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id
+        )
+    fail_msg: PLATFORM_FOUNDATION_NAMESPACE_OWNERSHIP_CONFLICT
+  changed_when: false
+  when: platform_foundation_kubeconfig is defined
 
 - name: Validate Sprint 2 foundation inputs
   ansible.builtin.assert:
@@ -157,6 +188,136 @@
     fail_msg: PLATFORM_FOUNDATION_NATS_SECURITY_INVALID
   no_log: true
 
+- name: Derive HA resources from the decrypted Bundle inventory
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ role_path }}/../../../../tools/ha_foundation.py"
+    stdin: >-
+      {{ {'configuration': platform_foundation_ha,
+          'lock': platform_foundation_lock,
+          'foundation': platform_foundation_objects,
+          'applicationNamespace': platform_foundation_application_namespace,
+          'resourceNamespace': platform_foundation_resource_namespace,
+          'databaseName': platform_foundation_postgres_database,
+          'adminRole': platform_foundation_postgres_admin_role,
+          'freezeCoordinator': platform_foundation_freeze_coordinator} | to_json }}
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  register: platform_foundation_ha_render
+  no_log: true
+  when: platform_foundation_ha | length > 0
+
+- name: Retain the single derived HA projection
+  ansible.builtin.set_fact:
+    platform_foundation_ha_projection: "{{ platform_foundation_ha_render.stdout | from_json }}"
+  no_log: true
+  when: platform_foundation_ha | length > 0
+- name: Inspect existing HA operator namespaces before mutation
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_foundation_kubeconfig }}"
+    api_version: v1
+    kind: Namespace
+    name: "{{ item }}"
+  loop: [rook-ceph, cnpg-system]
+  register: platform_foundation_ha_namespaces
+  when: platform_foundation_ha | length > 0
+
+- name: Reject HA operator namespaces owned by another installation
+  ansible.builtin.assert:
+    that:
+      - item.resources | length == 0 or
+        item.resources[0].metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id
+    fail_msg: PLATFORM_FOUNDATION_HA_NAMESPACE_OWNERSHIP_CONFLICT
+  loop: "{{ platform_foundation_ha_namespaces.results | default([]) }}"
+  when: platform_foundation_ha | length > 0
+
+- name: List every HA operator release before mutation
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/helm
+      - --kubeconfig
+      - "{{ platform_foundation_kubeconfig }}"
+      - list
+      - --all
+      - --namespace
+      - "{{ item }}"
+      - --output
+      - json
+  loop: >-
+    {{ (platform_foundation_ha_namespaces.results
+        | selectattr('resources', 'ne', []) | map(attribute='item') | list)
+       if platform_foundation_ha | length > 0 else [] }}
+  register: platform_foundation_ha_release_lists
+  changed_when: false
+  when: platform_foundation_ha | length > 0
+
+- name: Refuse independent releases in the operator namespaces
+  ansible.builtin.assert:
+    that:
+      - >-
+        (item.stdout | from_json | map(attribute='name') | list
+         | difference(['rook-ceph'] if item.item == 'rook-ceph' else ['cnpg', 'plugin-barman-cloud'])) | length == 0
+    fail_msg: PLATFORM_FOUNDATION_HA_FOREIGN_RELEASE
+  loop: "{{ platform_foundation_ha_release_lists.results | default([]) }}"
+  when: platform_foundation_ha | length > 0
+
+- name: Inspect existing HA operator release installation identity
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/helm
+      - --kubeconfig
+      - "{{ platform_foundation_kubeconfig }}"
+      - get
+      - metadata
+      - "{{ item.name }}"
+      - --namespace
+      - "{{ item.namespace }}"
+      - --output
+      - json
+  loop: >-
+    {{ (platform_foundation_ha_release_lists.results
+        | map(attribute='stdout') | map('from_json') | list | flatten)
+       if platform_foundation_ha | length > 0 else [] }}
+  register: platform_foundation_ha_release_metadata
+  changed_when: false
+  when: platform_foundation_ha | length > 0
+
+- name: Reject HA operator releases owned by another installation
+  ansible.builtin.assert:
+    that:
+      - (item.stdout | from_json).name == item.item.name
+      - (item.stdout | from_json).namespace == item.item.namespace
+      - (item.stdout | from_json).description == 'labweaver-installation:' ~ labweaver_installation_id
+    fail_msg: PLATFORM_FOUNDATION_HA_RELEASE_OWNERSHIP_CONFLICT
+  loop: "{{ platform_foundation_ha_release_metadata.results | default([]) }}"
+  when: platform_foundation_ha | length > 0
+
+- name: Inspect every planned foundation object before mutation
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_foundation_kubeconfig }}"
+    api_version: "{{ item.apiVersion }}"
+    kind: "{{ item.kind }}"
+    namespace: "{{ item.metadata.namespace }}"
+    name: "{{ item.metadata.name }}"
+  loop: >-
+    {{ platform_foundation_objects +
+       (lookup('ansible.builtin.template', 'workloads.yml.j2') | from_yaml_all | list) +
+       ((platform_foundation_ha_projection.foundation + platform_foundation_ha_projection.objects)
+        if platform_foundation_ha | length > 0 else []) }}
+  register: platform_foundation_object_ownership
+  no_log: true
+
+- name: Refuse to overwrite any unowned foundation object
+  ansible.builtin.assert:
+    that:
+      - item.resources | length == 0 or
+        item.resources[0].metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id
+    fail_msg: PLATFORM_FOUNDATION_OBJECT_OWNERSHIP_CONFLICT
+  loop: "{{ platform_foundation_object_ownership.results }}"
+  no_log: true
+
 - name: Reconcile the protected foundation namespace
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_foundation_kubeconfig }}"
@@ -166,6 +327,8 @@
       kind: Namespace
       metadata:
         name: "{{ platform_foundation_namespace }}"
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
         labels:
           app.kubernetes.io/part-of: labweaver-infrastructure
           labweaver.io/infrastructure: "true"
@@ -177,7 +340,7 @@
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_foundation_kubeconfig }}"
     state: present
-    definition: "{{ item }}"
+    definition: "{{ item | combine({'metadata': {'annotations': {'labweaver.io/installation-id': labweaver_installation_id}}}, recursive=True) }}"
   loop: >-
     {{ platform_foundation_objects | rejectattr('kind', 'equalto', 'ConfigMap') | list
        if platform_foundation_ha | length > 0 else platform_foundation_objects }}
@@ -191,7 +354,7 @@
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_foundation_kubeconfig }}"
     state: present
-    definition: "{{ item }}"
+    definition: "{{ item | combine({'metadata': {'annotations': {'labweaver.io/installation-id': labweaver_installation_id}}}, recursive=True) }}"
   loop: >-
     {{ lookup('ansible.builtin.template', 'workloads.yml.j2') | from_yaml_all | list }}
 

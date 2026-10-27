@@ -13,6 +13,105 @@
   when: platform_application_reviewed_vars is defined
   no_log: true
 
+- name: Require verified platform installation identity before probing targets
+  ansible.builtin.assert:
+    that:
+      - platform_application_installation_id | default('') is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - platform_application_installation_id == lookup('ansible.builtin.env', 'LW_BUNDLE_INSTALLATION_ID')
+    fail_msg: PLATFORM_APPLICATION_INSTALLATION_ID_REQUIRED
+  changed_when: false
+- name: Read the existing application namespace before mutation
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    api_version: v1
+    kind: Namespace
+    name: "{{ platform_application_namespace }}"
+  register: platform_application_existing_namespace
+  changed_when: false
+
+- name: Refuse to adopt an unowned application namespace
+  ansible.builtin.assert:
+    that:
+      - platform_application_existing_namespace.resources | length == 0 or
+        (
+          platform_application_existing_namespace.resources[0].metadata.labels['app.kubernetes.io/part-of'] | default('') == 'labweaver' and
+          platform_application_existing_namespace.resources[0].metadata.labels['labweaver.io/managed'] | default('') == 'true' and
+          platform_application_existing_namespace.resources[0].metadata.annotations['labweaver.io/installation-id']
+          | default('') == platform_application_installation_id
+        )
+    fail_msg: PLATFORM_APPLICATION_NAMESPACE_OWNERSHIP_CONFLICT
+  changed_when: false
+
+- name: Refuse to adopt unowned platform objects
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      {{ platform_application_kubectl }} --kubeconfig {{ platform_application_kubeconfig }}
+      --namespace {{ platform_application_namespace }} get all,configmap,secret,serviceaccount,role,rolebinding
+      --output json |
+      jq -e '[.items[] | select(.metadata.name != "default") |
+        select((((.metadata.annotations["meta.helm.sh/release-name"] // "") == "{{ platform_application_release_name }}"
+          and (.metadata.annotations["meta.helm.sh/release-namespace"] // "") == "{{ platform_application_namespace }}"
+          and (.metadata.labels["app.kubernetes.io/managed-by"] // "") == "Helm")
+          or ((.metadata.annotations["labweaver.io/installation-id"] // "") == "{{ platform_application_installation_id }}"
+          and (.metadata.labels["app.kubernetes.io/part-of"] // "") == "labweaver")) | not)] | length == 0'
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+  register: platform_application_ownership_check
+
+- name: Reject unowned platform objects
+  ansible.builtin.assert:
+    that: platform_application_ownership_check.rc == 0
+    fail_msg: PLATFORM_APPLICATION_OBJECT_OWNERSHIP_CONFLICT
+  changed_when: false
+
+- name: List the exact platform Helm release before mutation
+  ansible.builtin.command:
+    argv:
+      - "{{ platform_application_helm }}"
+      - --kubeconfig
+      - "{{ platform_application_kubeconfig }}"
+      - list
+      - --all
+      - --namespace
+      - "{{ platform_application_namespace }}"
+      - --filter
+      - "^{{ platform_application_release_name }}$"
+      - --output
+      - json
+  register: platform_application_release_list
+  changed_when: false
+
+- name: Read existing platform Helm release metadata
+  ansible.builtin.command:
+    argv:
+      - "{{ platform_application_helm }}"
+      - --kubeconfig
+      - "{{ platform_application_kubeconfig }}"
+      - get
+      - metadata
+      - "{{ platform_application_release_name }}"
+      - --namespace
+      - "{{ platform_application_namespace }}"
+      - --output
+      - json
+  register: platform_application_release_metadata
+  changed_when: false
+  when: platform_application_release_list.stdout | from_json | length == 1
+
+- name: Refuse a foreign platform Helm installation
+  ansible.builtin.assert:
+    that:
+      - platform_application_release_list.stdout | from_json | length <= 1
+      - platform_application_release_list.stdout | from_json | length == 0 or
+        ((platform_application_release_metadata.stdout | from_json).name == platform_application_release_name and
+         (platform_application_release_metadata.stdout | from_json).namespace == platform_application_namespace and
+         (platform_application_release_metadata.stdout | from_json).description == 'labweaver-installation:' ~ platform_application_installation_id)
+    fail_msg: PLATFORM_APPLICATION_RELEASE_OWNERSHIP_CONFLICT
+  changed_when: false
+
 - name: Load the application identities from the selected Bundle
   ansible.builtin.set_fact:
     platform_application_lock: >-
@@ -2175,6 +2274,8 @@
       kind: Namespace
       metadata:
         name: "{{ platform_application_namespace }}"
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         labels:
           app.kubernetes.io/part-of: labweaver
           labweaver.io/managed: "true"
@@ -2894,6 +2995,8 @@
       kind: Namespace
       metadata:
         name: "{{ platform_application_evaluation_namespace }}"
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         labels:
           app.kubernetes.io/part-of: labweaver
           labweaver.io/managed: "true"
@@ -3095,6 +3198,8 @@
       kind: Namespace
       metadata:
         name: "{{ platform_application_authoring_namespace }}"
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         labels:
           app.kubernetes.io/part-of: labweaver
           labweaver.io/managed: "true"
@@ -3511,19 +3616,8 @@
       {{ [platform_application_helm, '--kubeconfig', platform_application_kubeconfig,
           'upgrade', '--install', platform_application_release_name,
           platform_application_work_root + '/' + platform_application_run_id + '/chart',
-          '--namespace', platform_application_namespace, '--take-ownership', '--wait',
-          '--timeout', platform_application_rollout_timeout]
-          + platform_application_values_argv + platform_application_image_argv
-          + platform_application_route_argv }}
-  changed_when: true
-
-- name: Deploy the identical profile a second time
-  ansible.builtin.command:
-    argv: >-
-      {{ [platform_application_helm, '--kubeconfig', platform_application_kubeconfig,
-          'upgrade', '--install', platform_application_release_name,
-          platform_application_work_root + '/' + platform_application_run_id + '/chart',
-          '--namespace', platform_application_namespace, '--take-ownership', '--wait',
+          '--namespace', platform_application_namespace, '--description',
+          'labweaver-installation:' + platform_application_installation_id, '--wait',
           '--timeout', platform_application_rollout_timeout]
           + platform_application_values_argv + platform_application_image_argv
           + platform_application_route_argv }}
