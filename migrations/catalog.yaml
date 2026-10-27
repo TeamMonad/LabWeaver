@@ -70,6 +70,9 @@ domains:
       - id: 21
         file: control/0021_notifications.sql
         sha256: cd3f1faa0f5a230a229279a69b9896ab7f3967e95f601c5df176c130a36d9e6c
+      - id: 22
+        file: control/0022_course_calendar_roster.sql
+        sha256: 577a01dd03506e3551619f68f5f7ea22f0b4bebfac58b807daf896ae43b36e9d
   - name: access
     migrations:
       - id: 1

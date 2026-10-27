@@ -595,6 +595,22 @@ async fn authorize_evaluation_release_path(
                 "withdraw",
             ],
         ) if *method == Method::POST => (*course, "withdrawEvaluationRelease"),
+        (method, ["", "api", "v1", "courses", course, "calendar"]) if *method == Method::GET => {
+            (*course, "getCourseCalendar")
+        }
+        (method, ["", "api", "v1", "courses", course, "calendar"]) if *method == Method::PATCH => {
+            (*course, "updateCourseCalendar")
+        }
+        (method, ["", "api", "v1", "courses", course, "roster", "import"])
+            if *method == Method::POST =>
+        {
+            (*course, "importCourseRoster")
+        }
+        (method, ["", "api", "v1", "courses", course, "student-view"])
+            if *method == Method::GET =>
+        {
+            (*course, "getCourseStudentView")
+        }
         _ => return Ok(()),
     };
     authorize_environment_course(

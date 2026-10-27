@@ -1,0 +1,208 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "CourseCalendar": {
+      "additionalProperties": false,
+      "description": "A course's authoritative schedule and late-submission policy.",
+      "properties": {
+        "courseId": {
+          "$ref": "#/$defs/CourseId"
+        },
+        "dueAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "latePolicy": {
+          "$ref": "#/$defs/CourseLatePolicy"
+        },
+        "lateUntil": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "openAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "state": {
+          "$ref": "#/$defs/CourseCalendarState"
+        },
+        "timeZone": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "courseId",
+        "revision",
+        "dueAt",
+        "timeZone",
+        "state",
+        "latePolicy"
+      ],
+      "type": "object"
+    },
+    "CourseCalendarState": {
+      "enum": [
+        "not_open",
+        "open",
+        "late",
+        "closed"
+      ],
+      "type": "string"
+    },
+    "CourseId": {
+      "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
+      "type": "string"
+    },
+    "CourseLatePolicy": {
+      "description": "Submission behavior at and after the due instant.",
+      "enum": [
+        "hard_close",
+        "allow_with_mark"
+      ],
+      "type": "string"
+    },
+    "CourseMembership": {
+      "additionalProperties": false,
+      "description": "Course-local role grant with revision and expiry.",
+      "properties": {
+        "actorId": {
+          "$ref": "#/$defs/ActorId",
+          "description": "Actor scope."
+        },
+        "courseId": {
+          "$ref": "#/$defs/CourseId",
+          "description": "Course scope."
+        },
+        "expiresAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional hard expiry."
+        },
+        "objectRole": {
+          "$ref": "#/$defs/CourseObjectRole",
+          "default": "participant",
+          "description": "Control-owned course responsibility, independent of platform identity."
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision",
+          "description": "Monotonic authorization revision."
+        },
+        "role": {
+          "$ref": "#/$defs/PlatformRole",
+          "description": "Role permitted by this course."
+        },
+        "state": {
+          "$ref": "#/$defs/MembershipState",
+          "description": "Current lifecycle state."
+        }
+      },
+      "required": [
+        "courseId",
+        "actorId",
+        "role",
+        "state",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "CourseObjectRole": {
+      "description": "Course responsibility does not change the actor's verified platform identity.",
+      "enum": [
+        "instructor",
+        "teaching_assistant",
+        "participant"
+      ],
+      "type": "string"
+    },
+    "MembershipState": {
+      "description": "Authoritative membership state owned by Control Service.",
+      "oneOf": [
+        {
+          "const": "active",
+          "description": "Membership may authorize matching operations.",
+          "type": "string"
+        },
+        {
+          "const": "suspended",
+          "description": "Membership is temporarily disabled and must deny access.",
+          "type": "string"
+        },
+        {
+          "const": "revoked",
+          "description": "Membership was permanently revoked and must deny access.",
+          "type": "string"
+        }
+      ]
+    },
+    "PlatformRole": {
+      "description": "Base role asserted by the configured OIDC issuer.",
+      "oneOf": [
+        {
+          "const": "teacher",
+          "description": "Course teacher with an active course membership.",
+          "type": "string"
+        },
+        {
+          "const": "student",
+          "description": "Course student with an active course membership.",
+          "type": "string"
+        },
+        {
+          "const": "platform_admin",
+          "description": "Global operator when an operation explicitly permits administrator access.",
+          "type": "string"
+        }
+      ]
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Student-facing course facts. It contains no other member's identity.",
+  "properties": {
+    "calendar": {
+      "$ref": "#/$defs/CourseCalendar"
+    },
+    "membership": {
+      "$ref": "#/$defs/CourseMembership"
+    }
+  },
+  "required": [
+    "calendar",
+    "membership"
+  ],
+  "title": "CourseStudentView",
+  "type": "object"
+}

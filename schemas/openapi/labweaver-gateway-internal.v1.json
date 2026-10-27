@@ -55,6 +55,18 @@
       "ContainerWorkExecutionRequest": {
         "$ref": "../contracts/v1/http/container-work-execution-request.schema.json"
       },
+      "CourseCalendar": {
+        "$ref": "../contracts/v1/course-calendar.schema.json"
+      },
+      "CourseRosterImportRequest": {
+        "$ref": "../contracts/v1/http/course-roster-import-request.schema.json"
+      },
+      "CourseRosterImportResult": {
+        "$ref": "../contracts/v1/http/course-roster-import-result.schema.json"
+      },
+      "CourseStudentView": {
+        "$ref": "../contracts/v1/http/course-student-view.schema.json"
+      },
       "CreateFrozenModelInputAuthorizationRequest": {
         "$ref": "../contracts/v1/http/create-frozen-model-input-authorization-request.schema.json"
       },
@@ -268,6 +280,9 @@
       },
       "TaskAttemptProgress": {
         "$ref": "../contracts/v1/task-attempt-progress.schema.json"
+      },
+      "UpdateCourseCalendar": {
+        "$ref": "../contracts/v1/http/update-course-calendar.schema.json"
       },
       "WorkConfigurationAdmissionBinding": {
         "$ref": "../contracts/v1/http/work-configuration-admission-binding.schema.json"

@@ -1,11 +1,11 @@
 //! Control-owned course responsibilities and explicit account invitations.
 
+use crate::object_authorization::{ObjectAction, ProjectObjectRole};
+use crate::{
+    ActorId, CourseId, CourseMembership, MembershipInvitationId, ProjectId, Revision, UtcTimestamp,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-use crate::object_authorization::{ObjectAction, ProjectObjectRole};
-use crate::{ActorId, CourseId, MembershipInvitationId, ProjectId, Revision, UtcTimestamp};
-
 /// Course responsibility does not change the actor's verified platform identity.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -125,6 +125,251 @@ pub struct CourseMembershipView {
 /// Stable pages of current course membership facts.
 pub type CourseMembershipPage = crate::http::CursorPage<CourseMembershipView>;
 pub type MembershipInvitationPage = crate::http::CursorPage<MembershipInvitation>;
+
+/// A course's authoritative schedule and late-submission policy.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CourseCalendar {
+    pub course_id: CourseId,
+    pub revision: Revision,
+    pub open_at: Option<UtcTimestamp>,
+    pub due_at: UtcTimestamp,
+    pub time_zone: String,
+    pub state: CourseCalendarState,
+    pub late_policy: CourseLatePolicy,
+    pub late_until: Option<UtcTimestamp>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CourseCalendarState {
+    NotOpen,
+    Open,
+    Late,
+    Closed,
+}
+
+impl CourseCalendar {
+    #[must_use]
+    pub fn state_at(&self, now: UtcTimestamp) -> CourseCalendarState {
+        if self.open_at.is_some_and(|open| now < open) {
+            return CourseCalendarState::NotOpen;
+        }
+        if now < self.due_at {
+            return CourseCalendarState::Open;
+        }
+        match self.late_policy {
+            CourseLatePolicy::AllowWithMark if self.late_until.is_none_or(|until| now < until) => {
+                CourseCalendarState::Late
+            }
+            CourseLatePolicy::HardClose | CourseLatePolicy::AllowWithMark => {
+                CourseCalendarState::Closed
+            }
+        }
+    }
+}
+
+/// Submission behavior at and after the due instant.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CourseLatePolicy {
+    HardClose,
+    AllowWithMark,
+}
+impl CourseLatePolicy {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::HardClose => "hard_close",
+            Self::AllowWithMark => "allow_with_mark",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateCourseCalendar {
+    #[serde(default, deserialize_with = "deserialize_optional_calendar_instant")]
+    pub open_at: Option<UtcTimestamp>,
+    #[serde(deserialize_with = "deserialize_calendar_instant")]
+    pub due_at: UtcTimestamp,
+    pub time_zone: String,
+    pub late_policy: CourseLatePolicy,
+    #[serde(default, deserialize_with = "deserialize_optional_calendar_instant")]
+    pub late_until: Option<UtcTimestamp>,
+}
+
+fn deserialize_calendar_instant<'de, D>(deserializer: D) -> Result<UtcTimestamp, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let input = String::deserialize(deserializer)?;
+    let instant =
+        time::OffsetDateTime::parse(&input, &time::format_description::well_known::Rfc3339)
+            .map_err(D::Error::custom)?
+            .to_offset(time::UtcOffset::UTC);
+    let millis = instant.nanosecond() / 1_000_000 * 1_000_000;
+    UtcTimestamp::from_utc(
+        instant
+            .replace_nanosecond(millis)
+            .map_err(D::Error::custom)?,
+    )
+    .map_err(D::Error::custom)
+}
+
+fn deserialize_optional_calendar_instant<'de, D>(
+    deserializer: D,
+) -> Result<Option<UtcTimestamp>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct CalendarInstant(
+        #[serde(deserialize_with = "deserialize_calendar_instant")] UtcTimestamp,
+    );
+    Option::<CalendarInstant>::deserialize(deserializer).map(|instant| instant.map(|value| value.0))
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CourseRosterImportRequest {
+    /// UTF-8 CSV with header `campusUsername,role`; role is optional.
+    pub csv: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolvedCourseRosterImportRequest {
+    pub rows: Vec<ResolvedCourseRosterRow>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolvedCourseRosterRow {
+    pub row_number: u32,
+    pub campus_username: String,
+    pub actor_id: ActorId,
+    pub role: CourseRosterRole,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CourseRosterRole {
+    Participant,
+    TeachingAssistant,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CourseRosterImportResult {
+    pub course_id: CourseId,
+    pub revision: Revision,
+    pub rows: Vec<CourseRosterImportRowResult>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CourseRosterImportRowResult {
+    pub row_number: u32,
+    pub campus_username: String,
+    pub role: Option<CourseRosterRole>,
+    pub result: CourseRosterImportRowState,
+    pub actor_id: Option<ActorId>,
+    pub invitation_id: Option<MembershipInvitationId>,
+    pub diagnostic_code: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CourseRosterImportRowState {
+    Imported,
+    AlreadyMember,
+    Invited,
+    DuplicateInFile,
+    UnknownAccount,
+    InvalidRole,
+    InvalidRow,
+    Rejected,
+}
+
+/// Student-facing course facts. It contains no other member's identity.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CourseStudentView {
+    pub calendar: CourseCalendar,
+    pub membership: CourseMembership,
+}
+pub type ParsedCourseRosterRow = (u32, String, Option<String>);
+
+/// Parses the deliberately narrow CSV roster format without silently ignoring
+/// malformed columns. Quoted fields are supported; escaped quotes use RFC4180
+/// doubling. The caller resolves campus usernames through the issuer directory.
+pub fn parse_course_roster_csv(csv: &str) -> Result<Vec<ParsedCourseRosterRow>, &'static str> {
+    let mut lines = csv.lines();
+    let header = lines.next().ok_or("LW_COURSE_ROSTER_IMPORT_INVALID")?;
+    let columns = parse_csv_line(header)?;
+    if columns.is_empty()
+        || columns.len() > 2
+        || columns[0].trim() != "campusUsername"
+        || (columns.len() == 2 && columns[1].trim() != "role")
+    {
+        return Err("LW_COURSE_ROSTER_IMPORT_INVALID");
+    }
+    let mut rows = Vec::new();
+    for (offset, line) in lines.enumerate() {
+        let row_number =
+            u32::try_from(offset + 2).map_err(|_| "LW_COURSE_ROSTER_IMPORT_INVALID")?;
+        let fields = parse_csv_line(line)?;
+        if fields.len() != columns.len() {
+            return Err("LW_COURSE_ROSTER_ROW_INVALID");
+        }
+        let username = fields[0].trim().to_owned();
+        if username.is_empty() || username.chars().any(char::is_control) {
+            return Err("LW_COURSE_ROSTER_ROW_INVALID");
+        }
+        let role = if fields.len() == 1 {
+            None
+        } else {
+            match fields[1].trim() {
+                "" => None,
+                value if value == "participant" || value == "teaching_assistant" => {
+                    Some(value.to_owned())
+                }
+                _ => return Err("LW_COURSE_ROSTER_ROLE_INVALID"),
+            }
+        };
+        rows.push((row_number, username, role));
+    }
+    Ok(rows)
+}
+
+fn parse_csv_line(line: &str) -> Result<Vec<String>, &'static str> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut chars = line.chars().peekable();
+    let mut quoted = false;
+    while let Some(ch) = chars.next() {
+        match (quoted, ch) {
+            (false, '"') if field.is_empty() => quoted = true,
+            (true, '"') if chars.peek() == Some(&'"') => {
+                field.push('"');
+                chars.next();
+            }
+            (true, '"') => quoted = false,
+            (false, ',') => {
+                fields.push(field.trim().to_owned());
+                field.clear();
+            }
+            (_, ch) => field.push(ch),
+        }
+    }
+    if quoted {
+        return Err("LW_COURSE_ROSTER_ROW_INVALID");
+    }
+    fields.push(field.trim().to_owned());
+    Ok(fields)
+}
 pub type ProjectPage = crate::http::CursorPage<crate::Project>;
 pub type ProjectMembershipPage = crate::http::CursorPage<crate::ProjectMembership>;
 
@@ -145,9 +390,12 @@ impl ControlListQuery {
 #[must_use]
 pub fn course_governance_operation_action(operation: &str) -> Option<ObjectAction> {
     match operation {
-        "listCourseMemberships" => Some(ObjectAction::Browse),
+        "listCourseMemberships" | "getCourseCalendar" | "getCourseStudentView" => {
+            Some(ObjectAction::Browse)
+        }
         "createCourseMembershipInvitation"
-        | "listCourseMembershipInvitations"
+        | "updateCourseCalendar"
+        | "importCourseRoster"
         | "removeCourseMembership" => Some(ObjectAction::ManageMembers),
         _ => None,
     }
