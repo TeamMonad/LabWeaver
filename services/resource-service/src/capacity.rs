@@ -7,7 +7,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::{Duration, Instant};
 
 use auth::ServiceTokenClient;
 use contracts::UtcTimestamp;
@@ -17,15 +21,20 @@ use contracts::environment::{
 };
 use contracts::resource::{GpuAllocationMode, GpuCatalogEntry, ResourceLeaseState, ResourceTarget};
 use contracts::{GpuCatalogEntryId, Revision};
+use futures_util::StreamExt;
+use k8s_openapi::api::core::v1::{Node, Pod};
+use kube::api::Api;
+use kube::runtime::{reflector, watcher};
+use kube::{Client as KubeClient, Config as KubeConfig};
 use reqwest::{Certificate, Client, StatusCode};
-use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::watch;
 use url::Url;
 
 use crate::store::{ActiveGpuReservation, ActiveReservationTarget};
 
-const MAX_KUBERNETES_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_KUBERNETES_LIST_ITEMS: u32 = 100_000;
 const MAX_KUBERNETES_TOKEN_BYTES: usize = 16 * 1024;
 const MAX_KUBERNETES_CA_BYTES: usize = 1024 * 1024;
@@ -188,14 +197,173 @@ impl GpuCapacityObservationConfiguration {
 }
 
 #[derive(Clone)]
+struct ObservationFreshness {
+    fresh: Arc<AtomicBool>,
+    last_fresh: Arc<tokio::sync::RwLock<Option<Instant>>>,
+    reason: Arc<tokio::sync::RwLock<&'static str>>,
+}
+
+impl ObservationFreshness {
+    fn new() -> Self {
+        Self {
+            fresh: Arc::new(AtomicBool::new(false)),
+            last_fresh: Arc::new(tokio::sync::RwLock::new(None)),
+            reason: Arc::new(tokio::sync::RwLock::new("initial relist pending")),
+        }
+    }
+
+    async fn mark_stale(&self, reason: &'static str) {
+        self.fresh.store(false, Ordering::Release);
+        *self.reason.write().await = reason;
+    }
+
+    async fn mark_fresh(&self) {
+        *self.last_fresh.write().await = Some(Instant::now());
+        self.fresh.store(true, Ordering::Release);
+        *self.reason.write().await = "fresh";
+    }
+
+    async fn check(&self, ttl: Duration) -> Result<(), CapacityProviderError> {
+        if !self.fresh.load(Ordering::Acquire) {
+            return Err(CapacityProviderError::ObservationStale(
+                *self.reason.read().await,
+            ));
+        }
+        let last = *self.last_fresh.read().await;
+        if last.is_none_or(|instant| instant.elapsed() > ttl) {
+            self.mark_stale("observation freshness expired").await;
+            return Err(CapacityProviderError::ObservationStale(
+                "observation freshness expired",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct KubernetesObservationCache {
+    nodes: Arc<tokio::sync::RwLock<Vec<Value>>>,
+    pods: Arc<tokio::sync::RwLock<Vec<Value>>>,
+    node_freshness: ObservationFreshness,
+    pod_freshness: ObservationFreshness,
+    stop: watch::Sender<bool>,
+}
+
+impl KubernetesObservationCache {
+    fn new(client: KubeClient, max_nodes: usize, max_pods: usize) -> Self {
+        let (stop, _) = watch::channel(false);
+        let nodes = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let pods = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let node_freshness = ObservationFreshness::new();
+        let pod_freshness = ObservationFreshness::new();
+        tokio::spawn(run_reflector(
+            Api::<Node>::all(client.clone()),
+            nodes.clone(),
+            node_freshness.clone(),
+            max_nodes,
+            stop.subscribe(),
+            "node watch disconnected",
+        ));
+        tokio::spawn(run_reflector(
+            Api::<Pod>::all(client),
+            pods.clone(),
+            pod_freshness.clone(),
+            max_pods,
+            stop.subscribe(),
+            "pod watch disconnected",
+        ));
+        Self {
+            nodes,
+            pods,
+            node_freshness,
+            pod_freshness,
+            stop,
+        }
+    }
+
+    fn shutdown(&self) {
+        let _ = self.stop.send(true);
+    }
+}
+
+async fn run_reflector<K>(
+    api: Api<K>,
+    target: Arc<tokio::sync::RwLock<Vec<Value>>>,
+    freshness: ObservationFreshness,
+    max_items: usize,
+    mut stop: watch::Receiver<bool>,
+    disconnect_reason: &'static str,
+) where
+    K: kube::Resource
+        + Clone
+        + std::fmt::Debug
+        + DeserializeOwned
+        + Serialize
+        + Send
+        + Sync
+        + 'static,
+    K::DynamicType: Default + Eq + std::hash::Hash + Clone,
+{
+    let page_size = u32::try_from(max_items).unwrap_or(u32::MAX);
+    loop {
+        if *stop.borrow() {
+            return;
+        }
+        let (reader, writer) = reflector::store::<K>();
+        let stream = watcher(api.clone(), watcher::Config::default().page_size(page_size));
+        let mut reflected = Box::pin(reflector(writer, stream));
+        let mut reconnect = false;
+        while !reconnect {
+            tokio::select! {
+                changed = stop.changed() => {
+                    if changed.is_err() || *stop.borrow() { return; }
+                }
+                event = reflected.next() => {
+                    match event {
+                        Some(Ok(watcher::Event::Init)) => freshness.mark_stale("relist in progress").await,
+                        Some(Ok(watcher::Event::InitDone)) if reader.len() <= max_items => {
+                            let snapshot = reader.state().into_iter()
+                                .map(|object| serde_json::to_value(object.as_ref()))
+                                .collect::<Result<Vec<_>, _>>();
+                            match snapshot {
+                                Ok(snapshot) => {
+                                    *target.write().await = snapshot;
+                                    freshness.mark_fresh().await;
+                                }
+                                Err(_) => freshness.mark_stale("relist object serialization failed").await,
+                            }
+                        }
+                        Some(Ok(watcher::Event::InitDone)) => {
+                            freshness.mark_stale("observation item bound exceeded").await;
+                        }
+                        Some(Ok(_)) => {}
+                        Some(Err(error)) => {
+                            tracing::warn!(event = "resource.gpu_capacity.watch_failed", error = %error);
+                            freshness.mark_stale(disconnect_reason).await;
+                            reconnect = true;
+                        }
+                        None => {
+                            freshness.mark_stale(disconnect_reason).await;
+                            reconnect = true;
+                        }
+                    }
+                }
+            }
+        }
+        tokio::select! {
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() { return; }
+            }
+            () = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+    }
+}
+
+#[derive(Clone)]
 struct KubernetesGpuCapacityObserver {
     provider_binding: String,
-    api_server: Url,
-    client: Client,
-    token_file: PathBuf,
     observation_ttl: Duration,
-    max_nodes: usize,
-    max_pods: usize,
+    cache: KubernetesObservationCache,
 }
 
 impl KubernetesGpuCapacityObserver {
@@ -203,9 +371,6 @@ impl KubernetesGpuCapacityObserver {
         configuration: GpuCapacityObservationConfiguration,
     ) -> Result<Self, CapacityProviderError> {
         configuration.validate()?;
-        // Validate the initial projected token, but retain only its controlled file path. Service
-        // account token projections rotate in place; caching the initial string would leave a
-        // long-running observer permanently unauthorized after the first rotation.
         read_bearer_token(&configuration.bearer_token_file)
             .map_err(|_| CapacityProviderError::Configuration)?;
         let ca = std::fs::read(&configuration.cluster_ca_file)
@@ -213,39 +378,55 @@ impl KubernetesGpuCapacityObserver {
         if ca.len() > MAX_KUBERNETES_CA_BYTES {
             return Err(CapacityProviderError::Configuration);
         }
-        let client = Client::builder()
-            .no_proxy()
-            .https_only(true)
-            .tls_built_in_root_certs(false)
-            .add_root_certificate(
-                Certificate::from_pem(&ca).map_err(|_| CapacityProviderError::Configuration)?,
-            )
-            .timeout(Duration::from_millis(
-                configuration.request_timeout_milliseconds,
-            ))
-            .build()
+        let uri = configuration
+            .api_server
+            .as_str()
+            .parse()
             .map_err(|_| CapacityProviderError::Configuration)?;
+        let mut config = KubeConfig::new(uri);
+        config.root_cert = Some(vec![ca]);
+        config.auth_info.token_file = Some(
+            configuration
+                .bearer_token_file
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let timeout = Duration::from_millis(configuration.request_timeout_milliseconds);
+        config.connect_timeout = Some(timeout);
+        config.read_timeout = Some(timeout);
+        config.write_timeout = Some(timeout);
+        let client =
+            KubeClient::try_from(config).map_err(|_| CapacityProviderError::Configuration)?;
+        let cache = KubernetesObservationCache::new(
+            client,
+            configuration.max_nodes as usize,
+            configuration.max_pods as usize,
+        );
         Ok(Self {
             provider_binding: configuration.provider_binding,
-            api_server: configuration.api_server,
-            client,
-            token_file: configuration.bearer_token_file,
             observation_ttl: Duration::from_secs(configuration.observation_ttl_seconds),
-            max_nodes: configuration.max_nodes as usize,
-            max_pods: configuration.max_pods as usize,
+            cache,
         })
+    }
+    fn shutdown(&self) {
+        self.cache.shutdown();
     }
 
     async fn observe(
         &self,
         entries: &[contracts::resource::GpuCatalogEntry],
         active_reservations: &[ActiveGpuReservation],
-    ) -> Result<BTreeMap<contracts::GpuCatalogEntryId, u32>, CapacityProviderError> {
+    ) -> Result<BTreeMap<GpuCatalogEntryId, u32>, CapacityProviderError> {
         if entries.is_empty() {
             return Err(CapacityProviderError::ObservationReadback);
         }
-        let nodes = self.list("api/v1/nodes", self.max_nodes).await?;
-        let pods = self.list("api/v1/pods", self.max_pods).await?;
+        self.cache
+            .node_freshness
+            .check(self.observation_ttl)
+            .await?;
+        self.cache.pod_freshness.check(self.observation_ttl).await?;
+        let nodes = self.cache.nodes.read().await.clone();
+        let pods = self.cache.pods.read().await.clone();
         let mut observed = BTreeMap::new();
         let bindings = entries
             .iter()
@@ -293,78 +474,6 @@ impl KubernetesGpuCapacityObserver {
             }
         }
         Ok(observed)
-    }
-
-    async fn list(&self, path: &str, limit: usize) -> Result<Vec<Value>, CapacityProviderError> {
-        // Re-read the source-controlled projected token for every request. There is no fallback
-        // credential: a missing or malformed rotation makes this observation unavailable and
-        // leaves the last durable snapshot to expire normally.
-        let token = read_bearer_token(&self.token_file).map_err(|error| {
-            tracing::warn!(
-                event = "resource.gpu_capacity.token_read_failed",
-                diagnostic_code = error.diagnostic(),
-                retryable = true,
-            );
-            CapacityProviderError::ObservationUnavailable
-        })?;
-        let mut url = self
-            .api_server
-            .join(path)
-            .map_err(|_| CapacityProviderError::Configuration)?;
-        url.query_pairs_mut()
-            .append_pair("limit", &limit.to_string());
-        let response = self
-            .client
-            .get(url)
-            .bearer_auth(token)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(|_| CapacityProviderError::ObservationUnavailable)?;
-        if response.status() == StatusCode::UNAUTHORIZED
-            || response.status() == StatusCode::FORBIDDEN
-        {
-            return Err(CapacityProviderError::ObservationPermissionDenied);
-        }
-        if !response.status().is_success() {
-            return Err(CapacityProviderError::ObservationUnavailable);
-        }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_KUBERNETES_RESPONSE_BYTES as u64)
-        {
-            return Err(CapacityProviderError::ObservationBoundExceeded);
-        }
-        let body = response
-            .bytes()
-            .await
-            .map_err(|_| CapacityProviderError::ObservationUnavailable)?;
-        if body.len() > MAX_KUBERNETES_RESPONSE_BYTES {
-            return Err(CapacityProviderError::ObservationBoundExceeded);
-        }
-        let document: Value = serde_json::from_slice(&body)
-            .map_err(|_| CapacityProviderError::ObservationReadback)?;
-        let metadata = document
-            .get("metadata")
-            .and_then(Value::as_object)
-            .ok_or(CapacityProviderError::ObservationReadback)?;
-        if metadata
-            .get("continue")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.is_empty())
-        {
-            // A continue token means the bounded page omitted objects. Failing closed avoids
-            // authorizing capacity from a partial cluster view.
-            return Err(CapacityProviderError::ObservationBoundExceeded);
-        }
-        let items = document
-            .get("items")
-            .and_then(Value::as_array)
-            .ok_or(CapacityProviderError::ObservationReadback)?;
-        if items.len() > limit {
-            return Err(CapacityProviderError::ObservationBoundExceeded);
-        }
-        Ok(items.clone())
     }
 }
 
@@ -1559,6 +1668,12 @@ impl CapacityReconcileWorker {
         Ok(())
     }
 
+    fn shutdown_observers(&self) {
+        for observer in self.gpu_observers.values() {
+            observer.shutdown();
+        }
+    }
+
     /// Runs until shutdown.
     pub async fn run(
         &self,
@@ -1567,12 +1682,16 @@ impl CapacityReconcileWorker {
         let mut interval = tokio::time::interval(self.poll_interval);
         loop {
             if *shutdown.borrow() {
+                self.shutdown_observers();
                 return Ok(());
             }
             tokio::select! {
                 biased;
                 changed = shutdown.changed() => {
-                    if changed.is_err() || *shutdown.borrow() { return Ok(()); }
+                    if changed.is_err() || *shutdown.borrow() {
+                        self.shutdown_observers();
+                        return Ok(());
+                    }
                 }
                 _ = interval.tick() => {
                     match self.reconcile_once(&shutdown).await {
@@ -1589,7 +1708,10 @@ impl CapacityReconcileWorker {
                                 retryable = true,
                             );
                         }
-                        Err(error) => return Err(error),
+                        Err(error) => {
+                            self.shutdown_observers();
+                            return Err(error);
+                        }
                     }
                 }
             }
@@ -1627,6 +1749,8 @@ pub enum CapacityProviderError {
     ObservationProviderMissing,
     #[error("LW_RESOURCE_GPU_OBSERVATION_BINDING_MISMATCH")]
     ObservationBindingMismatch,
+    #[error("LW_RESOURCE_GPU_OBSERVATION_STALE: {0}")]
+    ObservationStale(&'static str),
     #[error("LW_RESOURCE_GPU_OBSERVATION_UNAVAILABLE")]
     ObservationUnavailable,
     #[error("LW_RESOURCE_GPU_OBSERVATION_PERMISSION_DENIED")]
@@ -1655,6 +1779,7 @@ impl CapacityProviderError {
             Self::EnvironmentAuthentication => "LW_RESOURCE_ENVIRONMENT_AUTHENTICATION_FAILED",
             Self::ObservationProviderMissing => "LW_RESOURCE_GPU_OBSERVATION_PROVIDER_MISSING",
             Self::ObservationBindingMismatch => "LW_RESOURCE_GPU_OBSERVATION_BINDING_MISMATCH",
+            Self::ObservationStale(_) => "LW_RESOURCE_GPU_OBSERVATION_STALE",
             Self::ObservationUnavailable => "LW_RESOURCE_GPU_OBSERVATION_UNAVAILABLE",
             Self::ObservationPermissionDenied => "LW_RESOURCE_GPU_OBSERVATION_PERMISSION_DENIED",
             Self::ObservationReadback => "LW_RESOURCE_GPU_OBSERVATION_RESPONSE_INVALID",
@@ -1666,7 +1791,196 @@ impl CapacityProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::Router;
+    use axum::body::{Body, Bytes};
+    use axum::extract::State;
+    use axum::http::{Request, Response, StatusCode};
+    use axum::routing::any;
+    use futures_util::stream;
     use serde_json::json;
+    use std::convert::Infallible;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::net::TcpListener;
+    use tokio::sync::Notify;
+
+    const PAGINATED: u8 = 1;
+    const GONE_RELIST: u8 = 2;
+    const DISCONNECT: u8 = 3;
+    const HEALTH_CHANGE: u8 = 4;
+
+    #[derive(Clone)]
+    struct FakeApi {
+        mode: u8,
+        node_lists: Arc<AtomicUsize>,
+        pod_lists: Arc<AtomicUsize>,
+        node_watches: Arc<AtomicUsize>,
+        gate: Arc<Notify>,
+        relist_gate: Arc<Notify>,
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn json_response(status: StatusCode, body: Value) -> Response<Body> {
+        let mut response = Response::new(Body::from(body.to_string()));
+        *response.status_mut() = status;
+        response.headers_mut().insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        response
+    }
+
+    fn watch_response(state: FakeApi, event: Option<Value>, close: bool) -> Response<Body> {
+        let bytes = event
+            .map(|event| Bytes::from(format!("{{\"type\":\"MODIFIED\",\"object\":{event}}}\n")));
+        let body = if close {
+            Body::from_stream(stream::once(async move {
+                Ok::<Bytes, Infallible>(bytes.unwrap_or_default())
+            }))
+        } else {
+            Body::from_stream(stream::unfold(
+                (bytes, state),
+                |(bytes, state)| async move {
+                    if let Some(bytes) = bytes {
+                        Some((Ok::<Bytes, Infallible>(bytes), (None, state)))
+                    } else {
+                        state.gate.notified().await;
+                        None
+                    }
+                },
+            ))
+        };
+        let mut response = Response::new(body);
+        response.headers_mut().insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        response
+    }
+
+    async fn fake_api(State(state): State<FakeApi>, request: Request<Body>) -> Response<Body> {
+        let path = request.uri().path();
+        let query = request.uri().query().unwrap_or_default();
+        let watching = query.split('&').any(|part| part == "watch=true");
+        let is_node = path.ends_with("/nodes");
+        if watching {
+            if !is_node {
+                return watch_response(state, None, false);
+            }
+            let watch_number = state.node_watches.fetch_add(1, Ordering::SeqCst) + 1;
+            if state.mode == GONE_RELIST && watch_number == 1 {
+                return json_response(
+                    StatusCode::GONE,
+                    json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Gone","code":410}),
+                );
+            }
+            if state.mode == DISCONNECT && watch_number == 1 {
+                state.gate.notified().await;
+                return json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    json!({"status":"Failure"}),
+                );
+            }
+            if state.mode == HEALTH_CHANGE && watch_number == 1 {
+                return watch_response(state, Some(node("gpu-a", false, false, &json!("0"))), true);
+            }
+            return watch_response(state, None, false);
+        }
+        let is_continued = query.split('&').any(|part| part.starts_with("continue="));
+        let items = if is_node {
+            let root_list = state.node_lists.fetch_add(1, Ordering::SeqCst) + 1;
+            if state.mode == DISCONNECT && root_list > 1 {
+                state.relist_gate.notified().await;
+            }
+            #[allow(clippy::match_same_arms)]
+            match state.mode {
+                PAGINATED if !is_continued => vec![node("gpu-a", true, false, &json!("1"))],
+                PAGINATED => vec![node("gpu-b", true, false, &json!("1"))],
+                GONE_RELIST if root_list == 1 => vec![node("gpu-a", true, false, &json!("1"))],
+                GONE_RELIST => vec![node("gpu-b", true, false, &json!("1"))],
+                HEALTH_CHANGE if root_list == 1 => vec![node("gpu-a", true, false, &json!("1"))],
+                HEALTH_CHANGE => vec![node("gpu-a", false, false, &json!("0"))],
+                _ => vec![node("gpu-a", true, false, &json!("1"))],
+            }
+        } else {
+            state.pod_lists.fetch_add(1, Ordering::SeqCst);
+            Vec::new()
+        };
+        let continued = if is_node && state.mode == PAGINATED && !is_continued {
+            "page-2"
+        } else {
+            ""
+        };
+        json_response(
+            StatusCode::OK,
+            json!({
+                "apiVersion":"v1", "kind": if is_node { "NodeList" } else { "PodList" },
+                "metadata": {"resourceVersion": "1", "continue": continued}, "items": items
+            }),
+        )
+    }
+
+    async fn start_fake_api(
+        mode: u8,
+    ) -> Result<(FakeApi, KubeClient, tokio::task::JoinHandle<()>), Box<dyn std::error::Error>>
+    {
+        let state = FakeApi {
+            mode,
+            node_lists: Arc::new(AtomicUsize::new(0)),
+            pod_lists: Arc::new(AtomicUsize::new(0)),
+            node_watches: Arc::new(AtomicUsize::new(0)),
+            gate: Arc::new(Notify::new()),
+            relist_gate: Arc::new(Notify::new()),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let router = Router::new()
+            .fallback(any(fake_api))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        let config = KubeConfig::new(format!("http://{address}").parse()?);
+        let client = KubeClient::try_from(config)?;
+        Ok((state, client, server))
+    }
+
+    async fn wait_for_fresh(
+        cache: &KubernetesObservationCache,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if cache
+                    .node_freshness
+                    .check(Duration::from_secs(30))
+                    .await
+                    .is_ok()
+                    && cache
+                        .pod_freshness
+                        .check(Duration::from_secs(30))
+                        .await
+                        .is_ok()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
+    fn entry() -> Result<GpuCatalogEntry, Box<dyn std::error::Error>> {
+        Ok(GpuCatalogEntry {
+            id: GpuCatalogEntryId::new(),
+            class: "gpu".into(),
+            mode: GpuAllocationMode::Exclusive,
+            provider_binding: "test-provider".into(),
+            capacity_units: 1,
+            allocation_binding: "nvidia.com/gpu".into(),
+            revision: Revision::new(1)?,
+            active: true,
+        })
+    }
 
     fn node(name: &str, ready: bool, unschedulable: bool, units: &Value) -> Value {
         json!({
@@ -1877,146 +2191,230 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(
-        clippy::too_many_lines,
-        reason = "one real process regression keeps the external observer gate and PostgreSQL acquisition witness together"
-    )]
-    async fn shutdown_during_gpu_observation_does_not_enter_capacity_claim_scan()
+    async fn observation_cache_starts_stale_and_disconnect_is_readable()
     -> Result<(), Box<dyn std::error::Error>> {
-        use persistence_sqlx::{Domain, MigrationCatalog};
-        use testcontainers::{ImageExt, runners::AsyncRunner};
-        use testcontainers_modules::postgres::Postgres;
-        if std::env::var_os("LW_CAPACITY_DRAIN_HELPER").is_none() {
-            let output = tokio::time::timeout(Duration::from_secs(90), tokio::process::Command::new(std::env::current_exe()?)
-                .args(["--exact", "capacity::tests::shutdown_during_gpu_observation_does_not_enter_capacity_claim_scan", "--nocapture"])
-                .env("LW_CAPACITY_DRAIN_HELPER", "1").kill_on_drop(true).output()).await??;
-            assert!(
-                output.status.success(),
-                "capacity process shutdown regression failed:\n{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return Ok(());
-        }
-        let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
-        let pool = sqlx::PgPool::connect(&format!(
-            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
-            postgres.get_host_port_ipv4(5432).await?
-        ))
-        .await?;
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
-        let catalog = MigrationCatalog::load(&root.join("catalog.yaml"))?;
-        let mut connection = pool.acquire().await?;
-        sqlx::raw_sql("CREATE SCHEMA resource; SET search_path TO resource,pg_catalog")
-            .execute(&mut *connection)
-            .await?;
-        for migration in &catalog
-            .domains
+        let freshness = ObservationFreshness::new();
+        let error = freshness
+            .check(Duration::from_secs(30))
+            .await
+            .err()
+            .ok_or("initial cache unexpectedly fresh")?;
+        assert!(matches!(
+            error,
+            CapacityProviderError::ObservationStale("initial relist pending")
+        ));
+        freshness.mark_fresh().await;
+        assert!(freshness.check(Duration::from_secs(30)).await.is_ok());
+        freshness.mark_stale("watch disconnected").await;
+        let error = freshness
+            .check(Duration::from_secs(30))
+            .await
+            .err()
+            .ok_or("disconnected cache unexpectedly fresh")?;
+        assert!(matches!(
+            error,
+            CapacityProviderError::ObservationStale("watch disconnected")
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn observation_cache_expires_by_explicit_freshness_timestamp()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let freshness = ObservationFreshness::new();
+        freshness.mark_fresh().await;
+        let error = freshness
+            .check(Duration::ZERO)
+            .await
+            .err()
+            .ok_or("expired cache unexpectedly fresh")?;
+        assert!(matches!(
+            error,
+            CapacityProviderError::ObservationStale("observation freshness expired")
+        ));
+        Ok(())
+    }
+    #[tokio::test]
+    async fn reflector_initial_list_paginates_all_objects() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (state, client, server) = start_fake_api(PAGINATED).await?;
+        let cache = KubernetesObservationCache::new(client, 10, 10);
+        wait_for_fresh(&cache).await?;
+        let node_snapshot = cache.nodes.read().await;
+        let names = node_snapshot
             .iter()
-            .find(|domain| domain.name == Domain::Resource)
-            .ok_or("resource catalog")?
-            .migrations
-        {
-            sqlx::raw_sql(sqlx::AssertSqlSafe(MigrationCatalog::read_verified_sql(
-                &root, migration,
-            )?))
-            .execute(&mut *connection)
-            .await?;
-        }
-        sqlx::query("RESET search_path")
-            .execute(&mut *connection)
-            .await?;
-        drop(connection);
-        let store = crate::store::PgResourceStore::new(pool.clone());
-        store
-            .seed_gpu_catalog(&[GpuCatalogSeed {
-                class: "test-gpu".into(),
-                mode: GpuAllocationMode::Exclusive,
-                provider_binding: "test-provider".into(),
-                capacity_units: 1,
-                allocation_binding: "nvidia.com/gpu".into(),
-            }])
-            .await?;
-        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
-        let resume = std::sync::Arc::new(tokio::sync::Notify::new());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let base = format!("http://{}", listener.local_addr()?);
-        let issuer = base.clone();
-        let app = axum::Router::new()
-            .route("/.well-known/openid-configuration", axum::routing::get(move || { let issuer=issuer.clone(); async move { axum::Json(json!({"issuer":format!("{issuer}/"),"authorization_endpoint":format!("{issuer}/authorize"),"token_endpoint":format!("{issuer}/token"),"jwks_uri":format!("{issuer}/keys"),"response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]})) } }))
-            .route("/keys", axum::routing::get(|| async { axum::Json(json!({"keys":[]})) }))
-            .route("/api/v1/nodes", axum::routing::get({ let entered=entered.clone(); let resume=resume.clone(); move || { let entered=entered.clone(); let resume=resume.clone(); async move { entered.notify_one(); resume.notified().await; axum::Json(json!({"items":[]})) } } }))
-            .route("/api/v1/pods", axum::routing::get(|| async { axum::Json(json!({"items":[]})) }));
-        let mut server_tasks = tokio::task::JoinSet::new();
-        server_tasks.spawn(async move { axum::serve(listener, app).await });
-        let client = Client::builder().no_proxy().build()?;
-        let tokens = ServiceTokenClient::discover(
-            auth::ServiceTokenClientConfig::new(
-                &base,
-                "unused-observer-test".into(),
-                "unused".into(),
-                "environment".into(),
-                std::collections::BTreeSet::new(),
-                1,
-                auth::TransportSecurityMode::InsecureTestOnly,
-            )?,
-            client.clone(),
-        )
+            .filter_map(|object| object["metadata"]["name"].as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(names, BTreeSet::from(["gpu-a", "gpu-b"]));
+        assert!(state.node_lists.load(Ordering::SeqCst) >= 2);
+        cache.shutdown();
+        server.abort();
+        let _ = server.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn gone_watch_relists_and_removes_object_from_cache()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (state, client, server) = start_fake_api(GONE_RELIST).await?;
+        let cache = KubernetesObservationCache::new(client, 10, 10);
+        wait_for_fresh(&cache).await?;
+        let node_snapshot = cache.nodes.read().await;
+        let names = node_snapshot
+            .iter()
+            .filter_map(|object| object["metadata"]["name"].as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(names, BTreeSet::from(["gpu-b"]));
+        assert!(state.node_lists.load(Ordering::SeqCst) >= 2);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if state.node_watches.load(Ordering::SeqCst) >= 2 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
         .await?;
-        let token_file = tempfile::NamedTempFile::new()?;
-        std::fs::write(token_file.path(), "external-kubernetes-fixture-token")?;
+        cache.shutdown();
+        server.abort();
+        let _ = server.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watch_disconnect_is_stale_until_relist_completes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (state, client, server) = start_fake_api(DISCONNECT).await?;
+        let cache = KubernetesObservationCache::new(client, 10, 10);
+        wait_for_fresh(&cache).await?;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        state.gate.notify_waiters();
+        state.gate.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if cache
+                    .node_freshness
+                    .check(Duration::from_secs(30))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_| "disconnect did not become stale")?;
+        assert!(matches!(
+            cache.node_freshness.check(Duration::from_secs(30)).await,
+            Err(CapacityProviderError::ObservationStale(_))
+        ));
+        state.relist_gate.notify_waiters();
+        state.relist_gate.notify_one();
+        wait_for_fresh(&cache)
+            .await
+            .map_err(|_| "relist did not become fresh")?;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if state.node_watches.load(Ordering::SeqCst) >= 2 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        cache.shutdown();
+        server.abort();
+        let _ = server.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn repeated_capacity_queries_do_not_repeat_control_plane_reads()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (state, client, server) = start_fake_api(PAGINATED).await?;
+        let cache = KubernetesObservationCache::new(client, 10, 10);
+        wait_for_fresh(&cache).await?;
         let observer = KubernetesGpuCapacityObserver {
             provider_binding: "test-provider".into(),
-            api_server: format!("{base}/").parse()?,
-            client: client.clone(),
-            token_file: token_file.path().to_owned(),
-            observation_ttl: Duration::from_secs(10),
-            max_nodes: 10,
-            max_pods: 10,
+            observation_ttl: Duration::from_secs(30),
+            cache: cache.clone(),
         };
-        let worker = CapacityReconcileWorker {
-            store,
-            environment_handoff: EnvironmentHandoffClient {
-                base_uri: format!("{base}/").parse()?,
-                client,
-                token_client: tokens,
-                system_actor_id: contracts::ActorId::new(),
-            },
-            gpu_observers: BTreeMap::from([("test-provider".into(), observer)]),
-            poll_interval: Duration::from_millis(100),
-            active_cleanup_cursor: tokio::sync::Mutex::new(None),
-        };
-        let shutdown = crate::service_runtime::subscribe_shutdown();
-        let mut workers = tokio::task::JoinSet::new();
-        workers.spawn(crate::service_runtime::supervise(
-            "capacity-test",
-            async move { worker.run(shutdown).await },
-        ));
-        tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
-        // The exclusive table lock is a deterministic witness: entering the real claim scan
-        // after the external observer returns would block, even with an empty task queue.
-        let mut barrier = pool.begin().await?;
-        sqlx::query("LOCK TABLE resource.capacity_claims IN ACCESS EXCLUSIVE MODE")
-            .execute(&mut *barrier)
-            .await?;
-        assert!(
-            tokio::process::Command::new("kill")
-                .args(["-TERM", &std::process::id().to_string()])
-                .status()
-                .await?
-                .success()
+        let entry = entry()?;
+        for _ in 0..25 {
+            let _ = observer.observe(std::slice::from_ref(&entry), &[]).await?;
+        }
+        let lists = (
+            state.node_lists.load(Ordering::SeqCst),
+            state.pod_lists.load(Ordering::SeqCst),
         );
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            crate::service_runtime::wait_for_shutdown(),
-        )
+        let watches = state.node_watches.load(Ordering::SeqCst);
+        for _ in 0..25 {
+            let _ = observer.observe(std::slice::from_ref(&entry), &[]).await?;
+        }
+        assert_eq!(
+            lists,
+            (
+                state.node_lists.load(Ordering::SeqCst),
+                state.pod_lists.load(Ordering::SeqCst)
+            )
+        );
+        assert_eq!(watches, state.node_watches.load(Ordering::SeqCst));
+        cache.shutdown();
+        server.abort();
+        let _ = server.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn node_health_change_removes_capacity_from_sale()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (state, client, server) = start_fake_api(HEALTH_CHANGE).await?;
+        let cache = KubernetesObservationCache::new(client, 10, 10);
+        wait_for_fresh(&cache).await?;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if state.node_lists.load(Ordering::SeqCst) >= 2 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
         .await?;
-        resume.notify_one();
-        let result = tokio::time::timeout(Duration::from_secs(1), workers.join_next()).await;
-        barrier.rollback().await?;
-        result
-            .map_err(|_| "shutdown allowed a new capacity claim after observer I/O")?
-            .ok_or("worker missing")???;
+        wait_for_fresh(&cache).await?;
+        let observer = KubernetesGpuCapacityObserver {
+            provider_binding: "test-provider".into(),
+            observation_ttl: Duration::from_secs(30),
+            cache: cache.clone(),
+        };
+        let observations = observer.observe(&[entry()?], &[]).await?;
+        assert_eq!(observations.values().copied().collect::<Vec<_>>(), vec![0]);
+        cache.shutdown();
+        server.abort();
+        let _ = server.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn observer_shutdown_stops_reconnect_tasks() -> Result<(), Box<dyn std::error::Error>> {
+        let (state, client, server) = start_fake_api(PAGINATED).await?;
+        let cache = KubernetesObservationCache::new(client, 10, 10);
+        wait_for_fresh(&cache).await?;
+        let before = (
+            state.node_lists.load(Ordering::SeqCst),
+            state.node_watches.load(Ordering::SeqCst),
+        );
+        cache.shutdown();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            before,
+            (
+                state.node_lists.load(Ordering::SeqCst),
+                state.node_watches.load(Ordering::SeqCst)
+            )
+        );
+        server.abort();
+        let _ = server.await;
         Ok(())
     }
 }
