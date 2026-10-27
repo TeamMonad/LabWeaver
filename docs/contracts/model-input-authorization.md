@@ -56,7 +56,7 @@ Agent 复核客户端读取下列四项现有命名的配置：
 
 四项全缺时，仅新的模型派发以 `LW_MODEL_INPUT_AUTHORIZATION_UNAVAILABLE` 失败，Agent 其他 API、诊断及清理仍能启动。部分缺失或无效值明确使配置加载失败。复核 HTTP 拒绝重定向，只接收 200，并有界读取响应；无法获得所需 service token 或服务返回拒绝时，不启动模型。
 
-Bundle/Helm 从同一 Control 连接来源给 Agent 提供四项配置；服务账户需要已有 `control.agent_run.read`，Control 的入口 caller allowlist 必须包含实际 Agent 身份。网络策略允许 Agent 调用 Control 的 9444/TCP。配置/角色字符串不代表实际 IdP 已创建授权，部署后仍须验证 JWT、CA/DNS 与连通性。
+Bundle/Helm 从同一 Control 连接来源给 Agent 提供四项配置；身份默认配置授予服务账户对 `labweaver-control` 的最小 `control.agent_run.read` 角色。Control 的入口 caller allowlist 必须包含实际 Agent 身份，且网络策略允许 Agent 调用 Control 的 9444/TCP。配置/角色字符串不代表实际 IdP 已创建授权，部署后仍须验证 JWT、CA/DNS 与连通性。
 
 ## Sandbox 内的工具与模型请求
 

@@ -94,6 +94,9 @@ identity_service_role_assignments: # noqa: var-naming[no-role-prefix]
     target: labweaver-environment
     roles: [evaluation.environment.freeze, environment:resolve_evaluation_execution_binding]
   - caller: labweaver-agent
+    target: labweaver-control
+    roles: [control.agent_run.read]
+  - caller: labweaver-agent
     target: labweaver-environment
     roles: [environment.work.configure, environment:resolve_work_execution_binding]
   - caller: labweaver-evaluation

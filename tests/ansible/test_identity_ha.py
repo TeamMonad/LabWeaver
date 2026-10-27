@@ -1,6 +1,7 @@
 """Render the identity role and validate real Bundle boundaries, without database mocks."""
 import copy
 import json
+import re
 from pathlib import Path
 import sys
 import subprocess
@@ -29,10 +30,170 @@ def render(template, context):
     environment = Environment(undefined=StrictUndefined)
     environment.filters["to_json"] = json.dumps
     environment.filters["urlsplit"] = lambda value, field: getattr(urlsplit(value), field)
+    environment.filters["bool"] = lambda value: value is True or str(value).lower() == "true"
     return list(yaml.safe_load_all(environment.from_string((ROLE / "templates" / template).read_text()).render(**context)))
+
+def missing_runtime_service_grants(values, assignments):
+    missing = []
+    declared_callers = set()
+    for workload in values["workloads"].values():
+        environment = workload.get("env", {})
+        caller = environment.get("LABWEAVER_SERVICE_CLIENT_ID")
+        raw_scopes = environment.get("LABWEAVER_SERVICE_SCOPES")
+        if not caller or not raw_scopes:
+            continue
+        declared_callers.add(caller)
+        for key, raw_scopes in environment.items():
+            if not key.endswith("_SCOPES"):
+                continue
+            for role in re.split(r"[,\s]+", raw_scopes):
+                target = None if key == "LABWEAVER_SERVICE_SCOPES" else environment.get(key.removesuffix("_SCOPES") + "_AUDIENCE")
+                if target is None:
+                    parts = role.split(".")
+                    # These routes are owned by Environment, not the caller
+                    # named in the first permission segment.
+                    owner = "environment" if len(parts) > 1 and parts[1] == "environment" else parts[0].split(":")[0]
+                    target = "labweaver-" + owner
+                # The Agent's generic list includes its inbound API role,
+                # which no Agent client requests from itself.
+                if caller == target == "labweaver-agent" and role == "agent.control.invoke":
+                    continue
+                if not any(
+                    item["caller"] == caller
+                    and item["target"] == target
+                    and role in item["roles"]
+                    for item in assignments
+                ):
+                    missing.append((caller, target, role))
+    return missing, declared_callers
+
+
+def source_token_requests():
+    """Read native literal targets/roles alongside the dynamic Helm scopes."""
+    requests = set()
+    for source in (ROOT / "services").glob("*-service/src/**/*.rs"):
+        caller = "labweaver-" + source.relative_to(ROOT / "services").parts[0].removesuffix("-service")
+        text = source.read_text()
+        for target, scopes in re.findall(
+            r'ServiceTokenTarget\s*\{\s*audience:\s*"([^"]+)",\s*scopes:\s*&\[([^]]+)\]',
+            text,
+        ):
+            for role in re.findall(r'"([^"]+)"', scopes):
+                requests.add((caller, target, role))
+        groups = re.findall(
+            r'const\s+(?:[A-Z_]*REQUIRED_SCOPES?|ENVIRONMENT_FREEZE_SCOPE)\s*:[^=]+=(.*?);',
+            text,
+            re.DOTALL,
+        )
+        groups.extend(re.findall(
+            r'\.bearer_auth_for\([^;]*?&BTreeSet::from\(\[(.*?)\]\)',
+            text,
+            re.DOTALL,
+        ))
+        for group in groups:
+            for role in re.findall(r'"([a-z]+[.:][a-z_.:]+)"', group):
+                parts = role.split(".")
+                owner = "environment" if len(parts) > 1 and parts[1] == "environment" else parts[0].split(":")[0]
+                requests.add((caller, "labweaver-" + owner, role))
+    return requests
 
 
 class IdentityHATests(unittest.TestCase):
+    def test_local_realm_agent_control_roles_and_scope_mapping_enable_audience(self):
+        from test_local_dev import LocalDevBundleTests
+
+        applied = LocalDevBundleTests(methodName="runTest")._render_foundation_objects()
+        realm_config = next(
+            document for objects in applied for document in objects
+            if document.get("metadata", {}).get("name") == "keycloak-realm"
+        )
+        realm = json.loads(realm_config["data"]["workloads-realm.json"])
+        agent = next(client for client in realm["clients"] if client["clientId"] == "labweaver-agent")
+        account = next(user for user in realm["users"] if user.get("serviceAccountClientId") == "labweaver-agent")
+        self.assertFalse(agent["fullScopeAllowed"])
+        self.assertEqual(account["clientRoles"]["labweaver-control"], ["control.agent_run.read"])
+        self.assertIn(
+            {"client": "labweaver-agent", "roles": ["control.agent_run.read"]},
+            realm["clientScopeMappings"]["labweaver-control"],
+        )
+        self.assertTrue(any(
+            mapper["protocolMapper"] == "oidc-audience-resolve-mapper"
+            and mapper["config"]["access.token.claim"] == "true"
+            for mapper in agent["protocolMappers"]
+        ))
+
+    def test_runtime_service_scopes_have_matching_identity_grants_for_all_services(self):
+        values = yaml.safe_load((ROOT / "deploy/helm/labweaver/values.yaml").read_text())
+        assignments = self.context["identity_service_role_assignments"]
+        service_clients = {
+            service["client_id"]
+            for service in self.context["identity_service_clients"]
+        }
+        missing, declared_callers = missing_runtime_service_grants(values, assignments)
+        self.assertEqual(missing, [])
+        self.assertEqual(
+            declared_callers,
+            {"labweaver-access", "labweaver-agent", "labweaver-control",
+             "labweaver-environment", "labweaver-evaluation", "labweaver-resource"},
+        )
+        self.assertTrue(declared_callers <= service_clients)
+        native_requests = source_token_requests()
+        self.assertIn(("labweaver-agent", "labweaver-control", "control.agent_run.read"), native_requests)
+        for caller, target, role in native_requests:
+            self.assertTrue(
+                any(item["caller"] == caller and item["target"] == target and role in item["roles"] for item in assignments),
+                f"native token request {caller} -> {target}: {role} has no identity grant",
+            )
+        without_agent_control = [
+            item for item in assignments
+            if not (item["caller"] == "labweaver-agent" and item["target"] == "labweaver-control")
+        ]
+        missing_without_grant, _ = missing_runtime_service_grants(values, without_agent_control)
+        self.assertIn(
+            ("labweaver-agent", "labweaver-control", "control.agent_run.read"),
+            missing_without_grant,
+        )
+
+    def test_agent_control_grant_is_rendered_for_control_audience(self):
+        # Reuse the identity-template regression from 721b0a0c's
+        # test_bundle_agent_control.py; the old frozen-tree injector is not
+        # suitable for the now-merged native consumer.
+        context = dict(
+            self.context,
+            identity_run_suffix="regression",
+            identity_run_id="regression",
+            identity_cluster_uid={"stdout": "cluster"},
+            identity_secret_locator_sha256="sha256:" + "a" * 64,
+        )
+        assignment = next(
+            item for item in self.context["identity_service_role_assignments"]
+            if item["caller"] == "labweaver-agent"
+            and item["target"] == "labweaver-control"
+        )
+        self.assertEqual(assignment["roles"], ["control.agent_run.read"])
+        client = next(
+            item for item in self.context["identity_service_clients"]
+            if item["client_id"] == "labweaver-control"
+        )
+        self.assertEqual(client["audience"], "labweaver-control")
+        manifest = render("deployment-manifest.json.j2", context)[0]
+        self.assertIn(assignment, manifest["role_assignments"])
+        control_env = yaml.safe_load((ROOT / "deploy/helm/labweaver/values.yaml").read_text())["workloads"]["control-service"]["env"]
+        self.assertIn("labweaver-agent", control_env["LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS"].split(","))
+        network_policy = (ROOT / "deploy/helm/labweaver/templates/network-policy.yaml").read_text()
+        self.assertIn("values: [access-service, agent-service, environment-service, evaluation-service]", network_policy)
+        self.assertIn("ports: [{protocol: TCP, port: 9444}]", network_policy)
+        agent_client = (ROOT / "services/agent-service/src/model_input_authorization.rs").read_text()
+        self.assertIn('"LABWEAVER_CONTROL_SERVICE_AUDIENCE"', agent_client)
+        self.assertIn('"control.agent_run.read".to_owned()', agent_client)
+        provision_job = render("provision-job.yml.j2", context)[0]
+        provision_script = provision_job["spec"]["template"]["spec"]["containers"][0]["args"][0]
+        self.assertIn("protocolMapper=oidc-audience-resolve-mapper", provision_script)
+        self.assertIn('service-account-labweaver-agent" --cclientid "labweaver-control" --rolename "control.agent_run.read"', provision_script)
+        self.assertIn("fullScopeAllowed=false", provision_script)
+        self.assertNotIn("fullScopeAllowed=true", provision_script)
+        self.assertNotIn("composite=true", provision_script)
+
     def setUp(self):
         lock = yaml.safe_load((ROOT / "deploy/versions.lock.yml").read_text())
         self.context = yaml.safe_load((ROLE / "defaults/main.yml").read_text())
