@@ -132,6 +132,8 @@ fixture 使用现有安全 JSON 日志格式，只输出固定阶段、身份、
 
 优先覆盖用户行为、输入约束、负向权限、幂等、取消、恢复和资源释放。删除仅证明文件、类型或旧报告存在的测试；保留部署渲染后的实际权限和网络检查。
 
+Workspace 的 `unsafe_code` 为 `deny`。唯一允许的位置是 `services/agent-service/src/build_executor.rs` 的 `map_spool`(BuildKit 上传映射私有 spool 文件),`tests/ci/test_unsafe_allowlist.py` 在 CI 中强制这一点；新增 `allow(unsafe_code)` 需单独评审并同步更新该测试。
+
 测试输出用于排障和 PR 说明，不形成运行时准入报告。真实 GPU、KubeVirt、外部连接和集群部署未运行时必须写清未验证，不能以边界 Mock 代替。
 
 代码、配置和部署工具均使用项目相对路径。不要提交私有配置、令牌、用户提交、完整日志或生成的测试产物。具体数据库入口见 [数据库迁移](database-migrations.md)。

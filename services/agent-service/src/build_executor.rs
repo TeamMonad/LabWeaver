@@ -21,18 +21,17 @@ use bollard::grpc::build::{
 use bollard::grpc::driver::Image as _;
 use bollard::grpc::driver::buildkitd::BuildkitDaemon;
 use bollard::grpc::registry::ImageRegistryOutputBuilder;
-use bytes::Bytes;
 use contracts::BuildRequestId;
 use contracts::events::AgentBuildRequested;
 use contracts::supply_chain::BuildNetworkPolicy;
 use contracts::supply_chain::BuildSource;
+use memmap2::Mmap;
 use flate2::read::GzDecoder;
 use reqwest::{Certificate, Client, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
-use tempfile::TempDir;
-use tokio_util::sync::CancellationToken;
+use tempfile::{NamedTempFile, TempDir};
 use tonic::transport::{Certificate as TlsCertificate, ClientTlsConfig, Endpoint, Identity};
 
 use crate::build_pipeline::{
@@ -86,7 +85,7 @@ impl ProductionBuildExecutorConfig {
             || !self.docker_config_directory.is_absolute()
             || !self.work_directory.is_absolute()
             || self.max_unpacked_context_bytes == 0
-            || !self.buildkit_address.starts_with("tcp://")
+            || u32::try_from(self.max_unpacked_context_bytes).is_err()
             || self
                 .buildkit_address
                 .bytes()
@@ -110,6 +109,7 @@ pub struct ProductionBuildExecutor {
     config: ProductionBuildExecutorConfig,
     pool: PgPool,
     objects: Arc<S3ImmutableObjectStore>,
+    context_budget: Arc<Semaphore>,
     client: Client,
     harbor_username: String,
     harbor_password: String,
@@ -147,10 +147,16 @@ impl ProductionBuildExecutor {
             .add_root_certificate(harbor_ca)
             .build()
             .map_err(|_| rejected())?;
+        let context_budget = Arc::new(
+            Semaphore::new(
+                usize::try_from(config.max_unpacked_context_bytes).map_err(|_| rejected())?,
+            ),
+        );
         Ok(Self {
             config,
             pool,
             objects,
+            context_budget,
             client,
             harbor_username,
             harbor_password,
@@ -225,6 +231,40 @@ impl ProductionBuildExecutor {
         })
     }
 
+
+    async fn acquire_context_budget(
+        &self,
+        size_bytes: u64,
+        context: &BuildProviderRequestContext,
+        cancellation: &CancellationToken,
+    ) -> Result<OwnedSemaphorePermit, BuildProviderFailure> {
+        if size_bytes == 0 || size_bytes > self.config.max_unpacked_context_bytes {
+            tracing::warn!(
+                event = "agent.build_executor.context_size_rejected",
+                build_request_id = %context.build_request_id,
+                configured_limit_bytes = self.config.max_unpacked_context_bytes,
+                declared_size_bytes = size_bytes,
+                safe_detail = "build_context_exceeds_configured_limit",
+            );
+            return Err(rejected());
+        }
+        let permits = context_budget_permits(
+            self.config.max_unpacked_context_bytes,
+            size_bytes,
+        )?;
+        let acquire = self.context_budget.clone().acquire_many_owned(permits);
+        let remaining = std::time::Duration::try_from(
+            context.deadline_at.get() - time::OffsetDateTime::now_utc(),
+        )
+        .unwrap_or_default();
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err(stopped_failure(context)),
+            () = tokio::time::sleep(remaining) => Err(stopped_failure(context)),
+            result = acquire => result.map_err(|_| unavailable()),
+        }
+    }
+
     async fn build(
         &self,
         context: &BuildProviderRequestContext,
@@ -244,6 +284,12 @@ impl ProductionBuildExecutor {
             &command.request.output_repository,
             &self.config.harbor_registry,
         )?;
+        // Check the immutable declared size before opening the object body. The permit remains
+        // held through unpacking and the BuildKit solve, enforcing the explicit deployment byte
+        // budget (`maxUnpackedContextBytes`) across concurrent builds.
+        let _context_budget = self
+            .acquire_context_budget(build_context.size_bytes, context, cancellation)
+            .await?;
         let remaining = std::time::Duration::try_from(
             context.deadline_at.get() - time::OffsetDateTime::now_utc(),
         )
@@ -252,7 +298,7 @@ impl ProductionBuildExecutor {
             biased;
             () = cancellation.cancelled() => return Err(stopped_failure(context)),
             () = tokio::time::sleep(remaining) => return Err(stopped_failure(context)),
-            result = self.objects.read_verified(context_object_key, build_context) => result,
+            result = self.objects.read_verified_file(context_object_key, build_context) => result,
         };
         let object = match read {
             Ok(object) => object,
@@ -274,8 +320,9 @@ impl ProductionBuildExecutor {
             }
         };
         let workspace = TempDir::new_in(&self.config.work_directory).map_err(|_| unavailable())?;
+        let input = std::fs::File::open(object.path()).map_err(|_| unavailable())?;
         if let Err(failure) = unpack_context(
-            &object.bytes,
+            input,
             &build_context.media_type,
             workspace.path(),
             self.config.max_unpacked_context_bytes,
@@ -512,7 +559,7 @@ impl ProductionBuildExecutor {
             () = tokio::time::sleep(remaining) => return Err(stopped_failure(request_context)),
             result = self.rewrite_dockerfile_base_images(workspace, dockerfile_path) => result?,
         }
-        let context = tar_context(workspace)?;
+        let (context_spool, context) = tar_context(workspace)?;
         let endpoint = self.buildkit_endpoint()?;
         let platform = ImageBuildPlatform {
             os: String::from("linux"),
@@ -560,6 +607,7 @@ impl ProductionBuildExecutor {
         // Shutdown closes async connections; bounded file/DNS blocking work may outlive it.
         // Joining alone is not remote stop proof.
         let thread = std::thread::Builder::new().name("agent-buildkit".to_owned()).spawn(move || {
+            let spool_guard = context_spool;
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()
                     .map_err(|_| execution_unknown())?;
                 let mut credentials = std::collections::HashMap::new();
@@ -572,15 +620,16 @@ impl ProductionBuildExecutor {
                     },
                 );
                 let result = runtime.block_on(async {
+                    let input = ImageBuildLoadInput::Upload(context);
                     let daemon = BuildkitDaemon::new(solve_endpoint);
                     tokio::select! {
                         biased;
                         () = cancellation.cancelled() => None,
                         () = tokio::time::sleep(remaining) => None,
-                        result = daemon.registry(output, frontend, ImageBuildLoadInput::Upload(context), Some(credentials)) => Some(result.is_ok()),
+                        result = daemon.registry(output, frontend, input, Some(credentials)) => Some(result.is_ok()),
                     }
                 });
-                runtime.shutdown_timeout(std::time::Duration::from_secs(5));
+                drop(spool_guard);
                 Ok(result)
             }).map_err(|_| execution_unknown())?;
         let outcome = tokio::task::spawn_blocking(move || thread.join())
@@ -1274,7 +1323,6 @@ impl BuildExecutorBackend for ProductionBuildExecutor {
                 tracing::error!(
                     event = "agent.build_executor.stage_failed",
                     build_request_id = %context.build_request_id,
-                    generation = context.fence_generation,
                     build_stage = build_stage_name(context.stage),
                     diagnostic_code = failure.diagnostic_code(),
                     retryable = failure.retryable,
@@ -1283,6 +1331,19 @@ impl BuildExecutorBackend for ProductionBuildExecutor {
             }
         }
     }
+}
+
+fn context_budget_permits(
+    configured_budget_bytes: u64,
+    declared_size_bytes: u64,
+) -> Result<u32, BuildProviderFailure> {
+    if configured_budget_bytes == 0
+        || declared_size_bytes == 0
+        || declared_size_bytes > configured_budget_bytes
+    {
+        return Err(rejected());
+    }
+    u32::try_from(declared_size_bytes).map_err(|_| rejected())
 }
 
 struct RepositoryIdentity {
@@ -1308,17 +1369,17 @@ impl RepositoryIdentity {
     }
 }
 
-fn unpack_context(
-    bytes: &[u8],
+fn unpack_context<R: Read>(
+    input: R,
     media_type: &str,
     destination: &Path,
     maximum_bytes: u64,
 ) -> Result<(), BuildProviderFailure> {
     let reader: Box<dyn Read> = match media_type {
         "application/vnd.oci.image.layer.v1.tar+gzip" | "application/gzip" => {
-            Box::new(GzDecoder::new(bytes))
+            Box::new(GzDecoder::new(input))
         }
-        "application/vnd.oci.image.layer.v1.tar" | "application/x-tar" => Box::new(bytes),
+        "application/vnd.oci.image.layer.v1.tar" | "application/x-tar" => Box::new(input),
         _ => return Err(rejected()),
     };
     let mut archive = tar::Archive::new(reader);
@@ -1665,20 +1726,37 @@ fn ensure_global_service_image_arg(
     std::fs::write(&path, updated).map_err(|_| rejected())
 }
 
-/// Pack the unpacked build workspace into a single tar stream without
-/// following symlinks. `BuildKit` consumes the archive directly as the
-/// dockerfile frontend context.
-fn tar_context(workspace: &Path) -> Result<Bytes, BuildProviderFailure> {
-    let mut buffer = Vec::new();
-    {
-        let mut builder = tar::Builder::new(&mut buffer);
-        builder.follow_symlinks(false);
-        builder
-            .append_dir_all(".", workspace)
-            .map_err(|_| rejected())?;
-        builder.finish().map_err(|_| rejected())?;
-    }
-    Ok(Bytes::from(buffer))
+/// Pack the unpacked build workspace into a private spool file, then expose it to BuildKit through
+/// an owner-backed `Bytes` view. The tar archive is never copied into a heap `Vec`.
+fn tar_context(workspace: &Path) -> Result<(tempfile::TempPath, Bytes), BuildProviderFailure> {
+    let parent = workspace.parent().ok_or_else(rejected)?;
+    let temporary = NamedTempFile::new_in(parent).map_err(|_| unavailable())?;
+    let path = temporary.into_temp_path();
+    let output = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(|_| unavailable())?;
+    let mut builder = tar::Builder::new(output);
+    builder.follow_symlinks(false);
+    builder
+        .append_dir_all(".", workspace)
+        .map_err(|_| rejected())?;
+    let mut output = builder.into_inner().map_err(|_| rejected())?;
+    output.sync_all().map_err(|_| unavailable())?;
+    let context = map_spool(&path)?;
+    Ok((path, context))
+}
+/// Maps a completed private spool. The file is created and owned by this process, is not exposed
+/// to another process, and is never truncated or written while the mapping exists.
+#[allow(unsafe_code)]
+fn map_spool(path: &Path) -> Result<Bytes, BuildProviderFailure> {
+    let file = std::fs::File::open(path).map_err(|_| unavailable())?;
+    // SAFETY: the spool file is created exclusively by this process through TempPath, written and
+    // flushed before mapping; it is not written or truncated while mapped, and its path is not
+    // exposed to another process. Bytes drops before TempPath removes the file.
+    let mmap = unsafe { Mmap::map(&file) }.map_err(|_| unavailable())?;
+    Ok(Bytes::from_owner(mmap))
 }
 
 /// Convert the deployment-owned `tcp://host:port` `BuildKit` address into the
@@ -2364,14 +2442,17 @@ mod tests {
     }
 
     #[test]
-    fn build_context_tar_contains_dockerfile() {
+    fn build_context_tar_uses_mmap_owner_and_cleans_spool() {
         let directory = tempfile::tempdir().expect("temporary directory");
         std::fs::write(
             directory.path().join("Dockerfile"),
             "FROM scratch\nCOPY . /workspace\n",
         )
         .expect("write Dockerfile");
-        let archive = tar_context(directory.path()).expect("packed context");
+        let (spool, archive) = tar_context(directory.path()).expect("packed context");
+        let spool_path = spool.to_path_buf();
+        assert!(spool_path.exists());
+        assert_eq!(archive.capacity(), 0, "owner-backed mmap has no heap capacity");
         let mut reader = tar::Archive::new(&archive[..]);
         let names: Vec<String> = reader
             .entries()
@@ -2379,12 +2460,10 @@ mod tests {
             .map(|entry| entry.expect("entry").path().expect("path").into_owned())
             .map(|path| path.to_string_lossy().into_owned())
             .collect();
-        assert!(
-            names
-                .iter()
-                .any(|name| name == "Dockerfile" || name == "./Dockerfile"),
-            "context must contain Dockerfile at its root: {names:?}"
-        );
+        assert!(names.iter().any(|name| name == "Dockerfile" || name == "./Dockerfile"));
+        drop(archive);
+        drop(spool);
+        assert!(!spool_path.exists(), "dropping upload owner removes spool");
     }
 
     #[test]
@@ -2403,6 +2482,33 @@ mod tests {
         ] {
             assert!(RepositoryIdentity::parse(invalid, "harbor.internal").is_err());
         }
+    }
+    #[test]
+    fn oversized_context_is_rejected_before_opening_body() {
+        assert!(context_budget_permits(1024, 1025).is_err());
+        assert!(context_budget_permits(1024, 0).is_err());
+        assert_eq!(context_budget_permits(1024, 1024).expect("boundary"), 1024);
+    }
+
+    #[tokio::test]
+    async fn context_budget_wait_is_cancelled_without_leaking_permits() {
+        let budget = Arc::new(Semaphore::new(4));
+        let held = budget.clone().acquire_many_owned(4).await.expect("held");
+        let cancellation = CancellationToken::new();
+        let waiter = budget.clone().acquire_many_owned(4);
+        tokio::pin!(waiter);
+        let cancellation_trigger = cancellation.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            cancellation_trigger.cancel();
+        });
+        tokio::select! {
+            biased;
+            result = &mut waiter => panic!("budget unexpectedly available: {result:?}"),
+            () = cancellation.cancelled() => {}
+        }
+        drop(held);
+        assert!(budget.try_acquire_many(4).is_ok());
     }
 
     #[test]

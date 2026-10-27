@@ -20,7 +20,7 @@ contracts = { path = "../../crates/contracts" }
 futures-util = "0.3.31"
 flate2 = "=1.1.9"
 futures = "0.3.31"
-persistence-sqlx = { path = "../../crates/persistence-sqlx" }
+memmap2.workspace = true
 hyper-util.workspace = true
 http-auth = { version = "0.1.10", default-features = false }
 regex = "1.12.2"

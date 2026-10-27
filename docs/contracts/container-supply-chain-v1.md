@@ -116,6 +116,18 @@ admission has succeeded. Unreadable/corrupt configuration is HTTP 503
 `LW_AGENT_CONFIGURATION_UNREADABLE`, never `unconfigured`.
 
 
+## Build context resource boundary
+
+Agent validates the immutable context size before opening its object body. The configured
+`maxUnpackedContextBytes` value is both the maximum expanded archive budget and the total byte
+budget shared by concurrent Dockerfile builds in one Agent process. A build waits for its declared
+bytes to become available; cancellation or the original deadline cancels that wait without
+consuming budget. Context objects are copied to a temporary file with a fixed-size storage buffer,
+then unpacked entry-by-entry into a temporary workspace. The archive is never retained as a
+whole in control-plane memory. Temporary object and workspace files are owned by cleanup guards,
+including cancellation and failed archive traversal. Oversized declarations fail before a body
+read with a stable rejected result. Archive paths, parent traversal and links remain rejected.
+
 ## Build network posture
 
 `BuildRequest.network` is an explicit per-request posture:
