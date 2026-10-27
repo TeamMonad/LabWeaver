@@ -343,23 +343,8 @@ impl ProductionBuildExecutor {
                 code = ?failure.code,
             );
         })?;
-        validate_dockerfile(resources.workspace.path(), dockerfile_path).inspect_err(
-            |failure| {
-                tracing::warn!(
-                    event = "agent.build_executor.dockerfile_rejected",
-                    component = "build-executor",
-                    operation = "build.dockerfile.validate",
-                    outcome = "rejected",
-                    duration_ms = 0_u64,
-                    build_request_id = %context.build_request_id,
-                    diagnostic_code = failure.diagnostic_code(),
-                    error_kind = "dockerfile_rejected",
-                    failure_stage = "build.dockerfile.validate",
-                    retryable = false,
-                    safe_detail = "dockerfile_rejected",
-                );
-            },
-        )?;
+        validate_dockerfile(resources.workspace.path(), dockerfile_path)
+            .inspect_err(|failure| log_dockerfile_rejection(context, *failure))?;
         let tag = candidate_tag(identity);
         let tagged = format!("{}:{tag}", command.request.output_repository);
         // BuildKit solves with a push-to-registry exporter. The authoritative
@@ -1521,6 +1506,22 @@ fn unpack_context<R: Read>(
         }
     }
     control.check()
+}
+
+fn log_dockerfile_rejection(context: &BuildProviderRequestContext, failure: BuildProviderFailure) {
+    tracing::warn!(
+        event = "agent.build_executor.dockerfile_rejected",
+        component = "build-executor",
+        operation = "build.dockerfile.validate",
+        outcome = "rejected",
+        duration_ms = 0_u64,
+        build_request_id = %context.build_request_id,
+        diagnostic_code = failure.diagnostic_code(),
+        error_kind = "dockerfile_rejected",
+        failure_stage = "build.dockerfile.validate",
+        retryable = false,
+        safe_detail = "dockerfile_rejected",
+    );
 }
 
 fn validate_dockerfile(root: &Path, relative: &str) -> Result<(), BuildProviderFailure> {
