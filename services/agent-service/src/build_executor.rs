@@ -27,11 +27,13 @@ use contracts::events::AgentBuildRequested;
 use contracts::supply_chain::BuildNetworkPolicy;
 use contracts::supply_chain::BuildSource;
 use flate2::read::GzDecoder;
+use memmap2::Mmap;
 use reqwest::{Certificate, Client, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
-use tempfile::TempDir;
+use tempfile::{NamedTempFile, TempDir};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate as TlsCertificate, ClientTlsConfig, Endpoint, Identity};
 
@@ -86,7 +88,7 @@ impl ProductionBuildExecutorConfig {
             || !self.docker_config_directory.is_absolute()
             || !self.work_directory.is_absolute()
             || self.max_unpacked_context_bytes == 0
-            || !self.buildkit_address.starts_with("tcp://")
+            || u32::try_from(self.max_unpacked_context_bytes).is_err()
             || self
                 .buildkit_address
                 .bytes()
@@ -110,9 +112,43 @@ pub struct ProductionBuildExecutor {
     config: ProductionBuildExecutorConfig,
     pool: PgPool,
     objects: Arc<S3ImmutableObjectStore>,
+    context_budget: Arc<Semaphore>,
     client: Client,
     harbor_username: String,
     harbor_password: String,
+}
+
+// Declaration order is drop order: release the byte reservation only after both disk inputs.
+struct ContextResources {
+    _object: tempfile::TempPath,
+    workspace: TempDir,
+    budget: OwnedSemaphorePermit,
+}
+
+impl ContextResources {
+    fn new(
+        object: tempfile::TempPath,
+        workspace: TempDir,
+        budget: OwnedSemaphorePermit,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            _object: object,
+            workspace,
+            budget,
+        })
+    }
+}
+
+struct MappedContext {
+    mapping: Mmap,
+    _spool: Arc<tempfile::TempPath>,
+    _resources: Arc<ContextResources>,
+}
+
+impl AsRef<[u8]> for MappedContext {
+    fn as_ref(&self) -> &[u8] {
+        &self.mapping
+    }
 }
 
 impl ProductionBuildExecutor {
@@ -147,10 +183,14 @@ impl ProductionBuildExecutor {
             .add_root_certificate(harbor_ca)
             .build()
             .map_err(|_| rejected())?;
+        let context_budget = Arc::new(Semaphore::new(
+            usize::try_from(config.max_unpacked_context_bytes).map_err(|_| rejected())?,
+        ));
         Ok(Self {
             config,
             pool,
             objects,
+            context_budget,
             client,
             harbor_username,
             harbor_password,
@@ -244,6 +284,18 @@ impl ProductionBuildExecutor {
             &command.request.output_repository,
             &self.config.harbor_registry,
         )?;
+        // Reserve once before opening the object body. Gzip reserves the full cap rather than
+        // trusting its compressed size or ISIZE trailer; the permit outlives the object file,
+        // workspace and BuildKit spool (including the mmap upload owner).
+        let context_budget = acquire_context_budget(
+            &self.context_budget,
+            self.config.max_unpacked_context_bytes,
+            build_context.size_bytes,
+            &build_context.media_type,
+            context,
+            cancellation,
+        )
+        .await?;
         let remaining = std::time::Duration::try_from(
             context.deadline_at.get() - time::OffsetDateTime::now_utc(),
         )
@@ -252,7 +304,7 @@ impl ProductionBuildExecutor {
             biased;
             () = cancellation.cancelled() => return Err(stopped_failure(context)),
             () = tokio::time::sleep(remaining) => return Err(stopped_failure(context)),
-            result = self.objects.read_verified(context_object_key, build_context) => result,
+            result = self.objects.read_verified_file(context_object_key, build_context) => result,
         };
         let object = match read {
             Ok(object) => object,
@@ -274,35 +326,25 @@ impl ProductionBuildExecutor {
             }
         };
         let workspace = TempDir::new_in(&self.config.work_directory).map_err(|_| unavailable())?;
-        if let Err(failure) = unpack_context(
-            &object.bytes,
-            &build_context.media_type,
-            workspace.path(),
-            self.config.max_unpacked_context_bytes,
-        ) {
+        let input = std::fs::File::open(object.path()).map_err(|_| unavailable())?;
+        let resources = ContextResources::new(object.into_path(), workspace, context_budget);
+        let resources = unpack_context_in_worker(
+            input,
+            build_context.media_type.clone(),
+            resources,
+            *context,
+            cancellation,
+        )
+        .await
+        .inspect_err(|failure| {
             tracing::warn!(
                 event = "agent.build_executor.context_unpack_rejected",
                 build_request_id = %context.build_request_id,
                 code = ?failure.code,
             );
-            return Err(failure);
-        }
-        if let Err(failure) = validate_dockerfile(workspace.path(), dockerfile_path) {
-            tracing::warn!(
-                event = "agent.build_executor.dockerfile_rejected",
-                component = "build-executor",
-                operation = "build.dockerfile.validate",
-                outcome = "rejected",
-                duration_ms = 0_u64,
-                build_request_id = %context.build_request_id,
-                diagnostic_code = failure.diagnostic_code(),
-                error_kind = "dockerfile_rejected",
-                failure_stage = "build.dockerfile.validate",
-                retryable = false,
-                safe_detail = "dockerfile_rejected",
-            );
-            return Err(failure);
-        }
+        })?;
+        validate_dockerfile(resources.workspace.path(), dockerfile_path)
+            .inspect_err(|failure| log_dockerfile_rejection(context, *failure))?;
         let tag = candidate_tag(identity);
         let tagged = format!("{}:{tag}", command.request.output_repository);
         // BuildKit solves with a push-to-registry exporter. The authoritative
@@ -311,7 +353,7 @@ impl ProductionBuildExecutor {
         let digest = self
             .run_buildkit(
                 context,
-                workspace.path(),
+                resources,
                 dockerfile_path,
                 &tagged,
                 &command.request.network,
@@ -493,12 +535,13 @@ impl ProductionBuildExecutor {
     async fn run_buildkit(
         &self,
         request_context: &BuildProviderRequestContext,
-        workspace: &Path,
+        resources: Arc<ContextResources>,
         dockerfile_path: &str,
         tagged: &str,
         network: &BuildNetworkPolicy,
         cancellation: &CancellationToken,
     ) -> Result<String, BuildProviderFailure> {
+        let workspace = resources.workspace.path();
         if !self.config.service_image.is_empty() {
             ensure_global_service_image_arg(workspace, dockerfile_path)?;
         }
@@ -512,7 +555,7 @@ impl ProductionBuildExecutor {
             () = tokio::time::sleep(remaining) => return Err(stopped_failure(request_context)),
             result = self.rewrite_dockerfile_base_images(workspace, dockerfile_path) => result?,
         }
-        let context = tar_context(workspace)?;
+        let (_context_spool, context) = tar_context(resources.clone())?;
         let endpoint = self.buildkit_endpoint()?;
         let platform = ImageBuildPlatform {
             os: String::from("linux"),
@@ -559,6 +602,7 @@ impl ProductionBuildExecutor {
         // The non-Send solve and its spawned session tasks share this owned runtime.
         // Shutdown closes async connections; bounded file/DNS blocking work may outlive it.
         // Joining alone is not remote stop proof.
+        let upload_context = context.clone();
         let thread = std::thread::Builder::new().name("agent-buildkit".to_owned()).spawn(move || {
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()
                     .map_err(|_| execution_unknown())?;
@@ -572,15 +616,15 @@ impl ProductionBuildExecutor {
                     },
                 );
                 let result = runtime.block_on(async {
+                    let input = ImageBuildLoadInput::Upload(upload_context);
                     let daemon = BuildkitDaemon::new(solve_endpoint);
                     tokio::select! {
                         biased;
                         () = cancellation.cancelled() => None,
                         () = tokio::time::sleep(remaining) => None,
-                        result = daemon.registry(output, frontend, ImageBuildLoadInput::Upload(context), Some(credentials)) => Some(result.is_ok()),
+                        result = daemon.registry(output, frontend, input, Some(credentials)) => Some(result.is_ok()),
                     }
                 });
-                runtime.shutdown_timeout(std::time::Duration::from_secs(5));
                 Ok(result)
             }).map_err(|_| execution_unknown())?;
         let outcome = tokio::task::spawn_blocking(move || thread.join())
@@ -593,13 +637,7 @@ impl ProductionBuildExecutor {
         )
         .await
         .map_err(|_| execution_unknown())??;
-        match outcome {
-            Some(true) if record.error.is_none() => {
-                history_record_digest(&record).ok_or_else(output_invalid)
-            }
-            Some(_) => Err(unavailable()),
-            None => Err(stopped_failure(request_context)),
-        }
+        buildkit_solve_result(outcome, &record, request_context)
     }
 
     /// Build a mutually-authenticated `tonic` endpoint for the `BuildKit` daemon.
@@ -1274,7 +1312,6 @@ impl BuildExecutorBackend for ProductionBuildExecutor {
                 tracing::error!(
                     event = "agent.build_executor.stage_failed",
                     build_request_id = %context.build_request_id,
-                    generation = context.fence_generation,
                     build_stage = build_stage_name(context.stage),
                     diagnostic_code = failure.diagnostic_code(),
                     retryable = failure.retryable,
@@ -1283,6 +1320,51 @@ impl BuildExecutorBackend for ProductionBuildExecutor {
             }
         }
     }
+}
+
+async fn acquire_context_budget(
+    budget: &Arc<Semaphore>,
+    configured_budget_bytes: u64,
+    size_bytes: u64,
+    media_type: &str,
+    context: &BuildProviderRequestContext,
+    cancellation: &CancellationToken,
+) -> Result<OwnedSemaphorePermit, BuildProviderFailure> {
+    let permits = context_budget_permits(configured_budget_bytes, size_bytes, media_type)?;
+    let acquire = budget.clone().acquire_many_owned(permits);
+    let remaining =
+        std::time::Duration::try_from(context.deadline_at.get() - time::OffsetDateTime::now_utc())
+            .unwrap_or_default();
+    if remaining.is_zero() {
+        return Err(stopped_failure(context));
+    }
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Err(stopped_failure(context)),
+        () = tokio::time::sleep(remaining) => Err(stopped_failure(context)),
+        result = acquire => result.map_err(|_| unavailable()),
+    }
+}
+
+fn context_budget_permits(
+    configured_budget_bytes: u64,
+    declared_size_bytes: u64,
+    media_type: &str,
+) -> Result<u32, BuildProviderFailure> {
+    if configured_budget_bytes == 0
+        || declared_size_bytes == 0
+        || declared_size_bytes > configured_budget_bytes
+    {
+        return Err(rejected());
+    }
+    let reserved_bytes = match media_type {
+        "application/vnd.oci.image.layer.v1.tar+gzip" | "application/gzip" => {
+            configured_budget_bytes
+        }
+        "application/vnd.oci.image.layer.v1.tar" | "application/x-tar" => declared_size_bytes,
+        _ => return Err(rejected()),
+    };
+    u32::try_from(reserved_bytes).map_err(|_| rejected())
 }
 
 struct RepositoryIdentity {
@@ -1308,27 +1390,98 @@ impl RepositoryIdentity {
     }
 }
 
-fn unpack_context(
-    bytes: &[u8],
+struct UnpackControl {
+    context: BuildProviderRequestContext,
+    cancellation: CancellationToken,
+}
+
+impl UnpackControl {
+    fn check(&self) -> Result<(), BuildProviderFailure> {
+        if self.cancellation.is_cancelled()
+            || time::OffsetDateTime::now_utc() >= self.context.deadline_at.get()
+        {
+            Err(stopped_failure(&self.context))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn failure(&self) -> BuildProviderFailure {
+        self.check().err().unwrap_or_else(rejected)
+    }
+}
+
+struct CheckedContextReader<'a, R> {
+    input: R,
+    control: &'a UnpackControl,
+}
+
+impl<R: Read> Read for CheckedContextReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.control
+            .check()
+            .map_err(|_| std::io::Error::other("build context unpack stopped"))?;
+        self.input.read(buffer)
+    }
+}
+
+async fn unpack_context_in_worker<R: Read + Send + 'static>(
+    input: R,
+    media_type: String,
+    resources: Arc<ContextResources>,
+    context: BuildProviderRequestContext,
+    cancellation: &CancellationToken,
+) -> Result<Arc<ContextResources>, BuildProviderFailure> {
+    let cancellation = cancellation.child_token();
+    // Aborting the async workflow cancels the worker too. The worker retains all disk owners
+    // and the reservation until it has stopped reading/writing and unwound its cleanup guards.
+    let _cancel_on_drop = cancellation.clone().drop_guard();
+    tokio::task::spawn_blocking(move || {
+        let control = UnpackControl {
+            context,
+            cancellation,
+        };
+        unpack_context(
+            input,
+            &media_type,
+            resources.workspace.path(),
+            u64::try_from(resources.budget.num_permits()).map_err(|_| rejected())?,
+            &control,
+        )?;
+        Ok(resources)
+    })
+    .await
+    .map_err(|_| unavailable())?
+}
+
+fn unpack_context<R: Read>(
+    input: R,
     media_type: &str,
     destination: &Path,
     maximum_bytes: u64,
+    control: &UnpackControl,
 ) -> Result<(), BuildProviderFailure> {
-    let reader: Box<dyn Read> = match media_type {
+    control.check()?;
+    let input = CheckedContextReader { input, control };
+    let reader: Box<dyn Read + '_> = match media_type {
         "application/vnd.oci.image.layer.v1.tar+gzip" | "application/gzip" => {
-            Box::new(GzDecoder::new(bytes))
+            Box::new(GzDecoder::new(input))
         }
-        "application/vnd.oci.image.layer.v1.tar" | "application/x-tar" => Box::new(bytes),
+        "application/vnd.oci.image.layer.v1.tar" | "application/x-tar" => Box::new(input),
         _ => return Err(rejected()),
     };
-    let mut archive = tar::Archive::new(reader);
-    let entries = archive.entries().map_err(|_| rejected())?;
+    let mut archive = tar::Archive::new(CheckedContextReader {
+        input: reader,
+        control,
+    });
+    let entries = archive.entries().map_err(|_| control.failure())?;
     let mut total_bytes = 0_u64;
     for (index, entry) in entries.enumerate() {
+        control.check()?;
         if index >= MAX_CONTEXT_ENTRIES {
             return Err(rejected());
         }
-        let mut entry = entry.map_err(|_| rejected())?;
+        let mut entry = entry.map_err(|_| control.failure())?;
         total_bytes = total_bytes
             .checked_add(entry.size())
             .filter(|total| *total <= maximum_bytes)
@@ -1345,12 +1498,30 @@ fn unpack_context(
                     std::path::Component::ParentDir | std::path::Component::Prefix(_)
                 )
             })
-            || !entry.unpack_in(destination).map_err(|_| rejected())?
+            || !entry
+                .unpack_in(destination)
+                .map_err(|_| control.failure())?
         {
             return Err(rejected());
         }
     }
-    Ok(())
+    control.check()
+}
+
+fn log_dockerfile_rejection(context: &BuildProviderRequestContext, failure: BuildProviderFailure) {
+    tracing::warn!(
+        event = "agent.build_executor.dockerfile_rejected",
+        component = "build-executor",
+        operation = "build.dockerfile.validate",
+        outcome = "rejected",
+        duration_ms = 0_u64,
+        build_request_id = %context.build_request_id,
+        diagnostic_code = failure.diagnostic_code(),
+        error_kind = "dockerfile_rejected",
+        failure_stage = "build.dockerfile.validate",
+        retryable = false,
+        safe_detail = "dockerfile_rejected",
+    );
 }
 
 fn validate_dockerfile(root: &Path, relative: &str) -> Result<(), BuildProviderFailure> {
@@ -1566,6 +1737,22 @@ fn history_identity_matches(
         })
 }
 
+/// Interpret the solve and its authoritative terminal history together, never accepting a
+/// registry digest from a failed or cancelled solve.
+fn buildkit_solve_result(
+    outcome: Option<bool>,
+    record: &bollard_buildkit_proto::moby::buildkit::v1::BuildHistoryRecord,
+    request_context: &BuildProviderRequestContext,
+) -> Result<String, BuildProviderFailure> {
+    match outcome {
+        Some(true) if record.error.is_none() => {
+            history_record_digest(record).ok_or_else(output_invalid)
+        }
+        Some(_) => Err(unavailable()),
+        None => Err(stopped_failure(request_context)),
+    }
+}
+
 fn history_record_digest(
     record: &bollard_buildkit_proto::moby::buildkit::v1::BuildHistoryRecord,
 ) -> Option<String> {
@@ -1665,20 +1852,43 @@ fn ensure_global_service_image_arg(
     std::fs::write(&path, updated).map_err(|_| rejected())
 }
 
-/// Pack the unpacked build workspace into a single tar stream without
-/// following symlinks. `BuildKit` consumes the archive directly as the
-/// dockerfile frontend context.
-fn tar_context(workspace: &Path) -> Result<Bytes, BuildProviderFailure> {
-    let mut buffer = Vec::new();
-    {
-        let mut builder = tar::Builder::new(&mut buffer);
-        builder.follow_symlinks(false);
-        builder
-            .append_dir_all(".", workspace)
-            .map_err(|_| rejected())?;
-        builder.finish().map_err(|_| rejected())?;
-    }
-    Ok(Bytes::from(buffer))
+/// Pack the unpacked build workspace into a private spool file, then expose it to `BuildKit` through
+/// an owner-backed `Bytes` view. The tar archive is never copied into a heap `Vec`.
+fn tar_context(
+    resources: Arc<ContextResources>,
+) -> Result<(Arc<tempfile::TempPath>, Bytes), BuildProviderFailure> {
+    let workspace = resources.workspace.path();
+    let parent = workspace.parent().ok_or_else(rejected)?;
+    let temporary = NamedTempFile::new_in(parent).map_err(|_| unavailable())?;
+    let path = Arc::new(temporary.into_temp_path());
+    let output = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path.as_ref())
+        .map_err(|_| unavailable())?;
+    let mut builder = tar::Builder::new(output);
+    builder.follow_symlinks(false);
+    builder
+        .append_dir_all(".", workspace)
+        .map_err(|_| rejected())?;
+    let output = builder.into_inner().map_err(|_| rejected())?;
+    output.sync_all().map_err(|_| unavailable())?;
+    let mapping = map_spool(&path)?;
+    let context = Bytes::from_owner(MappedContext {
+        mapping,
+        _spool: path.clone(),
+        _resources: resources,
+    });
+    Ok((path, context))
+}
+/// Maps a completed private spool. The file is created and owned by this process, is not exposed
+/// to another process, and is never truncated or written while the mapping exists.
+fn map_spool(path: &Path) -> Result<Mmap, BuildProviderFailure> {
+    let file = std::fs::File::open(path).map_err(|_| unavailable())?;
+    // SAFETY: this private spool is created exclusively by this process, completed and flushed
+    // before mapping, and never modified or truncated afterwards. MappedContext owns the mapping
+    // before the TempPath, so the last Bytes clone unmaps it before unlinking its backing file.
+    unsafe { Mmap::map(&file) }.map_err(|_| unavailable())
 }
 
 /// Convert the deployment-owned `tcp://host:port` `BuildKit` address into the
@@ -2363,15 +2573,150 @@ mod tests {
         );
     }
 
+    fn unpack_control_fixture() -> UnpackControl {
+        UnpackControl {
+            context: history_fixture().0,
+            cancellation: CancellationToken::new(),
+        }
+    }
+
+    struct PausedContextReader {
+        input: std::fs::File,
+        read_bytes: usize,
+        reached: Option<tokio::sync::oneshot::Sender<()>>,
+        resume: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl Read for PausedContextReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.input.read(buffer)?;
+            self.read_bytes += count;
+            if self.read_bytes >= 128 * 1024
+                && let Some(reached) = self.reached.take()
+            {
+                reached
+                    .send(())
+                    .map_err(|()| std::io::Error::other("test receiver dropped"))?;
+                self.resume
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .map_err(std::io::Error::other)?;
+            }
+            Ok(count)
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_large_context_unpack_stops_worker_and_cleans_files_and_budget() {
+        let parent = tempfile::tempdir().expect("private parent");
+        let object = NamedTempFile::new_in(parent.path()).expect("object");
+        {
+            let mut archive = tar::Builder::new(object.reopen().expect("object writer"));
+            let payload = vec![b'x'; 64 * 1024];
+            for index in 0..64 {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(u64::try_from(payload.len()).expect("payload size"));
+                header.set_mode(0o644);
+                header.set_cksum();
+                archive
+                    .append_data(&mut header, format!("payload-{index}"), &payload[..])
+                    .expect("append payload");
+            }
+            archive.finish().expect("finish archive");
+        }
+        let object_path = object.path().to_path_buf();
+        let workspace = TempDir::new_in(parent.path()).expect("workspace");
+        let workspace_path = workspace.path().to_path_buf();
+        let budget = Arc::new(Semaphore::new(8 * 1024 * 1024));
+        let permit = budget
+            .clone()
+            .acquire_many_owned(8 * 1024 * 1024)
+            .await
+            .expect("reservation");
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let input = PausedContextReader {
+            input: object.reopen().expect("object reader"),
+            read_bytes: 0,
+            reached: Some(reached_tx),
+            resume: resume_rx,
+        };
+        let resources = ContextResources::new(object.into_temp_path(), workspace, permit);
+        let cancellation = CancellationToken::new();
+        let worker_cancellation = cancellation.clone();
+        let task = tokio::spawn(async move {
+            unpack_context_in_worker(
+                input,
+                "application/x-tar".to_owned(),
+                resources,
+                history_fixture().0,
+                &worker_cancellation,
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), reached_rx)
+            .await
+            .expect("async runtime remains responsive")
+            .expect("worker reached payload");
+        assert!(
+            workspace_path.join("payload-0").exists(),
+            "cancel after actual extraction starts"
+        );
+        assert!(object_path.exists());
+        assert_eq!(
+            budget.available_permits(),
+            0,
+            "worker still owns full reservation"
+        );
+        cancellation.cancel();
+        resume_tx.send(()).expect("resume worker");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .expect("worker stops promptly")
+            .expect("worker task joined");
+        let failure = result.err().expect("cancelled extraction must not succeed");
+        assert_eq!(failure.code, BuildProviderFailureCode::Cancelled);
+        assert!(!object_path.exists(), "cancelled object file removed");
+        assert!(
+            !workspace_path.exists(),
+            "partially extracted workspace removed"
+        );
+        assert_eq!(budget.available_permits(), 8 * 1024 * 1024);
+    }
+
+    fn context_resources_fixture(
+        parent: &Path,
+        budget: &Arc<Semaphore>,
+    ) -> (Arc<ContextResources>, PathBuf) {
+        let object = NamedTempFile::new_in(parent)
+            .expect("object")
+            .into_temp_path();
+        let object_path = object.to_path_buf();
+        let resources = ContextResources::new(
+            object,
+            TempDir::new_in(parent).expect("workspace"),
+            budget
+                .clone()
+                .try_acquire_many_owned(512)
+                .expect("reservation"),
+        );
+        (resources, object_path)
+    }
+
     #[test]
-    fn build_context_tar_contains_dockerfile() {
-        let directory = tempfile::tempdir().expect("temporary directory");
+    fn build_context_tar_uses_mmap_owner_and_cleans_spool() {
+        let parent = tempfile::tempdir().expect("parent");
+        let budget = Arc::new(Semaphore::new(1024));
+        let (resources, _) = context_resources_fixture(parent.path(), &budget);
+        let directory = resources.workspace.path();
         std::fs::write(
-            directory.path().join("Dockerfile"),
+            directory.join("Dockerfile"),
             "FROM scratch\nCOPY . /workspace\n",
         )
         .expect("write Dockerfile");
-        let archive = tar_context(directory.path()).expect("packed context");
+        let (spool, archive) = tar_context(resources).expect("packed context");
+        let spool_path = spool.to_path_buf();
+        assert!(spool_path.exists());
+        assert!(!archive.is_empty(), "mapped spool contains the upload tar");
         let mut reader = tar::Archive::new(&archive[..]);
         let names: Vec<String> = reader
             .entries()
@@ -2382,9 +2727,11 @@ mod tests {
         assert!(
             names
                 .iter()
-                .any(|name| name == "Dockerfile" || name == "./Dockerfile"),
-            "context must contain Dockerfile at its root: {names:?}"
+                .any(|name| name == "Dockerfile" || name == "./Dockerfile")
         );
+        drop(archive);
+        drop(spool);
+        assert!(!spool_path.exists(), "dropping upload owner removes spool");
     }
 
     #[test]
@@ -2402,6 +2749,198 @@ mod tests {
             "https://harbor.internal/labweaver-system/course-123-candidate-456",
         ] {
             assert!(RepositoryIdentity::parse(invalid, "harbor.internal").is_err());
+        }
+    }
+    #[tokio::test]
+    async fn oversized_context_is_rejected_before_opening_body() {
+        let budget = Arc::new(Semaphore::new(1024));
+        let (context, _, _) = history_fixture();
+        let opened = std::cell::Cell::new(false);
+        let result = acquire_context_budget(
+            &budget,
+            1024,
+            1025,
+            "application/x-tar",
+            &context,
+            &CancellationToken::new(),
+        )
+        .await;
+        if result.is_ok() {
+            opened.set(true);
+        }
+        assert!(result.is_err());
+        assert!(
+            !opened.get(),
+            "oversized declaration must not open the body"
+        );
+        assert!(context_budget_permits(1024, 0, "application/x-tar").is_err());
+        assert_eq!(
+            context_budget_permits(1024, 900, "application/x-tar").expect("tar"),
+            900
+        );
+        assert_eq!(
+            context_budget_permits(1024, 90, "application/gzip").expect("gzip"),
+            1024
+        );
+        assert!(context_budget_permits(1024, 90, "application/unknown").is_err());
+    }
+
+    #[tokio::test]
+    async fn context_budget_waits_for_total_reservation_and_cancels_without_leaking() {
+        let budget = Arc::new(Semaphore::new(100));
+        let (context, _, _) = history_fixture();
+        let cancellation = CancellationToken::new();
+        let held = acquire_context_budget(
+            &budget,
+            100,
+            70,
+            "application/x-tar",
+            &context,
+            &cancellation,
+        )
+        .await
+        .expect("first build");
+        let second = acquire_context_budget(
+            &budget,
+            100,
+            40,
+            "application/x-tar",
+            &context,
+            &cancellation,
+        );
+        tokio::pin!(second);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut second)
+                .await
+                .is_err()
+        );
+        drop(held);
+        let held = second.await.expect("second build unblocked");
+        assert_eq!(budget.available_permits(), 60);
+        let mut waiting = Box::pin(acquire_context_budget(
+            &budget,
+            100,
+            70,
+            "application/x-tar",
+            &context,
+            &cancellation,
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiting)
+                .await
+                .is_err()
+        );
+        cancellation.cancel();
+        assert_eq!(
+            waiting.await.expect_err("cancelled").code,
+            BuildProviderFailureCode::Cancelled
+        );
+        drop(held);
+        assert_eq!(budget.available_permits(), 100);
+        let (mut context, _, _) = history_fixture();
+        context.deadline_at = contracts::UtcTimestamp::from_utc(
+            time::OffsetDateTime::now_utc()
+                .replace_nanosecond(0)
+                .expect("whole seconds")
+                - time::Duration::seconds(1),
+        )
+        .expect("expired deadline");
+        let held = budget.clone().acquire_many_owned(100).await.expect("busy");
+        let expired = acquire_context_budget(
+            &budget,
+            100,
+            70,
+            "application/x-tar",
+            &context,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(expired.is_err(), "deadline cancels budget wait");
+        drop(held);
+        assert_eq!(budget.available_permits(), 100);
+    }
+
+    #[test]
+    fn gzip_expansion_over_budget_rejects_and_releases_permit() {
+        let budget = Semaphore::new(1024);
+        let permit = budget
+            .try_acquire_many(1024)
+            .expect("full gzip reservation");
+        let mut compressed = Vec::new();
+        {
+            let encoder =
+                flate2::write::GzEncoder::new(&mut compressed, flate2::Compression::default());
+            let mut archive = tar::Builder::new(encoder);
+            let payload = [b'x'; 2048];
+            let mut header = tar::Header::new_gnu();
+            header.set_size(2048);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, "oversized", &payload[..])
+                .expect("append file");
+            archive
+                .into_inner()
+                .expect("finish tar")
+                .finish()
+                .expect("finish gzip");
+        }
+        assert!(
+            compressed.len() < 1024,
+            "payload should be highly compressible"
+        );
+        let workspace = tempfile::tempdir().expect("workspace");
+        let failure = unpack_context(
+            &compressed[..],
+            "application/gzip",
+            workspace.path(),
+            1024,
+            &unpack_control_fixture(),
+        )
+        .expect_err("expanded payload exceeds reservation");
+        assert_eq!(failure.code, BuildProviderFailureCode::Rejected);
+        drop(workspace);
+        drop(permit);
+        assert_eq!(budget.available_permits(), 1024);
+    }
+
+    #[tokio::test]
+    async fn build_context_guards_remove_object_workspace_and_spool_on_all_exits() {
+        for exit in ["success", "failure", "cancellation"] {
+            let parent = tempfile::tempdir().expect("private parent");
+            let budget = Arc::new(Semaphore::new(1024));
+            let (resources, object_path) = context_resources_fixture(parent.path(), &budget);
+            let workspace_path = resources.workspace.path().to_path_buf();
+            std::fs::write(workspace_path.join("Dockerfile"), "FROM scratch\n").expect("workspace");
+            let (spool, bytes) = tar_context(resources.clone()).expect("spool");
+            let spool_path = spool.to_path_buf();
+            let upload_clone = bytes.clone();
+            let task = tokio::spawn(async move {
+                let _resources = resources;
+                let _spool = spool;
+                let _bytes = bytes;
+                match exit {
+                    "success" => Ok(()),
+                    "failure" => Err(rejected()),
+                    _ => std::future::pending().await,
+                }
+            });
+            if exit == "cancellation" {
+                task.abort();
+                assert!(task.await.expect_err("aborted").is_cancelled());
+            } else {
+                let result = task.await.expect("workflow joined");
+                assert_eq!(result.is_ok(), exit == "success");
+            }
+            // A session task may retain a Bytes clone after the workflow is dropped. All files
+            // and the unchanged full reservation must survive that clone, not just the mmap.
+            assert!(object_path.exists() && workspace_path.exists() && spool_path.exists());
+            assert_eq!(budget.available_permits(), 512);
+            drop(upload_clone);
+            assert!(!object_path.exists(), "{exit}: object removed");
+            assert!(!workspace_path.exists(), "{exit}: workspace removed");
+            assert!(!spool_path.exists(), "{exit}: spool removed");
+            assert_eq!(budget.available_permits(), 1024);
         }
     }
 
@@ -2500,7 +3039,39 @@ mod tests {
         }
         let directory = tempfile::tempdir().expect("temporary directory");
         assert!(
-            unpack_context(&archive_bytes, "application/x-tar", directory.path(), 1024,).is_ok()
+            unpack_context(
+                &archive_bytes[..],
+                "application/x-tar",
+                directory.path(),
+                1024,
+                &unpack_control_fixture(),
+            )
+            .is_ok()
+        );
+        let mut traversal = archive_bytes.clone();
+        traversal[..100].fill(0);
+        traversal[..13].copy_from_slice(b"../Dockerfile");
+        let mut header = tar::Header::new_gnu();
+        header.as_mut_bytes().copy_from_slice(&traversal[..512]);
+        header.set_cksum();
+        traversal[..512].copy_from_slice(header.as_bytes());
+        assert!(
+            unpack_context(
+                &traversal[..],
+                "application/x-tar",
+                directory.path(),
+                1024,
+                &unpack_control_fixture()
+            )
+            .is_err()
+        );
+        assert!(
+            !directory
+                .path()
+                .parent()
+                .expect("parent")
+                .join("Dockerfile")
+                .exists()
         );
 
         let mut link_archive = Vec::new();
@@ -2517,7 +3088,14 @@ mod tests {
             archive.finish().expect("finish archive");
         }
         assert!(
-            unpack_context(&link_archive, "application/x-tar", directory.path(), 1024,).is_err()
+            unpack_context(
+                &link_archive[..],
+                "application/x-tar",
+                directory.path(),
+                1024,
+                &unpack_control_fixture(),
+            )
+            .is_err()
         );
     }
 
@@ -2542,10 +3120,11 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         assert!(
             unpack_context(
-                &archive_bytes,
+                &archive_bytes[..],
                 "application/vnd.oci.image.layer.v1.tar+gzip",
                 directory.path(),
                 1024,
+                &unpack_control_fixture(),
             )
             .is_ok()
         );

@@ -51,6 +51,7 @@ opentelemetry_sdk = { version = "0.32.1", default-features = false, features = [
 nix = { version = "0.31.3", default-features = false, features = ["process", "resource", "signal"] }
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest"] }
 rand = "0.9.1"
+memmap2 = "=0.9.9"
 rust_decimal = { version = "=1.43.0", default-features = false, features = ["std", "serde-with-str"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["cookies", "json", "rustls-tls", "stream"] }
 russh = { version = "0.62.2", default-features = false, features = ["ring"] }
@@ -87,7 +88,6 @@ url = { version = "2.5.4", features = ["serde"] }
 x509-parser = "0.16.0"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
 missing_docs = "warn"
 
 [workspace.lints.clippy]

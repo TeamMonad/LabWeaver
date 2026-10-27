@@ -116,6 +116,31 @@ admission has succeeded. Unreadable/corrupt configuration is HTTP 503
 `LW_AGENT_CONFIGURATION_UNREADABLE`, never `unconfigured`.
 
 
+## Build context resource boundary
+
+Agent validates the immutable context's declared size before opening its object body. The
+configured `maxUnpackedContextBytes` is a per-process semaphore budget for logical unpacked
+file payload bytes, not a bound on overlapping temporary files or tar header overhead. Plain tar
+reserves its entire declared object size atomically; gzip reserves the full configured cap before
+the body read and never trusts the gzip ISIZE trailer. Unpacking counts actual expanded file
+payload bytes against that reservation, rejecting an oversized archive. Concurrent builds wait
+for permits; cancellation or the original deadline interrupts the wait without leaking permits.
+The permit remains held until the compressed object temp file, unpacked workspace and BuildKit
+upload spool/mmap `Bytes` have all been dropped after the build. The upload tar is spooled to disk
+and mapped rather than copied into an in-memory archive. Disk exposure includes simultaneous
+compressed object, unpacked workspace and re-packed BuildKit spool (plus tar headers/padding),
+potentially across concurrent builds; `maxUnpackedContextBytes` does not cap that disk usage.
+Temp-file owners clean up on success, rejection and cancellation. Archive paths, parent traversal
+and links remain rejected.
+
+Extraction runs in a blocking worker rather than on the async executor. Cancellation is
+cooperative: the worker checks cancellation and the original deadline at each entry and read
+boundary. A blocked OS read or write cannot be interrupted by those checks; it delays worker
+exit and release of the permit and temporary files until the OS call returns. A stopped worker
+removes its partial workspace and object file before returning the full reservation. Aborting
+the workflow also signals that worker to stop, while the worker retains its cleanup guards
+until it exits; cancellation does not guarantee a bounded exit time for blocking I/O.
+
 ## Build network posture
 
 `BuildRequest.network` is an explicit per-request posture:
