@@ -238,21 +238,21 @@ describe('useProjectMemberships', () => {
 })
 
 describe('useOrganizationDirectoryUsers', () => {
-  it('loads a bounded server page for the entered organization query', async () => {
-    const page = { items: [{ username: 'student-1', displayName: '学生一', enabled: true }], page: 1, pageSize: 25, hasMore: true }
+  it('loads a bounded search result for the entered organization query', async () => {
+    const page = { items: [{ username: 'student-1', displayName: '学生一', enabled: true }], truncated: false }
     listOrganizationUsers.mockResolvedValueOnce({ data: page, error: undefined })
     const scope = effectScope()
     let state!: ReturnType<typeof useOrganizationDirectoryUsers>
     scope.run(() => { state = useOrganizationDirectoryUsers() })
 
-    await state.load('student', 1)
-    expect(listOrganizationUsers).toHaveBeenCalledWith({ query: { query: 'student', page: 1, pageSize: 25 } })
+    await state.load('student')
+    expect(listOrganizationUsers).toHaveBeenCalledWith({ query: { query: 'student', limit: 25 } })
     expect(state.users).toEqual({ kind: 'success', data: page })
     scope.stop()
   })
 
   it('explains directory unavailability while preserving the diagnostic and retry behavior', async () => {
-    const page = { items: [{ username: 'student-1', displayName: '学生一', enabled: true }], page: 1, pageSize: 25, hasMore: false }
+    const page = { items: [{ username: 'student-1', displayName: '学生一', enabled: true }], truncated: false }
     listOrganizationUsers
       .mockResolvedValueOnce({
         data: undefined as never,
@@ -263,17 +263,9 @@ describe('useOrganizationDirectoryUsers', () => {
     let state!: ReturnType<typeof useOrganizationDirectoryUsers>
     scope.run(() => { state = useOrganizationDirectoryUsers() })
 
-    await state.load('student', 1)
-    expect(state.users).toEqual({
-      kind: 'error',
-      diagnostic: {
-        code: 'LW_ACCESS_DIRECTORY_UNAVAILABLE',
-        message: '平台账号目录暂时不可用，请稍后重试。已创建的项目和材料会保留。',
-        retryable: true,
-      },
-    })
-
-    await state.load('student', 1)
+    await state.load('student')
+    expect(state.users).toMatchObject({ kind: 'error', diagnostic: { code: 'LW_ACCESS_DIRECTORY_UNAVAILABLE' } })
+    await state.load('student')
     expect(state.users).toEqual({ kind: 'success', data: page })
     scope.stop()
   })
@@ -288,14 +280,14 @@ describe('useOrganizationDirectoryUsers', () => {
     const scope = effectScope()
     let state!: ReturnType<typeof useOrganizationDirectoryUsers>
     scope.run(() => { state = useOrganizationDirectoryUsers() })
-    const first = state.load('old', 1)
-    const second = state.load('new', 1)
-    resolveSecond({ data: { items: [], page: 1, pageSize: 25, hasMore: false }, error: undefined })
+    const first = state.load('old')
+    const second = state.load('new')
+    resolveSecond({ data: { items: [], truncated: false }, error: undefined })
     await second
-    expect(state.users).toEqual({ kind: 'success', data: { items: [], page: 1, pageSize: 25, hasMore: false } })
+    expect(state.users).toEqual({ kind: 'success', data: { items: [], truncated: false } })
 
     state.clear()
-    resolveFirst({ data: { items: [{ username: 'old', displayName: '旧账号', enabled: true }], page: 1, pageSize: 25, hasMore: false }, error: undefined })
+    resolveFirst({ data: { items: [{ username: 'old', displayName: '旧账号', enabled: true }], truncated: false }, error: undefined })
     await first
     expect(state.users).toEqual({ kind: 'idle' })
     scope.stop()
@@ -306,7 +298,7 @@ describe('useOrganizationDirectoryUsers', () => {
     let state!: ReturnType<typeof useOrganizationDirectoryUsers>
     scope.run(() => { state = useOrganizationDirectoryUsers() })
 
-    await state.load('')
+    await state.load('x')
     expect(listOrganizationUsers).not.toHaveBeenCalled()
     await state.load('x'.repeat(129))
     expect(listOrganizationUsers).not.toHaveBeenCalled()

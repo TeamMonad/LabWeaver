@@ -33,7 +33,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
-use contracts::http::PageQuery;
 use contracts::{
     AuthSession, AuthenticatedActor, AuthorizationDecision, AuthorizationDecisionRequest,
     AuthorizationScope, CsrfTokenResponse, DiagnosticCode, LogoutBrowserSessionResponse,
@@ -1336,8 +1335,7 @@ async fn session(
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct OrganizationUserQuery {
     query: String,
-    #[serde(flatten)]
-    page: PageQuery,
+    limit: Option<u16>,
 }
 
 async fn directory_users(
@@ -1346,13 +1344,13 @@ async fn directory_users(
     Query(request): Query<OrganizationUserQuery>,
 ) -> Result<Json<OrganizationUserPage>, ApiError> {
     let query = request.query.trim();
-    if query.is_empty() || query.chars().count() > 128 {
+    if query.chars().count() < 2 || query.chars().count() > 128 {
         return Err(ApiError::bad_request("LW_ACCESS_DIRECTORY_QUERY_INVALID"));
     }
-    let (page, page_size, first) = request
-        .page
-        .normalized()
-        .map_err(|_| ApiError::bad_request("LW_ACCESS_DIRECTORY_PAGE_INVALID"))?;
+    let limit = request.limit.unwrap_or(25);
+    if !(1..=50).contains(&limit) {
+        return Err(ApiError::bad_request("LW_ACCESS_DIRECTORY_LIMIT_INVALID"));
+    }
     let identity = authenticated_identity(&state, &headers).await?;
     let actor_id = Uuid::parse_str(&identity.actor.actor_id.to_string())
         .map_err(|_| ApiError::internal("LW_AUTH_SESSION_REJECTED"))?;
@@ -1378,7 +1376,7 @@ async fn directory_users(
     .map_err(ApiError::from)?;
     state
         .directory
-        .search(query, page, page_size, first)
+        .search(query, limit)
         .await
         .map(Json)
         .map_err(ApiError::from)

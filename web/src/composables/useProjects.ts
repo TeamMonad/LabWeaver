@@ -443,21 +443,17 @@ export function useProjectMemberships(projectId: Ref<string | null | undefined>)
   })
 }
 
-const ORGANIZATION_DIRECTORY_PAGE_SIZE = 25
+const ORGANIZATION_DIRECTORY_LIMIT = 25
 
-/**
- * Search the issuer-backed organization directory for membership selection.
- * The page is server-authoritative; local state only tracks the latest query
- * and ignores responses for an older query or page.
- */
+/** Search the issuer directory for member selection; Keycloak results are bounded and never paged. */
 export function useOrganizationDirectoryUsers() {
   const users = ref<AsyncState<OrganizationUserPage>>({ kind: 'idle' })
   let loadGeneration = 0
 
-  async function load(search: string, page = 1) {
+  async function load(search: string) {
     const generation = ++loadGeneration
     const query = search.trim()
-    if (!query || query.length > 128 || !Number.isInteger(page) || page < 1) {
+    if (query.length < 2 || query.length > 128) {
       users.value = query.length > 128
         ? { kind: 'error', diagnostic: makeDiagnostic('DIRECTORY_QUERY_TOO_LONG', '搜索内容不能超过 128 个字符。', false) }
         : { kind: 'idle' }
@@ -465,11 +461,7 @@ export function useOrganizationDirectoryUsers() {
     }
     users.value = { kind: 'loading', message: '查找组织账号…' }
     const result = await listOrganizationUsers({
-      query: {
-        query,
-        page,
-        pageSize: ORGANIZATION_DIRECTORY_PAGE_SIZE,
-      },
+      query: { query, limit: ORGANIZATION_DIRECTORY_LIMIT },
     })
     if (generation !== loadGeneration) return
     if (result.error) {

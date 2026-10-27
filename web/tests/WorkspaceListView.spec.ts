@@ -258,6 +258,25 @@ describe('WorkspaceListView', () => {
     expect(mocks.remove).toHaveBeenCalledWith('student-1', expect.objectContaining({ actorId: 'student-1' }))
   })
 
+
+  it('blocks directory search below two characters and guides refinement', async () => {
+    const { wrapper } = await mountView()
+    const search = wrapper.get('.directory-picker input')
+    const button = wrapper.get('.directory-picker .outlined-button')
+
+    await search.setValue('a')
+    expect(mocks.directoryLoad).toHaveBeenCalledTimes(0)
+    expect(wrapper.get('.directory-picker [role="status"]').text()).toContain('请至少输入 2 个字符')
+    expect(button.attributes('disabled')).toBeDefined()
+
+    await search.setValue('ab')
+    expect(wrapper.find('.directory-picker [role="status"]').exists()).toBe(false)
+    expect(button.attributes('disabled')).toBeUndefined()
+    await button.trigger('click')
+    expect(mocks.directoryLoad).toHaveBeenCalledTimes(1)
+    expect(mocks.directoryLoad).toHaveBeenCalledWith('ab')
+    wrapper.unmount()
+  })
   it('lets teachers search and select an enabled organization account before adding it', async () => {
     directoryState.users = {
       kind: 'success',
@@ -266,20 +285,16 @@ describe('WorkspaceListView', () => {
           { username: 'student-2', displayName: '学生二', enabled: true },
           { username: 'disabled-1', displayName: '已停用账号', enabled: false },
         ],
-        page: 1,
-        pageSize: 25,
-        hasMore: true,
+        truncated: false,
       },
     }
     const { wrapper } = await mountView()
     const search = wrapper.get('.directory-picker input')
     await search.setValue('student')
     await wrapper.get('.directory-picker .outlined-button').trigger('click')
-    expect(mocks.directoryLoad).toHaveBeenCalledWith('student', 1)
+    expect(mocks.directoryLoad).toHaveBeenCalledWith('student')
     expect(wrapper.findAll('.directory-result')).toHaveLength(2)
     expect(wrapper.findAll('.directory-result')[1].attributes('disabled')).toBeDefined()
-    await wrapper.get('.directory-pagination .text-button:last-child').trigger('click')
-    expect(mocks.directoryLoad).toHaveBeenCalledWith('student', 2)
 
     await wrapper.find('.directory-result').trigger('click')
     expect(wrapper.text()).toContain('已选择：学生二（student-2）')

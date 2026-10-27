@@ -2341,6 +2341,7 @@ async fn non_owner_membership_add_is_rejected_before_directory_resolution()
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn organization_directory_is_teacher_visible_and_student_denied_without_lookup()
 -> Result<(), Box<dyn Error>> {
@@ -2381,7 +2382,7 @@ async fn organization_directory_is_teacher_visible_and_student_denied_without_lo
         let _ = axum::serve(listener, router).await;
     }));
     let client = reqwest::Client::builder().no_proxy().build()?;
-    let path = "/api/v1/directory/users?query=alice&page=1&pageSize=10";
+    let path = "/api/v1/directory/users?query=alice&limit=10";
     let teacher_cookie = format!(
         "{}={}",
         state.deployment.browser.session_cookie_name, teacher_session.session_id
@@ -2414,7 +2415,7 @@ async fn organization_directory_is_teacher_visible_and_student_denied_without_lo
     let default_page = default_response
         .json::<contracts::OrganizationUserPage>()
         .await?;
-    assert_eq!((default_page.page, default_page.page_size), (1, 25));
+    assert!(!default_page.truncated);
 
     let student_cookie = format!(
         "{}={}",
@@ -2445,6 +2446,24 @@ async fn organization_directory_is_teacher_visible_and_student_denied_without_lo
             .count(),
         2
     );
+    for query in [
+        "query=alice&page=1",
+        "query=alice&pageSize=10",
+        "query=alice&offset=1",
+    ] {
+        let response = client
+            .get(format!("{base}/api/v1/directory/users?{query}"))
+            .header(
+                header::COOKIE,
+                format!(
+                    "{}={}",
+                    state.deployment.browser.session_cookie_name, teacher_session.session_id
+                ),
+            )
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+    }
     Ok(())
 }
 

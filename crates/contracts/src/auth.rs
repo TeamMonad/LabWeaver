@@ -47,14 +47,14 @@ pub struct OrganizationUser {
     pub enabled: bool,
 }
 
-/// Bounded organization-directory search result.
+/// Bounded organization-directory search result. Keycloak does not expose a stable continuation key,
+/// so this endpoint intentionally returns a bounded search result rather than pages.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OrganizationUserPage {
     pub items: Vec<OrganizationUser>,
-    pub page: u32,
-    pub page_size: u16,
-    pub has_more: bool,
+    /// True when more matching provider users exist beyond this bounded result.
+    pub truncated: bool,
 }
 
 /// Safe browser-session representation. OIDC subjects, tokens, and provider

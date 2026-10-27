@@ -161,14 +161,15 @@
                   <input
                     v-model="directoryQuery"
                     class="text-input"
-                    minlength="1"
+                    minlength="2"
                     maxlength="128"
                     placeholder="输入姓名或用户名后搜索"
-                    @input="clearDirectorySelection"
+                    @input="directoryInputChanged"
                     @keydown.enter.prevent="searchDirectory"
                   />
                 </label>
-                <button type="button" class="outlined-button" :disabled="!directoryQuery.trim() || directory.users.kind === 'loading'" @click="searchDirectory">搜索账号</button>
+                <button type="button" class="outlined-button" :disabled="directoryQuery.trim().length < 2 || directory.users.kind === 'loading'" @click="searchDirectory">搜索账号</button>
+                <p v-if="directorySearchAttempted && directoryQuery.trim().length < 2" class="field-hint" role="status">请至少输入 2 个字符。</p>
                 <AsyncStateView :state="directory.users" loading-text="正在查找组织账号…" @retry="searchDirectory">
                   <template #success="{ data }">
                     <div v-if="data.items.length === 0" class="directory-empty" role="status">没有找到匹配的组织账号，请检查姓名或用户名。</div>
@@ -187,11 +188,7 @@
                           </button>
                         </li>
                       </ul>
-                      <nav v-if="data.page > 1 || data.hasMore" class="directory-pagination" aria-label="组织账号分页">
-                        <button type="button" class="text-button" :disabled="data.page <= 1 || directory.users.kind === 'loading'" @click="loadDirectoryPage(data.page - 1)">上一页</button>
-                        <span>第 {{ data.page }} 页</span>
-                        <button type="button" class="text-button" :disabled="!data.hasMore || directory.users.kind === 'loading'" @click="loadDirectoryPage(data.page + 1)">下一页</button>
-                      </nav>
+                      <p v-if="data.truncated" class="directory-empty" role="status">结果过多，请输入更精确的关键词。</p>
                     </template>
                   </template>
                 </AsyncStateView>
@@ -433,6 +430,7 @@ const editName = ref('')
 const editDescription = ref('')
 const memberUsername = ref('')
 const directoryQuery = ref('')
+const directorySearchAttempted = ref(false)
 const selectedDirectoryUser = ref<OrganizationUser | null>(null)
 const memberRole = ref<'student' | 'teacher'>('student')
 /** No responsibility is preselected: the manager chooses one explicitly for every new member. */
@@ -479,6 +477,7 @@ watch(
   selectedProjectId,
   () => {
     directoryQuery.value = ''
+    directorySearchAttempted.value = false
     memberUsername.value = ''
     // A responsibility chosen for one project is never carried into another.
     memberObjectRole.value = ''
@@ -528,16 +527,16 @@ function clearDirectorySelection() {
   directory.clear()
 }
 
-function searchDirectory() {
-  selectedDirectoryUser.value = null
-  memberUsername.value = ''
-  void directory.load(directoryQuery.value, 1)
+function directoryInputChanged() {
+  clearDirectorySelection()
+  directorySearchAttempted.value = directoryQuery.value.trim().length < 2
 }
 
-function loadDirectoryPage(page: number) {
+function searchDirectory() {
+  directorySearchAttempted.value = true
   selectedDirectoryUser.value = null
   memberUsername.value = ''
-  void directory.load(directoryQuery.value, page)
+  void directory.load(directoryQuery.value)
 }
 
 function selectDirectoryUser(user: OrganizationUser) {

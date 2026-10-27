@@ -618,10 +618,8 @@ interface FixtureOptions {
   path?: Record<string, string | undefined>
   query?: Partial<ListEnvironmentsData['query']> & {
     query?: string
-    page?: number
-    pageSize?: number
-    cursor?: string
     limit?: number
+    cursor?: string
   }
 }
 
@@ -630,7 +628,7 @@ export async function listProjects(_options?: FixtureOptions): Promise<FixtureRe
 }
 
 export async function listOrganizationUsers(_options?: FixtureOptions): Promise<FixtureResult<OrganizationUserPageSchema>> {
-  return unsupportedResponse('组织账号目录搜索')
+  return fixtureResponse({ items: [], truncated: false })
 }
 
 export async function listProjectAgentRuns(_options?: FixtureOptions): Promise<FixtureResult<AgentRunHistoryPageSchema>> {
