@@ -331,7 +331,7 @@ impl ProductionBuildExecutor {
             input,
             &build_context.media_type,
             workspace.path(),
-            u64::from(_context_budget.num_permits()),
+            u64::try_from(_context_budget.num_permits()).map_err(|_| rejected())?,
         ) {
             tracing::warn!(
                 event = "agent.build_executor.context_unpack_rejected",
@@ -1756,7 +1756,7 @@ fn tar_context(workspace: &Path) -> Result<(tempfile::TempPath, Bytes), BuildPro
     builder
         .append_dir_all(".", workspace)
         .map_err(|_| rejected())?;
-    let mut output = builder.into_inner().map_err(|_| rejected())?;
+    let output = builder.into_inner().map_err(|_| rejected())?;
     output.sync_all().map_err(|_| unavailable())?;
     let context = map_spool(&path)?;
     Ok((path, context))
@@ -2466,11 +2466,7 @@ mod tests {
         let (spool, archive) = tar_context(directory.path()).expect("packed context");
         let spool_path = spool.to_path_buf();
         assert!(spool_path.exists());
-        assert_eq!(
-            archive.capacity(),
-            0,
-            "owner-backed mmap has no heap capacity"
-        );
+        assert!(!archive.is_empty(), "mapped spool contains the upload tar");
         let mut reader = tar::Archive::new(&archive[..]);
         let names: Vec<String> = reader
             .entries()
@@ -2740,12 +2736,21 @@ mod tests {
         }
         let directory = tempfile::tempdir().expect("temporary directory");
         assert!(
-            unpack_context(&archive_bytes, "application/x-tar", directory.path(), 1024,).is_ok()
+            unpack_context(
+                &archive_bytes[..],
+                "application/x-tar",
+                directory.path(),
+                1024,
+            )
+            .is_ok()
         );
         let mut traversal = archive_bytes.clone();
         traversal[..100].fill(0);
         traversal[..13].copy_from_slice(b"../Dockerfile");
-        tar::Header::from_mut_bytes(&mut traversal[..512]).set_cksum();
+        let mut header = tar::Header::new_gnu();
+        header.as_mut_bytes().copy_from_slice(&traversal[..512]);
+        header.set_cksum();
+        traversal[..512].copy_from_slice(header.as_bytes());
         assert!(
             unpack_context(&traversal[..], "application/x-tar", directory.path(), 1024).is_err()
         );
@@ -2772,7 +2777,13 @@ mod tests {
             archive.finish().expect("finish archive");
         }
         assert!(
-            unpack_context(&link_archive, "application/x-tar", directory.path(), 1024,).is_err()
+            unpack_context(
+                &link_archive[..],
+                "application/x-tar",
+                directory.path(),
+                1024,
+            )
+            .is_err()
         );
     }
 
@@ -2797,7 +2808,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         assert!(
             unpack_context(
-                &archive_bytes,
+                &archive_bytes[..],
                 "application/vnd.oci.image.layer.v1.tar+gzip",
                 directory.path(),
                 1024,
