@@ -366,6 +366,36 @@
     namespace: "{{ platform_foundation_namespace }}"
   register: platform_foundation_revisions
 
+- name: Read exact recovery Pods for installation-owned StatefulSets
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_foundation_kubeconfig }}"
+    api_version: v1
+    kind: Pod
+    namespace: "{{ platform_foundation_namespace }}"
+    name: "{{ item.metadata.name }}-0"
+  loop: "{{ platform_foundation_revisions.resources }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
+  when:
+    - item.metadata.name in ['postgres', 'nats', 'minio']
+    - (item.metadata.annotations | default({})).get('labweaver.io/installation-id', '') == labweaver_installation_id
+    - item.status.currentRevision | default('') | length > 0
+    - item.status.updateRevision | default('') | length > 0
+    - item.status.currentRevision != item.status.updateRevision
+    - item.status.readyReplicas | default(0, true) | int < item.spec.replicas | int
+  register: platform_foundation_recovery_pods
+
+- name: Refuse recovery of Pods outside their installation-owned controller
+  ansible.builtin.assert:
+    that:
+      - >-
+        item.resources | length == 0 or
+        ((item.resources[0].metadata.ownerReferences | default([])
+        | selectattr('uid', 'equalto', item.item.metadata.uid) | list | length) == 1)
+    fail_msg: PLATFORM_FOUNDATION_RECOVERY_POD_OWNERSHIP_CONFLICT
+  loop: "{{ platform_foundation_recovery_pods.results | selectattr('resources', 'defined') | list }}"
+  no_log: true
+
 - name: Delete exact pod blocked on a superseded failed revision
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_foundation_kubeconfig }}"
@@ -373,19 +403,17 @@
     api_version: v1
     kind: Pod
     namespace: "{{ platform_foundation_namespace }}"
-    name: "{{ item.metadata.name }}-0"
-    # The StatefulSet immediately recreates the same pod name; waiting for
-    # name absence races the controller. The readiness readback below is the
-    # bounded authority for the replacement revision.
+    name: "{{ item.resources[0].metadata.name }}"
+    delete_options:
+      preconditions:
+        uid: "{{ item.resources[0].metadata.uid }}"
+    # The controller recreates the same name; UID preconditions protect a
+    # concurrent replacement and readiness below checks the new revision.
     wait: false
-  loop: "{{ platform_foundation_revisions.resources }}"
+  loop: "{{ platform_foundation_recovery_pods.results | selectattr('resources', 'defined') | list }}"
   loop_control:
-    label: "{{ item.metadata.name }}"
-  when:
-    - item.status.currentRevision | default('') | length > 0
-    - item.status.updateRevision | default('') | length > 0
-    - item.status.currentRevision != item.status.updateRevision
-    - item.status.readyReplicas | default(0, true) | int < item.spec.replicas | int
+    label: "{{ item.item.metadata.name }}"
+  when: item.resources | length > 0
 
 - name: Read foundation StatefulSets
   kubernetes.core.k8s_info:

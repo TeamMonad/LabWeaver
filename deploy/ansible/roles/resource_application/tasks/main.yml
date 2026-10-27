@@ -280,6 +280,7 @@
   labweaver_resource_bundle_apply:
     kubeconfig: "{{ resource_application_kubeconfig }}"
     bundle: "{{ resource_application_configuration_bundle }}"
+    namespace: "{{ resource_application_namespace }}"
 
 - name: Build isolated Resource Helm arguments
   ansible.builtin.set_fact:

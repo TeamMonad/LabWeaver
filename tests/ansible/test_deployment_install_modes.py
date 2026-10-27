@@ -157,6 +157,27 @@ class DeploymentModeTests(unittest.TestCase):
                 foreign["resources"][0]["metadata"]["annotations"]["labweaver.io/installation-id"] = INSTALLATION
                 self.assertEqual(run_assertion(refuse, variables).returncode, 0)
 
+    def test_foundation_recovery_rejects_foreign_controllers_and_pods(self) -> None:
+        source = tasks("deploy/ansible/roles/platform_foundation/tasks/main.yml")
+        probe = named(source, "Read exact recovery Pods for installation-owned StatefulSets")
+        conditions = probe["when"]
+        if os.getenv("LW_DEPLOY_COUNTERCHECK") == "recovery":
+            conditions = conditions[2:]
+        for name, installation, accepted in (("nats", INSTALLATION, True), ("independent", INSTALLATION, False), ("nats", "foreign", False)):
+            controller = {"metadata": {"name": name, "annotations": {"labweaver.io/installation-id": installation}},
+                          "status": {"currentRevision": "old", "updateRevision": "new", "readyReplicas": 0}, "spec": {"replicas": 1}}
+            selected = all(Environment().compile_expression(condition)(item=controller, labweaver_installation_id=INSTALLATION) for condition in conditions)
+            self.assertEqual(selected, accepted)
+        guard = named(source, "Refuse recovery of Pods outside their installation-owned controller")
+        for owner_uid, accepted in (("owned-controller", True), ("foreign-controller", False)):
+            observed = {"item": {"metadata": {"uid": "owned-controller"}},
+                        "resources": [{"metadata": {"name": "nats-0", "uid": "observed-pod", "ownerReferences": [{"uid": owner_uid}]}}]}
+            result = run_assertion(guard, {"platform_foundation_recovery_pods": {"results": [observed]}})
+            self.assertEqual(result.returncode == 0, accepted, result.stdout + result.stderr)
+        deletion = named(source, "Delete exact pod blocked on a superseded failed revision")["kubernetes.core.k8s"]
+        self.assertEqual(deletion["delete_options"]["preconditions"]["uid"], "{{ item.resources[0].metadata.uid }}")
+        self.assertEqual(deletion["name"], "{{ item.resources[0].metadata.name }}")
+
     def test_wipe_never_selects_foreign_environment_or_unowned_volume(self) -> None:
         source = tasks("deploy/ansible/playbooks/94-platform-clean-redeploy.yml")[-1]["tasks"]
         select = named(source, "Select only installation-owned environment namespaces")
@@ -187,6 +208,19 @@ class DeploymentModeTests(unittest.TestCase):
                 input=json.dumps({"items": [candidate]}), capture_output=True, text=True, check=False,
             )
             self.assertEqual(checked.returncode == 0, accepted, checked.stderr)
+        owner = sample_object(release="labweaver", namespace="labweaver-system",
+                              installation=INSTALLATION, managed="ansible")
+        owner["metadata"]["uid"] = "owned-uid"
+        child = {"kind": "Pod", "metadata": {"name": "controller-child", "ownerReferences": [{"uid": "owned-uid"}]}}
+        for parent_uid, accepted in (("owned-uid", True), ("foreign-uid", False)):
+            child["metadata"]["ownerReferences"][0]["uid"] = parent_uid
+            checked = subprocess.run(
+                ["jq", "-e", "--arg", "installation", INSTALLATION,
+                 "--arg", "scope", "labweaver-system", "--argjson", "releases", '["labweaver"]', inventory_program],
+                input=json.dumps({"items": [owner, child]}), capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(checked.returncode == 0, accepted, checked.stderr)
+
 
     def test_wipe_runs_full_preflight_before_destructive_playbook(self) -> None:
         source = (ROOT / "xtask/src/main.rs").read_text()

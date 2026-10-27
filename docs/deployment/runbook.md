@@ -109,7 +109,9 @@ python tools/deployment_bundle.py deploy --archive .private/installation.age \
 
 `--stage all|preflight|infrastructure|identity|storage|services|route` 选择重入的阶段；入口不持久记录阶段成功事实。中断后先从目标集群核对 Helm release、身份与业务状态，再用同一个安装 ID 重试该阶段。`adopt` 不直接运行整站 `site.yml`；缺失的归属标记或发现不相符的 namespace/对象/release 时拒绝覆盖，已有但没有安装 ID 的旧实例需要人工审查与单独迁移，不会自动认领。`upgrade` 不重装基础设施或 BuildKit，也不触发清空；应用迁移仍是前向操作，回退前先检查 schema 与拟回退应用版本是否兼容。
 
-清空仅能在另行授权的维护窗口执行，必须指定目标、范围和原 Bundle 安装 ID；会删除所选安装拥有的 namespace、相关卷和两个应用 release，必须先完成独立备份与数据处置审批。不满足完整预检或任何目标无法证明归属时停止，外国 `lw-env-*` 命名空间不因名称相似被选中：
+Resource 配置应用使用 Bundle 中的目标 namespace，配置对象的 namespace 必须完全相符；读取 NATS Secret 与应用 ConfigMap 都在同一目标中执行，不回退到 `labweaver-system`。基础服务的失败 revision 恢复仅处理安装 ID 相符的既定 StatefulSet，删除前核对 Pod 的 controller UID，并以 Pod UID 前置条件防止删除并发替换出的新对象。
+
+清空仅能在另行授权的维护窗口执行，必须指定目标、范围和原 Bundle 安装 ID；先完成独立备份与数据处置审批。入口仅选择安装 ID 相符的 namespace，逐个核对其资源、所有命中的 Helm release 与绑定 PV 的归属，核对失败时在任何卸载或删除前停止。PV 缺少 `labweaver.io/installation-id` 标记时不会依赖 `claimRef` 推测归属或静默删除；须先在独立审批中查清盘身份并处理，不能把再次运行清空当作授权。外国 `lw-env-*` 命名空间不因名称相似被选中；无标记的旧安装不能自动采用或清空：
 
 ```sh
 python tools/deployment_bundle.py deploy --archive .private/installation.age \
