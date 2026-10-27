@@ -111,20 +111,29 @@ const activeIndex = ref(-1)
 const containerRef = ref<HTMLElement | null>(null)
 const triggerRef = ref<HTMLButtonElement | null>(null)
 const searchInputRef = ref<HTMLInputElement | null>(null)
-const activeProject = computed(() => routeProjectUnavailable.value ? null : projects.selectedProject)
 
 const routeProjectId = computed(() => {
   const value = route?.query.projectId
   return typeof value === 'string' && value.trim() ? value.trim() : null
 })
+/** On a scoped page the address names the project; the page, title and requests follow it. */
+const routeNamesProject = computed(() => Boolean(route?.meta.projectScoped && routeProjectId.value))
 /** A linked project that the account cannot list; the shell shows recovery instead of its data. */
 const routeProjectUnavailable = computed(() => {
   const settled = projects.settledProjects
-  if (!route?.meta.projectScoped || !routeProjectId.value) return false
+  if (!routeNamesProject.value) return false
   // Unread pages may still list it (a failed page waits for its retry).
   if (projects.locating === routeProjectId.value) return false
   if (settled.kind === 'empty') return true
   return settled.kind === 'success' && !settled.data.some((project) => project.id === routeProjectId.value)
+})
+// The trigger names the project the page shows. A selection whose navigation
+// is still pending (the guard reads the session first) is not current yet:
+// naming it early reports a switch the page has not made.
+const activeProject = computed<ProjectSchema | null>(() => {
+  if (!routeNamesProject.value) return projects.selectedProject
+  const settled = projects.settledProjects
+  return settled.kind === 'success' ? settled.data.find((project) => project.id === routeProjectId.value) ?? null : null
 })
 const triggerLabel = computed(() => {
   if (routeProjectUnavailable.value) return '项目不可用'

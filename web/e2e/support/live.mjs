@@ -205,9 +205,20 @@ export async function createProjectByUi(page, name) {
   const responsePromise = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/v1/projects')
   await dialog.getByRole('button', { name: '创建项目', exact: true }).click()
   const project = await expectJson(await responsePromise, 'PROJECT_CREATE_FAILED')
+  await expectAddressProject(page, project)
+  return project
+}
+
+/**
+ * The project switch is done once the navigation to it commits: the address
+ * names the project. A selection whose navigation still waits on the session
+ * guard is not current yet, and a new page opened before it commits leaves the
+ * old document to finish that switch and read the project's data.
+ */
+async function expectAddressProject(page, project) {
+  await expect.poll(() => new URL(page.url()).searchParams.get('projectId'), { timeout: 30_000 }).toBe(project.id)
   const trigger = page.getByRole('button', { name: '选择项目', exact: true })
   await expect(trigger.locator('.trigger-primary')).toHaveText(project.name, { timeout: 30_000 })
-  return project
 }
 
 export async function selectProjectByUi(page, projectId) {
@@ -231,7 +242,7 @@ export async function selectProjectByUi(page, projectId) {
   }
   await expect(option).toHaveCount(1, { timeout: 30_000 })
   await option.click()
-  await expect(trigger.locator('.trigger-primary')).toHaveText(project.name)
+  await expectAddressProject(page, project)
 }
 
 export async function pollJson(request, path, predicate, label, timeout = 180_000) {
