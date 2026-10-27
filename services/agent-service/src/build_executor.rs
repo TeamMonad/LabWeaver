@@ -125,6 +125,20 @@ struct ContextResources {
     _budget: OwnedSemaphorePermit,
 }
 
+impl ContextResources {
+    fn new(
+        object: tempfile::TempPath,
+        workspace: TempDir,
+        budget: OwnedSemaphorePermit,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            _object: object,
+            workspace,
+            _budget: budget,
+        })
+    }
+}
+
 struct MappedContext {
     mapping: Mmap,
     _spool: Arc<tempfile::TempPath>,
@@ -342,11 +356,7 @@ impl ProductionBuildExecutor {
             );
             return Err(failure);
         }
-        let resources = Arc::new(ContextResources {
-            _object: object.into_path(),
-            workspace,
-            _budget: context_budget,
-        });
+        let resources = ContextResources::new(object.into_path(), workspace, context_budget);
         let tag = candidate_tag(identity);
         let tagged = format!("{}:{tag}", command.request.output_repository);
         // BuildKit solves with a push-to-registry exporter. The authoritative
@@ -2487,24 +2497,30 @@ mod tests {
         );
     }
 
-    fn context_resources_fixture(parent: &Path, budget: &Arc<Semaphore>) -> Arc<ContextResources> {
-        Arc::new(ContextResources {
-            _object: NamedTempFile::new_in(parent)
-                .expect("object")
-                .into_temp_path(),
-            workspace: TempDir::new_in(parent).expect("workspace"),
-            _budget: budget
+    fn context_resources_fixture(
+        parent: &Path,
+        budget: &Arc<Semaphore>,
+    ) -> (Arc<ContextResources>, PathBuf) {
+        let object = NamedTempFile::new_in(parent)
+            .expect("object")
+            .into_temp_path();
+        let object_path = object.to_path_buf();
+        let resources = ContextResources::new(
+            object,
+            TempDir::new_in(parent).expect("workspace"),
+            budget
                 .clone()
                 .try_acquire_many_owned(512)
                 .expect("reservation"),
-        })
+        );
+        (resources, object_path)
     }
 
     #[test]
     fn build_context_tar_uses_mmap_owner_and_cleans_spool() {
         let parent = tempfile::tempdir().expect("parent");
         let budget = Arc::new(Semaphore::new(1024));
-        let resources = context_resources_fixture(parent.path(), &budget);
+        let (resources, _) = context_resources_fixture(parent.path(), &budget);
         let directory = resources.workspace.path();
         std::fs::write(
             directory.join("Dockerfile"),
@@ -2698,8 +2714,7 @@ mod tests {
         for exit in ["success", "failure", "cancellation"] {
             let parent = tempfile::tempdir().expect("private parent");
             let budget = Arc::new(Semaphore::new(1024));
-            let resources = context_resources_fixture(parent.path(), &budget);
-            let object_path = resources._object.to_path_buf();
+            let (resources, object_path) = context_resources_fixture(parent.path(), &budget);
             let workspace_path = resources.workspace.path().to_path_buf();
             std::fs::write(workspace_path.join("Dockerfile"), "FROM scratch\n").expect("workspace");
             let (spool, bytes) = tar_context(resources.clone()).expect("spool");
