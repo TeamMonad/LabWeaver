@@ -118,6 +118,25 @@ pub struct ProductionBuildExecutor {
     harbor_password: String,
 }
 
+// Declaration order is drop order: release the byte reservation only after both disk inputs.
+struct ContextResources {
+    _object: tempfile::TempPath,
+    workspace: TempDir,
+    _budget: OwnedSemaphorePermit,
+}
+
+struct MappedContext {
+    mapping: Mmap,
+    _spool: Arc<tempfile::TempPath>,
+    _resources: Arc<ContextResources>,
+}
+
+impl AsRef<[u8]> for MappedContext {
+    fn as_ref(&self) -> &[u8] {
+        &self.mapping
+    }
+}
+
 impl ProductionBuildExecutor {
     pub fn new(
         config: ProductionBuildExecutorConfig,
@@ -232,40 +251,6 @@ impl ProductionBuildExecutor {
         })
     }
 
-    async fn acquire_context_budget(
-        &self,
-        size_bytes: u64,
-        media_type: &str,
-        context: &BuildProviderRequestContext,
-        cancellation: &CancellationToken,
-    ) -> Result<OwnedSemaphorePermit, BuildProviderFailure> {
-        let permits = context_budget_permits(
-            self.config.max_unpacked_context_bytes,
-            size_bytes,
-            media_type,
-        )
-        .inspect_err(|_| {
-            tracing::warn!(
-                event = "agent.build_executor.context_size_rejected",
-                build_request_id = %context.build_request_id,
-                configured_limit_bytes = self.config.max_unpacked_context_bytes,
-                declared_size_bytes = size_bytes,
-                safe_detail = "build_context_exceeds_configured_limit",
-            );
-        })?;
-        let acquire = self.context_budget.clone().acquire_many_owned(permits);
-        let remaining = std::time::Duration::try_from(
-            context.deadline_at.get() - time::OffsetDateTime::now_utc(),
-        )
-        .unwrap_or_default();
-        tokio::select! {
-            biased;
-            () = cancellation.cancelled() => Err(stopped_failure(context)),
-            () = tokio::time::sleep(remaining) => Err(stopped_failure(context)),
-            result = acquire => result.map_err(|_| unavailable()),
-        }
-    }
-
     async fn build(
         &self,
         context: &BuildProviderRequestContext,
@@ -288,14 +273,15 @@ impl ProductionBuildExecutor {
         // Reserve once before opening the object body. Gzip reserves the full cap rather than
         // trusting its compressed size or ISIZE trailer; the permit outlives the object file,
         // workspace and BuildKit spool (including the mmap upload owner).
-        let context_budget = self
-            .acquire_context_budget(
-                build_context.size_bytes,
-                &build_context.media_type,
-                context,
-                cancellation,
-            )
-            .await?;
+        let context_budget = acquire_context_budget(
+            &self.context_budget,
+            self.config.max_unpacked_context_bytes,
+            build_context.size_bytes,
+            &build_context.media_type,
+            context,
+            cancellation,
+        )
+        .await?;
         let remaining = std::time::Duration::try_from(
             context.deadline_at.get() - time::OffsetDateTime::now_utc(),
         )
@@ -356,6 +342,11 @@ impl ProductionBuildExecutor {
             );
             return Err(failure);
         }
+        let resources = Arc::new(ContextResources {
+            _object: object.into_path(),
+            workspace,
+            _budget: context_budget,
+        });
         let tag = candidate_tag(identity);
         let tagged = format!("{}:{tag}", command.request.output_repository);
         // BuildKit solves with a push-to-registry exporter. The authoritative
@@ -364,7 +355,7 @@ impl ProductionBuildExecutor {
         let digest = self
             .run_buildkit(
                 context,
-                workspace.path(),
+                resources,
                 dockerfile_path,
                 &tagged,
                 &command.request.network,
@@ -546,12 +537,13 @@ impl ProductionBuildExecutor {
     async fn run_buildkit(
         &self,
         request_context: &BuildProviderRequestContext,
-        workspace: &Path,
+        resources: Arc<ContextResources>,
         dockerfile_path: &str,
         tagged: &str,
         network: &BuildNetworkPolicy,
         cancellation: &CancellationToken,
     ) -> Result<String, BuildProviderFailure> {
+        let workspace = resources.workspace.path();
         if !self.config.service_image.is_empty() {
             ensure_global_service_image_arg(workspace, dockerfile_path)?;
         }
@@ -565,7 +557,7 @@ impl ProductionBuildExecutor {
             () = tokio::time::sleep(remaining) => return Err(stopped_failure(request_context)),
             result = self.rewrite_dockerfile_base_images(workspace, dockerfile_path) => result?,
         }
-        let (context_spool, context) = tar_context(workspace)?;
+        let (_context_spool, context) = tar_context(resources.clone())?;
         let endpoint = self.buildkit_endpoint()?;
         let platform = ImageBuildPlatform {
             os: String::from("linux"),
@@ -612,8 +604,8 @@ impl ProductionBuildExecutor {
         // The non-Send solve and its spawned session tasks share this owned runtime.
         // Shutdown closes async connections; bounded file/DNS blocking work may outlive it.
         // Joining alone is not remote stop proof.
+        let upload_context = context.clone();
         let thread = std::thread::Builder::new().name("agent-buildkit".to_owned()).spawn(move || {
-            let spool_guard = context_spool;
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()
                     .map_err(|_| execution_unknown())?;
                 let mut credentials = std::collections::HashMap::new();
@@ -626,7 +618,7 @@ impl ProductionBuildExecutor {
                     },
                 );
                 let result = runtime.block_on(async {
-                    let input = ImageBuildLoadInput::Upload(context);
+                    let input = ImageBuildLoadInput::Upload(upload_context);
                     let daemon = BuildkitDaemon::new(solve_endpoint);
                     tokio::select! {
                         biased;
@@ -635,7 +627,6 @@ impl ProductionBuildExecutor {
                         result = daemon.registry(output, frontend, input, Some(credentials)) => Some(result.is_ok()),
                     }
                 });
-                drop(spool_guard);
                 Ok(result)
             }).map_err(|_| execution_unknown())?;
         let outcome = tokio::task::spawn_blocking(move || thread.join())
@@ -1333,6 +1324,30 @@ impl BuildExecutorBackend for ProductionBuildExecutor {
     }
 }
 
+async fn acquire_context_budget(
+    budget: &Arc<Semaphore>,
+    configured_budget_bytes: u64,
+    size_bytes: u64,
+    media_type: &str,
+    context: &BuildProviderRequestContext,
+    cancellation: &CancellationToken,
+) -> Result<OwnedSemaphorePermit, BuildProviderFailure> {
+    let permits = context_budget_permits(configured_budget_bytes, size_bytes, media_type)?;
+    let acquire = budget.clone().acquire_many_owned(permits);
+    let remaining =
+        std::time::Duration::try_from(context.deadline_at.get() - time::OffsetDateTime::now_utc())
+            .unwrap_or_default();
+    if remaining.is_zero() {
+        return Err(stopped_failure(context));
+    }
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Err(stopped_failure(context)),
+        () = tokio::time::sleep(remaining) => Err(stopped_failure(context)),
+        result = acquire => result.map_err(|_| unavailable()),
+    }
+}
+
 fn context_budget_permits(
     configured_budget_bytes: u64,
     declared_size_bytes: u64,
@@ -1752,14 +1767,17 @@ fn ensure_global_service_image_arg(
 
 /// Pack the unpacked build workspace into a private spool file, then expose it to `BuildKit` through
 /// an owner-backed `Bytes` view. The tar archive is never copied into a heap `Vec`.
-fn tar_context(workspace: &Path) -> Result<(tempfile::TempPath, Bytes), BuildProviderFailure> {
+fn tar_context(
+    resources: Arc<ContextResources>,
+) -> Result<(Arc<tempfile::TempPath>, Bytes), BuildProviderFailure> {
+    let workspace = resources.workspace.path();
     let parent = workspace.parent().ok_or_else(rejected)?;
     let temporary = NamedTempFile::new_in(parent).map_err(|_| unavailable())?;
-    let path = temporary.into_temp_path();
+    let path = Arc::new(temporary.into_temp_path());
     let output = std::fs::OpenOptions::new()
         .write(true)
         .truncate(true)
-        .open(&path)
+        .open(path.as_ref())
         .map_err(|_| unavailable())?;
     let mut builder = tar::Builder::new(output);
     builder.follow_symlinks(false);
@@ -1768,19 +1786,23 @@ fn tar_context(workspace: &Path) -> Result<(tempfile::TempPath, Bytes), BuildPro
         .map_err(|_| rejected())?;
     let output = builder.into_inner().map_err(|_| rejected())?;
     output.sync_all().map_err(|_| unavailable())?;
-    let context = map_spool(&path)?;
+    let mapping = map_spool(&path)?;
+    let context = Bytes::from_owner(MappedContext {
+        mapping,
+        _spool: path.clone(),
+        _resources: resources,
+    });
     Ok((path, context))
 }
 /// Maps a completed private spool. The file is created and owned by this process, is not exposed
 /// to another process, and is never truncated or written while the mapping exists.
 #[allow(unsafe_code)]
-fn map_spool(path: &Path) -> Result<Bytes, BuildProviderFailure> {
+fn map_spool(path: &Path) -> Result<Mmap, BuildProviderFailure> {
     let file = std::fs::File::open(path).map_err(|_| unavailable())?;
-    // SAFETY: the spool file is created exclusively by this process through TempPath, written and
-    // flushed before mapping; it is not written or truncated while mapped, and its path is not
-    // exposed to another process. Bytes drops before TempPath removes the file.
-    let mmap = unsafe { Mmap::map(&file) }.map_err(|_| unavailable())?;
-    Ok(Bytes::from_owner(mmap))
+    // SAFETY: this private spool is created exclusively by this process, completed and flushed
+    // before mapping, and never modified or truncated afterwards. MappedContext owns the mapping
+    // before the TempPath, so the last Bytes clone unmaps it before unlinking its backing file.
+    unsafe { Mmap::map(&file) }.map_err(|_| unavailable())
 }
 
 /// Convert the deployment-owned `tcp://host:port` `BuildKit` address into the
@@ -2465,15 +2487,31 @@ mod tests {
         );
     }
 
+    fn context_resources_fixture(parent: &Path, budget: &Arc<Semaphore>) -> Arc<ContextResources> {
+        Arc::new(ContextResources {
+            _object: NamedTempFile::new_in(parent)
+                .expect("object")
+                .into_temp_path(),
+            workspace: TempDir::new_in(parent).expect("workspace"),
+            _budget: budget
+                .clone()
+                .try_acquire_many_owned(512)
+                .expect("reservation"),
+        })
+    }
+
     #[test]
     fn build_context_tar_uses_mmap_owner_and_cleans_spool() {
-        let directory = tempfile::tempdir().expect("temporary directory");
+        let parent = tempfile::tempdir().expect("parent");
+        let budget = Arc::new(Semaphore::new(1024));
+        let resources = context_resources_fixture(parent.path(), &budget);
+        let directory = resources.workspace.path();
         std::fs::write(
-            directory.path().join("Dockerfile"),
+            directory.join("Dockerfile"),
             "FROM scratch\nCOPY . /workspace\n",
         )
         .expect("write Dockerfile");
-        let (spool, archive) = tar_context(directory.path()).expect("packed context");
+        let (spool, archive) = tar_context(resources).expect("packed context");
         let spool_path = spool.to_path_buf();
         assert!(spool_path.exists());
         assert!(!archive.is_empty(), "mapped spool contains the upload tar");
@@ -2511,10 +2549,20 @@ mod tests {
             assert!(RepositoryIdentity::parse(invalid, "harbor.internal").is_err());
         }
     }
-    #[test]
-    fn oversized_context_is_rejected_before_opening_body() {
+    #[tokio::test]
+    async fn oversized_context_is_rejected_before_opening_body() {
+        let budget = Arc::new(Semaphore::new(1024));
+        let (context, _, _) = history_fixture();
         let opened = std::cell::Cell::new(false);
-        let result = context_budget_permits(1024, 1025, "application/x-tar");
+        let result = acquire_context_budget(
+            &budget,
+            1024,
+            1025,
+            "application/x-tar",
+            &context,
+            &CancellationToken::new(),
+        )
+        .await;
         if result.is_ok() {
             opened.set(true);
         }
@@ -2538,12 +2586,26 @@ mod tests {
     #[tokio::test]
     async fn context_budget_waits_for_total_reservation_and_cancels_without_leaking() {
         let budget = Arc::new(Semaphore::new(100));
-        let held = budget
-            .clone()
-            .acquire_many_owned(70)
-            .await
-            .expect("first build");
-        let second = budget.clone().acquire_many_owned(40);
+        let (context, _, _) = history_fixture();
+        let cancellation = CancellationToken::new();
+        let held = acquire_context_budget(
+            &budget,
+            100,
+            70,
+            "application/x-tar",
+            &context,
+            &cancellation,
+        )
+        .await
+        .expect("first build");
+        let second = acquire_context_budget(
+            &budget,
+            100,
+            40,
+            "application/x-tar",
+            &context,
+            &cancellation,
+        );
         tokio::pin!(second);
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(20), &mut second)
@@ -2551,21 +2613,45 @@ mod tests {
                 .is_err()
         );
         drop(held);
-        let second = tokio::time::timeout(std::time::Duration::from_secs(1), second)
-            .await
-            .expect("second build unblocked")
-            .expect("permit");
+        let held = second.await.expect("second build unblocked");
         assert_eq!(budget.available_permits(), 60);
-        let cancelled = CancellationToken::new();
-        let mut waiting = Box::pin(budget.clone().acquire_many_owned(70));
-        cancelled.cancel();
-        tokio::select! {
-            biased;
-            () = cancelled.cancelled() => {}
-            result = &mut waiting => panic!("budget unexpectedly available: {result:?}"),
-        }
-        drop(waiting);
-        drop(second);
+        let mut waiting = Box::pin(acquire_context_budget(
+            &budget,
+            100,
+            70,
+            "application/x-tar",
+            &context,
+            &cancellation,
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiting)
+                .await
+                .is_err()
+        );
+        cancellation.cancel();
+        assert_eq!(
+            waiting.await.expect_err("cancelled").code,
+            BuildProviderFailureCode::Cancelled
+        );
+        drop(held);
+        assert_eq!(budget.available_permits(), 100);
+        let (mut context, _, _) = history_fixture();
+        context.deadline_at = contracts::UtcTimestamp::from_utc(
+            time::OffsetDateTime::now_utc() - time::Duration::seconds(1),
+        )
+        .expect("expired deadline");
+        let held = budget.clone().acquire_many_owned(100).await.expect("busy");
+        let expired = acquire_context_budget(
+            &budget,
+            100,
+            70,
+            "application/x-tar",
+            &context,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(expired.is_err(), "deadline cancels budget wait");
+        drop(held);
         assert_eq!(budget.available_permits(), 100);
     }
 
@@ -2607,46 +2693,44 @@ mod tests {
         assert_eq!(budget.available_permits(), 1024);
     }
 
-    #[test]
-    fn build_context_guards_remove_object_workspace_and_spool_on_all_exits() {
+    #[tokio::test]
+    async fn build_context_guards_remove_object_workspace_and_spool_on_all_exits() {
         for exit in ["success", "failure", "cancellation"] {
             let parent = tempfile::tempdir().expect("private parent");
-            let object_path;
-            let workspace_path;
-            let spool_path;
-            {
-                let budget = Semaphore::new(1024);
-                let permit = budget.try_acquire_many(512).expect("reservation");
-                let object = NamedTempFile::new_in(parent.path()).expect("object");
-                object_path = object.path().to_path_buf();
-                let workspace = TempDir::new_in(parent.path()).expect("workspace");
-                workspace_path = workspace.path().to_path_buf();
-                std::fs::write(workspace.path().join("Dockerfile"), "FROM scratch\n")
-                    .expect("write workspace");
-                let (spool, bytes) = tar_context(workspace.path()).expect("spool");
-                spool_path = spool.to_path_buf();
-                assert!(object_path.exists() && workspace_path.exists() && spool_path.exists());
+            let budget = Arc::new(Semaphore::new(1024));
+            let resources = context_resources_fixture(parent.path(), &budget);
+            let object_path = resources._object.to_path_buf();
+            let workspace_path = resources.workspace.path().to_path_buf();
+            std::fs::write(workspace_path.join("Dockerfile"), "FROM scratch\n").expect("workspace");
+            let (spool, bytes) = tar_context(resources.clone()).expect("spool");
+            let spool_path = spool.to_path_buf();
+            let upload_clone = bytes.clone();
+            let task = tokio::spawn(async move {
+                let _resources = resources;
+                let _spool = spool;
+                let _bytes = bytes;
                 match exit {
-                    "success" => assert!(!bytes.is_empty()),
-                    "failure" => assert!(
-                        unpack_context(&b"not tar"[..], "invalid", workspace.path(), 512).is_err()
-                    ),
-                    _ => {
-                        let cancellation = CancellationToken::new();
-                        cancellation.cancel();
-                        assert!(cancellation.is_cancelled());
-                    }
+                    "success" => Ok(()),
+                    "failure" => Err(rejected()),
+                    _ => std::future::pending().await,
                 }
-                drop(bytes);
-                drop(spool);
-                drop(workspace);
-                drop(object);
-                drop(permit);
-                assert_eq!(budget.available_permits(), 1024);
+            });
+            if exit == "cancellation" {
+                task.abort();
+                assert!(task.await.expect_err("aborted").is_cancelled());
+            } else {
+                let result = task.await.expect("workflow joined");
+                assert_eq!(result.is_ok(), exit == "success");
             }
+            // A session task may retain a Bytes clone after the workflow is dropped. All files
+            // and the unchanged full reservation must survive that clone, not just the mmap.
+            assert!(object_path.exists() && workspace_path.exists() && spool_path.exists());
+            assert_eq!(budget.available_permits(), 512);
+            drop(upload_clone);
             assert!(!object_path.exists(), "{exit}: object removed");
             assert!(!workspace_path.exists(), "{exit}: workspace removed");
             assert!(!spool_path.exists(), "{exit}: spool removed");
+            assert_eq!(budget.available_permits(), 1024);
         }
     }
 

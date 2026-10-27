@@ -6,9 +6,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 ALLOWED_FILE = "services/agent-service/src/build_executor.rs"
-ATTRIBUTE = re.compile(r"#(!?)\[\s*allow\s*\(([^)]*)\)\s*\]", re.DOTALL)
+ATTRIBUTE = re.compile(r"#(!?)\s*\[\s*allow\s*\(([^)]*)\)\s*\]", re.DOTALL)
 # Only whitespace, doc comments and other attributes may separate the allow from the fn.
-DECORATION = re.compile(r"(?:\s|///[^\n]*|//![^\n]*|#\[[^\]]*\])*fn\s+map_spool\b")
+DECORATION = re.compile(r"(?:\s|///[^\n]*|/\*\*.*?\*/|#\[[^\]]*\])*fn\s+map_spool\b", re.DOTALL)
 
 
 def tracked_rust_files():
@@ -55,18 +55,34 @@ class UnsafeAllowlistTests(unittest.TestCase):
 
     def test_scratch_second_allow_turns_red(self):
         source = "#[allow(unsafe_code)]\nfn map_spool() {}\n#[allow(unsafe_code)]\nfn other() {}"
-        self.assertNotEqual(allow_sites({ALLOWED_FILE: source}), [True])
+        with self.assertRaises(AssertionError):
+            self.assertEqual(allow_sites({ALLOWED_FILE: source}), [True])
+        print("scratch second allow: gate RED (expected); original sources unchanged")
 
     def test_scratch_multiline_allow_is_detected(self):
         source = "#[allow(unsafe_code)]\nfn map_spool() {}\n#[allow(\n unsafe_code\n)]\nfn other() {}"
-        self.assertNotEqual(allow_sites({ALLOWED_FILE: source}), [True])
+        with self.assertRaises(AssertionError):
+            self.assertEqual(allow_sites({ALLOWED_FILE: source}), [True])
+        print("scratch multi-line second allow: gate RED (expected); original sources unchanged")
 
     def test_scratch_moved_allow_turns_red(self):
         source = "#[allow(unsafe_code)]\n/// Documentation\n#[inline]\nfn other() {}\nfn map_spool() {}"
-        self.assertNotEqual(allow_sites({ALLOWED_FILE: source}), [True])
+        with self.assertRaises(AssertionError):
+            self.assertEqual(allow_sites({ALLOWED_FILE: source}), [True])
+        print("scratch allow on another fn: gate RED (expected); original sources unchanged")
 
     def test_scratch_deny_outside_rust_table_turns_red(self):
-        self.assertFalse(workspace_denies_unsafe('[workspace.lints.rust]\nmissing_docs = "warn"\n[workspace.lints.clippy]\nunsafe_code = "deny"'))
+        with self.assertRaises(AssertionError):
+            self.assertTrue(workspace_denies_unsafe('[workspace.lints.rust]\nmissing_docs = "warn"\n[workspace.lints.clippy]\nunsafe_code = "deny"'))
+        print("scratch deny outside rust table: gate RED (expected); original manifest unchanged")
+
+    def test_multiline_single_allow_and_intervening_docs_and_attributes(self):
+        source = "#[allow(\n unsafe_code\n)]\n/** Documentation */\n#[inline]\nfn map_spool() {}"
+        self.assertEqual(allow_sites({ALLOWED_FILE: source}), [True])
+
+    def test_other_items_cannot_separate_the_allow_from_map_spool(self):
+        source = "#[allow(unsafe_code)]\nconst OTHER: bool = true;\nfn map_spool() {}"
+        self.assertNotEqual(allow_sites({ALLOWED_FILE: source}), [True])
 
 
 if __name__ == "__main__":
