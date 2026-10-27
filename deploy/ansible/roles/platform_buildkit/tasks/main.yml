@@ -1,8 +1,37 @@
 ---
+
 - name: Load immutable Sprint 2 BuildKit identity
   ansible.builtin.set_fact:
     platform_buildkit_lock: >-
       {{ lookup('ansible.builtin.file', labweaver_versions_lock_file | default(playbook_dir ~ '/../../versions.lock.yml')) | from_yaml }}
+
+- name: Require verified BuildKit installation identity
+  ansible.builtin.assert:
+    that:
+      - labweaver_installation_id | default('') is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - labweaver_installation_id == lookup('ansible.builtin.env', 'LW_BUNDLE_INSTALLATION_ID')
+    fail_msg: PLATFORM_BUILDKIT_INSTALLATION_ID_REQUIRED
+  when: platform_buildkit_kubeconfig is defined
+- name: Read the existing BuildKit namespace before mutation
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_buildkit_kubeconfig }}"
+    api_version: v1
+    kind: Namespace
+    name: "{{ platform_buildkit_namespace }}"
+  register: platform_buildkit_existing_namespace
+  changed_when: false
+
+- name: Refuse to adopt an unowned BuildKit namespace
+  ansible.builtin.assert:
+    that:
+      - platform_buildkit_existing_namespace.resources | length == 0 or
+        (
+          platform_buildkit_existing_namespace.resources[0].metadata.labels['app.kubernetes.io/part-of'] | default('') == 'labweaver-infrastructure' and
+          platform_buildkit_existing_namespace.resources[0].metadata.labels['labweaver.io/infrastructure'] | default('') == 'true' and
+          platform_buildkit_existing_namespace.resources[0].metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id
+        )
+    fail_msg: PLATFORM_BUILDKIT_NAMESPACE_OWNERSHIP_CONFLICT
+  changed_when: false
 
 - name: Validate Sprint 2 BuildKit inputs
   ansible.builtin.assert:
@@ -220,6 +249,28 @@
            '    prometheus :9153',
            platform_buildkit_coredns_harbor_block ~ '    prometheus :9153')) }}
 
+- name: Inspect every planned BuildKit object before mutation
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_buildkit_kubeconfig }}"
+    api_version: "{{ item.apiVersion }}"
+    kind: "{{ item.kind }}"
+    namespace: "{{ item.metadata.namespace }}"
+    name: "{{ item.metadata.name }}"
+  loop: >-
+    {{ platform_buildkit_objects +
+       (lookup('ansible.builtin.template', 'workloads.yml.j2') | from_yaml_all | list) }}
+  register: platform_buildkit_object_ownership
+  no_log: true
+
+- name: Refuse to overwrite any unowned BuildKit object
+  ansible.builtin.assert:
+    that:
+      - item.resources | length == 0 or
+        item.resources[0].metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id
+    fail_msg: PLATFORM_BUILDKIT_OBJECT_OWNERSHIP_CONFLICT
+  loop: "{{ platform_buildkit_object_ownership.results }}"
+  no_log: true
+
 - name: Reconcile additive Harbor cluster DNS resolution
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_buildkit_kubeconfig }}"
@@ -277,6 +328,8 @@
       kind: Namespace
       metadata:
         name: "{{ platform_buildkit_namespace }}"
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
         labels:
           app.kubernetes.io/part-of: labweaver-infrastructure
           labweaver.io/infrastructure: "true"
@@ -289,7 +342,7 @@
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_buildkit_kubeconfig }}"
     state: present
-    definition: "{{ item }}"
+    definition: "{{ item | combine({'metadata': {'annotations': {'labweaver.io/installation-id': labweaver_installation_id}}}, recursive=True) }}"
   loop: "{{ platform_buildkit_objects }}"
   no_log: true
 
@@ -297,7 +350,7 @@
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_buildkit_kubeconfig }}"
     state: present
-    definition: "{{ item }}"
+    definition: "{{ item | combine({'metadata': {'annotations': {'labweaver.io/installation-id': labweaver_installation_id}}}, recursive=True) }}"
   loop: >-
     {{ lookup('ansible.builtin.template', 'workloads.yml.j2') | from_yaml_all | list }}
 

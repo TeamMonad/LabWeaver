@@ -1,7 +1,10 @@
 {% for namespace in labweaver_namespaces %}
 apiVersion: v1
 kind: Namespace
-metadata: { name: {{ namespace }} }
+metadata:
+  name: {{ namespace }}
+  labels: {app.kubernetes.io/part-of: labweaver-infrastructure}
+  annotations: {labweaver.io/installation-id: {{ labweaver_installation_id | quote }}}
 ---
 {% endfor %}
 apiVersion: v1

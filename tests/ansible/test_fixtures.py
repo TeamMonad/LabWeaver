@@ -1519,7 +1519,9 @@ class AnsibleFixtureTests(unittest.TestCase):
             tasks.index("Reconcile the exact CDI clone source network policy"),
             tasks.index("Deploy the immutable configured platform profile"),
         )
-        self.assertEqual(tasks.count("'--take-ownership'"), 2)
+        self.assertNotIn("'--take-ownership'", tasks)
+        self.assertIn("labweaver-installation:", tasks)
+        self.assertNotIn("Deploy the identical profile a second time", tasks)
 
     def test_platform_application_uses_supported_nats_account_probe(self) -> None:
         tasks = (

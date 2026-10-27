@@ -92,7 +92,34 @@ bundle 并按第 4 节部署，不能只改 Pod 环境变量。
 
 ## 2. 首次安装和基础层
 
-### 2.1 预检
+### 2.1 统一安装入口与模式
+
+新装、采用既有集群、升级与显式清空使用同一个加密 Bundle 的 `deploy` 子命令。先生成并加密 Bundle，在 `config/bundle.yaml` 的 `target` 中配置稳定的 `installationId`（小写 UUID，升级/中断重试不得更换）。其中 `resource.target` 仍独立声明 namespace/release；平台和 Resource 由同一个安装 ID 绑定。入口先解密并完整校验 Bundle，xtask 只接受该运行目录的清单；每个模式在集群修改前执行完整 `00-preflight.yml`。预检、归属或依赖失败时停止，不用额外旗标强制接管资源。
+
+```sh
+python tools/deployment_bundle.py deploy --archive .private/installation.age \
+  --identity .private/operator-age-key.txt --env v1 --mode install --yes
+
+python tools/deployment_bundle.py deploy --archive .private/installation.age \
+  --identity .private/operator-age-key.txt --env v1 --mode adopt --yes
+
+python tools/deployment_bundle.py deploy --archive .private/installation.age \
+  --identity .private/operator-age-key.txt --env v1 --mode upgrade --stage services --yes
+```
+
+`--stage all|preflight|infrastructure|identity|storage|services|route` 选择重入的阶段；入口不持久记录阶段成功事实。中断后先从目标集群核对 Helm release、身份与业务状态，再用同一个安装 ID 重试该阶段。`adopt` 不直接运行整站 `site.yml`；缺失的归属标记或发现不相符的 namespace/对象/release 时拒绝覆盖，已有但没有安装 ID 的旧实例需要人工审查与单独迁移，不会自动认领。`upgrade` 不重装基础设施或 BuildKit，也不触发清空；应用迁移仍是前向操作，回退前先检查 schema 与拟回退应用版本是否兼容。
+
+清空仅能在另行授权的维护窗口执行，必须指定目标、范围和原 Bundle 安装 ID；会删除所选安装拥有的 namespace、相关卷和两个应用 release，必须先完成独立备份与数据处置审批。不满足完整预检或任何目标无法证明归属时停止，外国 `lw-env-*` 命名空间不因名称相似被选中：
+
+```sh
+python tools/deployment_bundle.py deploy --archive .private/installation.age \
+  --identity .private/operator-age-key.txt --env v1 --mode wipe \
+  --target labweaver --scope platform --yes
+```
+
+仅使用 `validate`、`seal` 或不带 `--yes` 的部署命令不会修改集群；不带 `--mode` 的 `cargo xtask deploy --infra` 已拒绝。产品镜像包部署是单独的 `cargo xtask deploy --env ... --package-manifest ...` 路径，不是本节的安装/采用入口。
+
+### 2.2 预检
 
 使用 `xtask` 运行仓库实际的 preflight 入口：
 
@@ -102,41 +129,19 @@ cargo xtask preflight --env v1 --infra
 
 只读检查结果后再进行任何节点变更。手工 Ansible 入口是 `deploy/ansible/playbooks/00-preflight.yml`；需要额外指定范围时使用现有 playbook 支持的变量，不自行添加新的校验脚本。
 
-### 2.2 新集群基础安装
+### 2.3 新集群基础安装
 
-仅在目标集群尚未安装 Kubernetes、网络、存储、KubeVirt、sandbox runtime 和 public ingress 时执行完整站点 playbook。该入口依次导入 `00-preflight.yml`、节点准备、Kubernetes、网络、存储、KubeVirt、`75-sandbox-runtime.yml`、addons 和 `82-public-ingress.yml`：
+仅由统一入口执行目标集群基础阶段；该阶段复用 `site.yml` 依次导入主机预检、节点准备、Kubernetes、网络、存储、KubeVirt、sandbox runtime、addons 与 public ingress。它不在本地持久记录阶段状态。升级只执行所选阶段，不重复执行基础安装。
 
-```sh
-ANSIBLE_CONFIG=deploy/ansible/ansible.cfg \
-ansible-playbook \
-  -i deploy/ansible/inventories/v1/hosts.yml \
-  --vault-password-file deploy/ansible/inventories/v1/.vault-password \
-  deploy/ansible/playbooks/site.yml
-```
+### 2.4 持久化服务、BuildKit、Harbor 和身份
 
-已有集群的应用升级不要重复执行整站 playbook；使用第 4 节的 profile 入口。`cargo xtask deploy --env v1 --infra --yes` 对应 `95-harbor.yml`，只用于 Harbor 安装或维护，不是完整集群安装入口。
+在已有 Kubernetes 上，统一入口按依赖顺序调用现有 `platform-foundation`、`platform-buildkit`、`platform-harbor-route` roles；这些 playbook 是实现阶段，不再作为新装、采用或升级的独立入口。Harbor 本身不存在时，`install`/`adopt` 的基础设施阶段会调用现有 `95-harbor.yml`。
 
-### 2.3 持久化服务、BuildKit、Harbor 和身份
-
-在已有 Kubernetes 上首次接入应用时按依赖顺序执行幂等 reconcile：
-
-```sh
-cargo xtask platform-foundation --env v1 --infra --yes
-cargo xtask platform-buildkit --env v1 --infra --yes
-cargo xtask platform-harbor-route --env v1 --infra --yes
-```
-
-这些入口分别对应 `92-platform-foundation.yml`、`92-platform-buildkit.yml` 和 `92-platform-harbor-route.yml`。Harbor 本身不存在时才使用 `cargo xtask deploy --env v1 --infra --yes`。
+所有 profile 阶段都使用同一 Bundle 派生的版本、配置和 ownership 检查；重复应用同一 manifest 保持幂等，状态不明时先查询 release、Pod、Service 和业务页面，不创建第二个 release 或第二个 migration run。
 
 生产三节点安装先配置[高可用基线](high-availability.md)中的 Bundle `platform_foundation_ha`、裸盘清单与独立备份目标，再运行相同入口。HA profile 的版本锁、CNPG 同步 quorum、JetStream 三副本与存储健康拒绝准入由同一 Bundle 派生；缺少独立备份字段时校验失败。已有独立数据库不得直接原地转换，必须先进入获准的数据切换窗口。目标 RPO/RTO 已决定，实际兑现待 #208 恢复验收；RGW 切换尚需兼容验收，不把渲染通过当成生产故障恢复通过。
 
-Keycloak foundation 依赖 platform foundation 先安装的 CNPG/Barman operator 和 `ceph-rbd`，身份库固定为独立三实例 CNPG；不再部署单副本 StatefulSet。先按[高可用基线](high-availability.md)配置 `identity_foundation_ha` 的独立备份目标、频率、保留期，并在受保护的 root-only `identity-bootstrap.v2` locator 提供 `backup_access_key`、`backup_secret_key`、`backup_ca_crt` 及原有身份凭据。加密 Bundle 缺少目标或凭据时 fail-closed。locator 由私有清单提供，不能把内容、固定 UUID 或口令写进文档：
-
-```sh
-export LABWEAVER_IDENTITY_SECRET_LOCATOR="<private-identity-bootstrap-locator>"
-cargo xtask identity-foundation --env v1 --infra --yes --action deploy
-cargo xtask identity-foundation --env v1 --infra --yes --action verify
-```
+Keycloak foundation 由统一入口的 `identity` 阶段调用现有 role；不直接单独运行 `identity-foundation` 命令，以确保完整预检、Bundle 输入和阶段重入一致。身份库仍固定为独立三实例 CNPG；先按[高可用基线](high-availability.md)配置 `identity_foundation_ha` 的独立备份目标、频率、保留期，并在受保护的 root-only `identity-bootstrap.v2` locator 提供必要输入。加密 Bundle 缺少目标或凭据时 fail-closed。
 
 角色等待 `Cluster/identity-postgres` Ready 后才部署 Keycloak；Keycloak 通过 `identity-postgres-rw` 和校验 CA 的 TLS 连接身份库，应用卷仅投影 `ca.crt`，不投影 CNPG 的 `ca.key`。三主机基线仅支持整数 `identity_keycloak_replicas=2`，其他值在入口以 `IDENTITY_CONFIGURATION_INVALID` 拒绝。滚动更新采用 `maxSurge=0/maxUnavailable=1`、PDB 至少一个 Ready 副本；仅当至少两台 host 可调度时支持维护期间更新，不承诺“三副本只剩两台 host”可继续更新。已有旧身份 StatefulSet/Service 时按下节执行另行授权的空数据切换，角色不自动删除旧库、Secret、PVC 或账号数据。备份配置不代表备份执行或恢复目标已兑现，演练归 #208。
 
