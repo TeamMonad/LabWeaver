@@ -14,6 +14,7 @@ pub mod clients;
 mod manual_templates;
 mod material_uploads;
 mod membership_governance;
+mod course_calendar;
 pub mod messaging;
 mod model_input_authorization;
 pub mod notifications;
