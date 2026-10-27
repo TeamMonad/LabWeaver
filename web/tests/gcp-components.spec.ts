@@ -212,6 +212,40 @@ describe('GCP Console Components', () => {
       wrapper.unmount()
     })
 
+    it('names the project the page shows until the navigation to a newly chosen project commits', async () => {
+      const router = createRouter({
+        history: createMemoryHistory(),
+        routes: [{ path: '/researcher/environments', component: { template: '<div />' }, meta: { projectScoped: true } }],
+      })
+      await router.push({ path: '/researcher/environments', query: { projectId: 'project-cs101' } })
+      await router.isReady()
+      // As the app guard does while it reads the session: the next navigation waits.
+      // `Promise.withResolvers` is outside the project's ES2020 lib, so the executor form captures the resolver.
+      let release!: () => void
+      const held = new Promise<void>((resolve) => { release = resolve })
+      router.beforeEach(async () => { await held })
+      const wrapper = mount(GcpProjectSelector, { global: { plugins: [router] } })
+      try {
+        await vi.waitFor(() => expect(wrapper.find('.trigger-primary').text()).toBe('CS101 Operating Systems'))
+        await wrapper.find('.selector-trigger').trigger('click')
+        await vi.waitFor(() => expect(wrapper.findAll('.project-item')).toHaveLength(2))
+        await wrapper.findAll('.project-item')[1].trigger('click')
+        await flushPromises()
+        // The choice is kept, but the page and its requests still belong to CS101:
+        // a link opened now must not leave a switch to AI201 behind to commit.
+        expect(useProjects().selectedProjectId).toBe('project-ai201')
+        expect(router.currentRoute.value.query.projectId).toBe('project-cs101')
+        expect(wrapper.find('.trigger-primary').text()).toBe('CS101 Operating Systems')
+
+        release()
+        await vi.waitFor(() => expect(router.currentRoute.value.query.projectId).toBe('project-ai201'))
+        await flushPromises()
+        expect(wrapper.find('.trigger-primary').text()).toBe('AI201 Model Engineering')
+      } finally {
+        wrapper.unmount()
+      }
+    })
+
     it('opens dropdown when trigger is clicked', async () => {
       const wrapper = mount(GcpProjectSelector)
       expect(wrapper.find('.selector-menu').exists()).toBe(false)
