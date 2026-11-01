@@ -113,7 +113,8 @@ class VerifiedApplyBundleTests(unittest.TestCase):
         images["evaluation_runner"] = "registry.local/runner@sha256:" + "a" * 64
         images["authoring_sandbox"] = "registry.local/sandbox@sha256:" + "a" * 64
         make_app_input_with_local_cidrs(work, foundation, images, local_dev.fixture_provider_environment())
-        archive, identity, manifest = local_dev.prepare_local_managed_bundle(work, images, self.fixture.version)
+        version = dict(self.fixture.version, createdBy="019fa9d0-0000-7000-8000-000000000142")
+        archive, identity, manifest = local_dev.prepare_local_managed_bundle(work, images, version)
         with fixtures.bundle.opened_bundle(archive, identity, work / "bundle-runtime", manifest) as (root, rendered, metadata):
             source = json.loads((rendered / "platform-configuration-source.json").read_bytes())
             model, files = fixtures.bundle.load_bundle(root, manifest)
