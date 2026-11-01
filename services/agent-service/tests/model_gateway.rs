@@ -764,7 +764,7 @@ async fn gateway_observability_covers_admission_transport_and_http_without_secre
             assert_eq!(event.get("error_kind").map(String::as_str), Some(kind));
         }
         let recorded: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent.idempotency_ledger WHERE operation='model_gateway_request' AND idempotency_key=$1)")
-            .bind(match &f.authority.scope { agent_service::model_gateway::ModelGatewayScope::Authoring { task_run_id, .. } => task_run_id.to_string(), _ => return Err("authoring scope required".into()) }).fetch_one(&f.pool).await?;
+            .bind(match &f.authority.scope { agent_service::model_gateway::ModelGatewayScope::Authoring { task_run_id, .. } => task_run_id.to_string(), agent_service::model_gateway::ModelGatewayScope::Review { .. } => return Err("authoring scope required".into()) }).fetch_one(&f.pool).await?;
         assert!(
             recorded,
             "a request receipt survives upstream rejection and transport failure"
@@ -808,7 +808,9 @@ async fn gateway_preserves_native_resource_rate_unconfigured_without_upstream_ca
         agent_service::model_gateway::ModelGatewayScope::Authoring { task_run_id, .. } => {
             task_run_id.to_string()
         }
-        _ => return Err("authoring task required".into()),
+        agent_service::model_gateway::ModelGatewayScope::Review { .. } => {
+            return Err("authoring task required".into());
+        }
     };
     let observation: serde_json::Value = sqlx::query_scalar("SELECT result FROM agent.idempotency_ledger WHERE operation='model_gateway_request' AND idempotency_key=$1")
         .bind(task_id).fetch_one(&f.pool).await?;

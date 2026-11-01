@@ -4438,7 +4438,7 @@ mod tests {
         assert_eq!(
             output
                 .classified_error()
-                .map(|error| error.diagnostic_code()),
+                .map(ClaudeCodeRuntimeError::diagnostic_code),
             Some("LW_RESOURCE_RATE_UNCONFIGURED")
         );
     }
