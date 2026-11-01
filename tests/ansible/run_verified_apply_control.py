@@ -32,7 +32,8 @@ def main():
             if key:
                 headers["Idempotency-Key"] = key
             return executor.https_json(endpoint.rstrip("/") + path, ca, method=method,
-                                       payload=None if payload is None else json.dumps(payload), headers=headers)
+                                       payload=None if payload is None else json.dumps(payload), headers=headers,
+                                       expected_configuration_sha256=source["configurationSha256"] if method == "GET" and path == f"{executor.PREFIX}/applies/{self.apply_id}" else None)
 
         def observe(self):
             def read_peer(_pod):
@@ -49,6 +50,14 @@ def main():
             return observer.collect(expected, lambda: settings["roster"], read_peer)
 
     control = LiveControl()
+    if settings["case"] == "success":
+        try:
+            executor.https_json(endpoint.rstrip("/") + f"{executor.PREFIX}/applies/{control.apply_id}", ca,
+                                headers={"Authorization": f"Bearer {token}"}, expected_configuration_sha256="f" * 64)
+        except executor.ApplyError as error:
+            assert "intent-binding" in str(error)
+        else:
+            raise AssertionError("executor accepted a different immutable desired settings digest")
     executor.prepare(control)
     try:
         result = executor.finish(control)

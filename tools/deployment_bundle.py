@@ -1557,7 +1557,7 @@ def _derive_resource(
     )
 
 
-def _private_file(path: Path) -> bytes:
+def _private_file(path: Path, max_bytes: int = objects.MAX_FILE_BYTES) -> bytes:
     _private_directory(path.absolute().parent)
     _no_symlink_ancestors(path.absolute())
     info = path.stat()
@@ -1565,7 +1565,7 @@ def _private_file(path: Path) -> bytes:
         not stat.S_ISREG(info.st_mode)
         or info.st_uid != os.getuid()
         or info.st_mode & 0o077
-        or not 0 < info.st_size <= objects.MAX_FILE_BYTES
+        or not 0 < info.st_size <= max_bytes
     ):
         raise BundleError("LW_BUNDLE_PERMISSIONS_INVALID")
     return path.read_bytes()

@@ -31,7 +31,7 @@ def fail(stage, code="LW_PLATFORM_CONFIGURATION_EXECUTOR_FAILED"):
     raise ApplyError(f"{code}:{stage}")
 
 
-def https_json(url, ca, *, method="GET", payload=None, headers=None):
+def https_json(url, ca, *, method="GET", payload=None, headers=None, expected_configuration_sha256=None):
     parsed = urlsplit(url)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
         fail("identity", "LW_PLATFORM_CONFIGURATION_EXECUTOR_TLS_REQUIRED")
@@ -45,6 +45,8 @@ def https_json(url, ca, *, method="GET", payload=None, headers=None):
         body = response.read(1048577)
         if response.status != 200 or len(body) > 1048576:
             fail("identity")
+        if expected_configuration_sha256 is not None and response.getheader("X-Labweaver-Configuration-Sha256") != expected_configuration_sha256:
+            fail("intent-binding", "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH")
         return json.loads(body)
     finally:
         connection.close()
@@ -139,6 +141,8 @@ class Control:
                     except (ValueError, AttributeError):
                         pass
                     fail("control-api", code)
+                if method == "GET" and path == f"{PREFIX}/applies/{self.apply_id}" and response.getheader("X-Labweaver-Configuration-Sha256") != self.source["configurationSha256"]:
+                    fail("intent-binding", "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH")
                 return json.loads(body)
             finally:
                 connection.close()
@@ -235,6 +239,34 @@ def verify_release(target):
         fail("release-ownership")
 
 
+def apply_objects(path, target):
+    """Create or CAS-replace only this installation's actual derived objects."""
+    for desired in bundle.yaml.safe_load_all(bundle._private_file(path, bundle.MAX_ARCHIVE_BYTES * 2)):
+        metadata = desired["metadata"]
+        namespace = target["namespace"]
+        if (desired["kind"] not in {"ConfigMap", "Secret"} or metadata.get("namespace") != namespace
+                or metadata.get("annotations", {}).get("labweaver.io/installation-id") != target["installationId"]):
+            fail("release-ownership")
+        read = subprocess.run(["kubectl", "get", desired["kind"], metadata["name"], "-n", namespace,
+                               "--ignore-not-found", "-o", "json"], capture_output=True, timeout=10, check=False)
+        if read.returncode or len(read.stdout) > bundle.MAX_ARCHIVE_BYTES:
+            fail("release-ownership")
+        operation = "create"
+        # kubectl's explicit --ignore-not-found maps only API NotFound to an empty result.
+        if read.stdout.strip():
+            current = json.loads(read.stdout)["metadata"]
+            if (current.get("namespace") != namespace or not observer._uid(current.get("uid"))
+                    or not current.get("resourceVersion")
+                    or current.get("annotations", {}).get("labweaver.io/installation-id") != target["installationId"]):
+                fail("release-ownership")
+            metadata.update(uid=current["uid"], resourceVersion=current["resourceVersion"])
+            operation = "replace"
+        result = subprocess.run(["kubectl", operation, "-f", "-"], input=json.dumps(desired).encode(),
+                                capture_output=True, timeout=30, check=False)
+        if result.returncode:
+            fail("apply")
+
+
 def run(action):
     root = Path(os.environ["LW_BUNDLE_ROOT"])
     rendered = Path(os.environ["LW_BUNDLE_RENDERED_ROOT"])
@@ -278,10 +310,7 @@ def run(action):
         }
         overlay_file = rendered / "verified-control-values.yaml"
         bundle._write(overlay_file, bundle.yaml.safe_dump(overlay).encode())
-        applied = subprocess.run(["kubectl", "apply", "-f", str(rendered / "application.yaml")],
-                                 capture_output=True, timeout=60, check=False)
-        if applied.returncode:
-            fail("apply")
+        apply_objects(rendered / "application.yaml", model["target"])
         result = subprocess.run([
             "helm", "upgrade", source["installation"]["releaseName"],
             str(Path(__file__).resolve().parents[1] / "deploy/helm/labweaver"),

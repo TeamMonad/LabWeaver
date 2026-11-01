@@ -106,11 +106,17 @@ async fn read_intent(
     {
         return Err(ConfigurationError::ApplyConflict.into());
     }
+    let desired = configuration::get_version(&state.control.pool, attempt.desired_revision).await?;
     let revision = value.revision;
     let mut response = response(value, revision, StatusCode::OK)?;
     response
         .headers_mut()
         .insert("Cache-Control", HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        "X-Labweaver-Configuration-Sha256",
+        HeaderValue::from_str(&desired.configuration_sha256)
+            .map_err(|_| ApiError::internal("LW_PLATFORM_CONFIGURATION_INVALID"))?,
+    );
     Ok(response)
 }
 

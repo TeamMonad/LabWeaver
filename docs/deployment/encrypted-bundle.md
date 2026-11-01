@@ -525,6 +525,8 @@ configurationExecutor:
 
 `cargo xtask deploy --env <环境> --stage configuration --yes` 是同一执行器的配置投影阶段：在 prepare 与 finish 之间，应用本 Bundle 派生的应用 ConfigMap/Secret，再使用现有 Helm chart 将实际管理版本、来源和策略挂载到已有 release。对象摘要驱动服务按同一输入重启，并等待升级完成；NATS endpoint 在各服务启动时从其既有只读 Secret 挂载读取。它不初始化其他基础设施或替换其权限。该阶段仍要求已经登记且请求应用的真实 intent；没有 bypass 旗标，命令退出成功也不能代替 Control loaded 观察。
 
+内部 intent 读取同时返回绑定版本的 `X-Labweaver-Configuration-Sha256`；执行器在任何部署写入前核对它，而不是误用可能已被管理员推进的当前 desired。配置对象写入先核对 namespace 和 installation ID，只对显式 NotFound 创建新对象；已有对象以实际 UID/resourceVersion 条件替换。读取失败、归属不符或并发替换均失败关闭，不通过名称相似认领对象。
+
 
 完成已获准部署后，原执行者在 `verifying` 阶段收集一次实际观察：
 

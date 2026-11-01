@@ -3743,10 +3743,14 @@ def make_app_input(
     executor_values = derive_local_executor_authority(root, manifest, public_issuer)
     write(work / "environment-executor-values.yaml", yaml.safe_dump(executor_values))
     payload=render_bundle(manifest_path,root)
+    from deployment_bundle import _stamp_objects
+    installation_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "labweaver-local:" + RUN_ID))
+    payload = _stamp_objects(payload, installation_id)
     bundle=work/"platform-bundle.yaml"
     write(bundle,payload)
     from render_resource_bundle import render as render_resource_bundle
     resource_payload=render_resource_bundle(ROOT/"deploy/config/resource-bundle-manifest.json",resource_root,None)
+    resource_payload = _stamp_objects(resource_payload, installation_id)
     resource_bundle=work/"resource-bundle.yaml"
     write(resource_bundle,resource_payload)
     return bundle,resource_bundle,hashlib.sha256(payload).hexdigest()

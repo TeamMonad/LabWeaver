@@ -166,5 +166,34 @@ class LocalUpExecutorTests(unittest.TestCase):
             self.assertNotEqual(json.loads(local_dev.STATE_FILE.read_bytes())["phase"], "ready")
 
 
+class ManagedObjectOwnershipTests(unittest.TestCase):
+    def test_apply_requires_owned_reads_and_uses_uid_revision_preconditions(self):
+        target = {"namespace": "science", "installationId": "019fa9d0-0000-7000-8000-000000000142"}
+        desired = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {
+            "name": "control-service-config", "namespace": "science",
+            "annotations": {"labweaver.io/installation-id": target["installationId"]}}, "data": {"config.yaml": "configuration"}}
+        current = {"metadata": dict(desired["metadata"], uid=target["installationId"], resourceVersion="7")}
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / ".private/objects.yaml"
+            fixtures.write(path, yaml.safe_dump(desired).encode())
+            for observed, operation in ((b"", "create"), (json.dumps(current).encode(), "replace")):
+                with patch.object(executor.subprocess, "run", side_effect=[
+                    subprocess.CompletedProcess([], 0, observed, b""), subprocess.CompletedProcess([], 0, b"", b""),
+                ]) as commands:
+                    executor.apply_objects(path, target)
+                    self.assertEqual(commands.call_args.args[0][1], operation)
+                    written = json.loads(commands.call_args.kwargs["input"])
+                    if operation == "replace":
+                        self.assertEqual(written["metadata"]["uid"], current["metadata"]["uid"])
+                        self.assertEqual(written["metadata"]["resourceVersion"], "7")
+            foreign = {"metadata": dict(current["metadata"], annotations={"labweaver.io/installation-id": "foreign"})}
+            for read in (subprocess.CompletedProcess([], 1, b"", b"unreachable"),
+                         subprocess.CompletedProcess([], 0, json.dumps(foreign).encode(), b"")):
+                with patch.object(executor.subprocess, "run", return_value=read) as commands:
+                    with self.assertRaisesRegex(executor.ApplyError, "release-ownership"):
+                        executor.apply_objects(path, target)
+                    self.assertEqual(commands.call_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
