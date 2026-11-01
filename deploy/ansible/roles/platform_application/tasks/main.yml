@@ -47,7 +47,8 @@
     cmd: >-
       set -o pipefail;
       {{ platform_application_kubectl }} --kubeconfig {{ platform_application_kubeconfig }}
-      --namespace {{ platform_application_namespace }} get all,configmap,secret,serviceaccount,role,rolebinding,datavolume,persistentvolumeclaim,datasource,networkpolicy,ciliumnetworkpolicy,referencegrant
+      --namespace {{ platform_application_namespace }} get {{ 'all,configmap,secret,serviceaccount,role,rolebinding,' ~
+        'datavolume,persistentvolumeclaim,datasource,networkpolicy,ciliumnetworkpolicy,referencegrant' }}
       --output json |
       jq -e '.items as $all |
         def owned($object; $seen):

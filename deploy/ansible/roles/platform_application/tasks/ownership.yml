@@ -24,27 +24,57 @@
 - name: Bind the complete cross-namespace application mutation inventory
   ansible.builtin.set_fact:
     platform_application_cross_namespace_targets:
-      - {apiVersion: networking.k8s.io/v1, kind: NetworkPolicy, metadata: {name: oj-runner-default-deny, namespace: "{{ platform_application_evaluation_namespace }}"}}
-      - {apiVersion: networking.k8s.io/v1, kind: NetworkPolicy, metadata: {name: oj-runner-object-store-egress, namespace: "{{ platform_application_evaluation_namespace }}"}}
-      - {apiVersion: networking.k8s.io/v1, kind: NetworkPolicy, metadata: {name: ansible-probe-default-deny, namespace: "{{ platform_application_evaluation_namespace }}"}}
+      - apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        metadata: {name: oj-runner-default-deny, namespace: "{{ platform_application_evaluation_namespace }}"}
+      - apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        metadata: {name: oj-runner-object-store-egress, namespace: "{{ platform_application_evaluation_namespace }}"}
+      - apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        metadata: {name: ansible-probe-default-deny, namespace: "{{ platform_application_evaluation_namespace }}"}
       - {apiVersion: v1, kind: ServiceAccount, metadata: {name: oj-runner, namespace: "{{ platform_application_evaluation_namespace }}"}}
       - {apiVersion: v1, kind: ServiceAccount, metadata: {name: ansible-probe, namespace: "{{ platform_application_evaluation_namespace }}"}}
-      - {apiVersion: v1, kind: Secret, metadata: {name: "{{ platform_application_evaluation_pull_secret_name }}", namespace: "{{ platform_application_evaluation_namespace }}"}}
-      - {apiVersion: networking.k8s.io/v1, kind: NetworkPolicy, metadata: {name: authoring-default-deny, namespace: "{{ platform_application_authoring_namespace }}"}}
-      - {apiVersion: cilium.io/v2, kind: CiliumNetworkPolicy, metadata: {name: authoring-platform-egress, namespace: "{{ platform_application_authoring_namespace }}"}}
-      - {apiVersion: v1, kind: ServiceAccount, metadata: {name: "{{ platform_application_authoring_service_account_name }}", namespace: "{{ platform_application_authoring_namespace }}"}}
-      - {apiVersion: v1, kind: Secret, metadata: {name: "{{ platform_application_authoring_pull_secret_name }}", namespace: "{{ platform_application_authoring_namespace }}"}}
-      - {apiVersion: v1, kind: ConfigMap, metadata: {name: "{{ platform_application_authoring_buildkit_config_name }}", namespace: "{{ platform_application_authoring_namespace }}"}}
+      - apiVersion: v1
+        kind: Secret
+        metadata:
+          name: "{{ platform_application_evaluation_pull_secret_name }}"
+          namespace: "{{ platform_application_evaluation_namespace }}"
+      - apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        metadata: {name: authoring-default-deny, namespace: "{{ platform_application_authoring_namespace }}"}
+      - apiVersion: cilium.io/v2
+        kind: CiliumNetworkPolicy
+        metadata: {name: authoring-platform-egress, namespace: "{{ platform_application_authoring_namespace }}"}
+      - apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: "{{ platform_application_authoring_service_account_name }}"
+          namespace: "{{ platform_application_authoring_namespace }}"
+      - apiVersion: v1
+        kind: Secret
+        metadata:
+          name: "{{ platform_application_authoring_pull_secret_name }}"
+          namespace: "{{ platform_application_authoring_namespace }}"
+      - apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: "{{ platform_application_authoring_buildkit_config_name }}"
+          namespace: "{{ platform_application_authoring_namespace }}"
       - {apiVersion: cilium.io/v2, kind: CiliumNetworkPolicy, metadata: {name: admin-probes, namespace: "{{ platform_application_data_namespace }}"}}
 
 - name: Include every enabled Portal and runtime route mutation target
   ansible.builtin.set_fact:
     platform_application_cross_namespace_targets: >-
       {{ platform_application_cross_namespace_targets + [
-        {'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'name': platform_application_portal_tls_secret_name, 'namespace': platform_application_portal_route_namespace}},
-        {'apiVersion': 'gateway.networking.k8s.io/v1', 'kind': 'Gateway', 'metadata': {'name': platform_application_runtime_gateway_name, 'namespace': platform_application_portal_route_namespace}},
-        {'apiVersion': 'gateway.networking.k8s.io/v1', 'kind': 'HTTPRoute', 'metadata': {'name': platform_application_portal_route_name, 'namespace': platform_application_portal_route_namespace}},
-        {'apiVersion': 'gateway.networking.k8s.io/v1', 'kind': 'HTTPRoute', 'metadata': {'name': platform_application_portal_route_name ~ '-runtime', 'namespace': platform_application_portal_route_namespace}}
+        {'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {
+          'name': platform_application_portal_tls_secret_name, 'namespace': platform_application_portal_route_namespace}},
+        {'apiVersion': 'gateway.networking.k8s.io/v1', 'kind': 'Gateway', 'metadata': {
+          'name': platform_application_runtime_gateway_name, 'namespace': platform_application_portal_route_namespace}},
+        {'apiVersion': 'gateway.networking.k8s.io/v1', 'kind': 'HTTPRoute', 'metadata': {
+          'name': platform_application_portal_route_name, 'namespace': platform_application_portal_route_namespace}},
+        {'apiVersion': 'gateway.networking.k8s.io/v1', 'kind': 'HTTPRoute', 'metadata': {
+          'name': platform_application_portal_route_name ~ '-runtime', 'namespace': platform_application_portal_route_namespace}}
       ] }}
   when: platform_application_portal_route_name | length > 0
 
@@ -52,7 +82,8 @@
   ansible.builtin.set_fact:
     platform_application_cross_namespace_targets: >-
       {{ platform_application_cross_namespace_targets + [
-        {'apiVersion': 'gateway.networking.k8s.io/v1', 'kind': 'Gateway', 'metadata': {'name': platform_application_portal_gateway_name, 'namespace': platform_application_portal_route_namespace}}
+        {'apiVersion': 'gateway.networking.k8s.io/v1', 'kind': 'Gateway', 'metadata': {
+          'name': platform_application_portal_gateway_name, 'namespace': platform_application_portal_route_namespace}}
       ] }}
   when: platform_application_portal_route_name | length > 0 or platform_application_ssh_load_balancer_ip | length > 0
 
