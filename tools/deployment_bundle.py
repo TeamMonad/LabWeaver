@@ -859,7 +859,10 @@ def environment_executor_bindings(
             ("clientPrivateKeyFile", "nats-client.key"),
             ("credentialsFile", "nats.creds"),
         ):
-            if nats.get(field) != "/etc/labweaver/secrets/" + key:
+            expected = {"/etc/labweaver/secrets/" + key}
+            if field == "caFile":
+                expected.add(authority_path + key)
+            if nats.get(field) not in expected:
                 raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_CONFLICT")
         nats.pop("server", None)
         nats["serverFile"] = authority_path + "nats-server"
