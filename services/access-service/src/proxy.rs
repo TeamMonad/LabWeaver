@@ -1,6 +1,7 @@
 //! Authenticated, path-bounded browser forwarding to service authorities.
 
 use std::{
+    fmt::Write as _,
     io,
     str::FromStr,
     sync::Arc,
@@ -1689,11 +1690,11 @@ pub(super) async fn forward_runtime(
     let task = tokio::spawn(async move {
         let forward = async {
             let mut upstream = response.bytes_stream();
-            let mut received = 0_usize;
+            let mut body_bytes = 0_usize;
             while let Some(chunk) = upstream.next().await {
                 let chunk = chunk.map_err(io::Error::other).and_then(|chunk| {
-                    received = received.saturating_add(chunk.len());
-                    if received > max_response_bytes {
+                    body_bytes = body_bytes.saturating_add(chunk.len());
+                    if body_bytes > max_response_bytes {
                         Err(io::Error::other("LW_ACCESS_RUNTIME_RESPONSE_TOO_LARGE"))
                     } else {
                         Ok(chunk)
@@ -2700,7 +2701,6 @@ fn rewrite_runtime_cookie(
                     if directory.is_empty() { "/" } else { directory }
                 })
             };
-            use std::fmt::Write as _;
             write!(sanitized, "Path=/connect/{endpoint_grant_id}{path}")
                 .map_err(|_| ApiError::unavailable("LW_ACCESS_RUNTIME_RESPONSE_INVALID"))?;
         } else {
@@ -3009,9 +3009,9 @@ mod tests {
     };
 
     use super::{
-        ApiError, GatewayAuthority, authorize_resource_actor, forward_service_response,
-        parse_runtime_path, rewrite_runtime_cookie, runtime_app_cookies, valid_control_path,
-        valid_evaluation_path, valid_resource_path,
+        GatewayAuthority, authorize_resource_actor, forward_service_response, parse_runtime_path,
+        rewrite_runtime_cookie, runtime_app_cookies, valid_control_path, valid_evaluation_path,
+        valid_resource_path,
     };
 
     fn timestamp(value: &str) -> UtcTimestamp {
@@ -3424,7 +3424,8 @@ mod tests {
         ] {
             let cookie: HeaderValue =
                 format!("app=1; {attributes}; Path=/; Secure; SameSite=None").parse()?;
-            let sanitized = rewrite_runtime_cookie(&cookie, grant, "/")?;
+            let sanitized = rewrite_runtime_cookie(&cookie, grant, "/")
+                .map_err(|error| std::io::Error::other(error.diagnostic))?;
             let jar = Jar::default();
             jar.add_cookie_str(sanitized.to_str()?, &runtime);
             let app =
@@ -3439,10 +3440,15 @@ mod tests {
             );
         }
         let host_only = HeaderValue::from_static("__Host-app=abc; Path=/; Secure; SameSite=Strict");
-        assert_eq!(rewrite_runtime_cookie(&host_only, grant, "/")?, host_only);
+        assert_eq!(
+            rewrite_runtime_cookie(&host_only, grant, "/")
+                .map_err(|error| std::io::Error::other(error.diagnostic))?,
+            host_only
+        );
         let path_cookie = HeaderValue::from_static("app=abc; Path=/api; Secure; SameSite=Lax");
         assert_eq!(
-            rewrite_runtime_cookie(&path_cookie, grant, "/")?,
+            rewrite_runtime_cookie(&path_cookie, grant, "/")
+                .map_err(|error| std::io::Error::other(error.diagnostic))?,
             format!("app=abc; Path=/connect/{grant}/api; Secure; SameSite=Lax")
         );
         let mut headers = axum::http::HeaderMap::new();
@@ -3459,7 +3465,8 @@ mod tests {
             ),
         );
         assert_eq!(
-            runtime_app_cookies(&headers, "custom_session")?,
+            runtime_app_cookies(&headers, "custom_session")
+                .map_err(|error| std::io::Error::other(error.diagnostic))?,
             Some(HeaderValue::from_static("app=1; __Host-app=abc"))
         );
         Ok(())

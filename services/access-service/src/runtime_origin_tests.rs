@@ -1342,6 +1342,69 @@ async fn runtime_long_connections_recheck_capability_and_session() -> Result<(),
 }
 
 #[tokio::test]
+async fn runtime_websocket_cross_grant_denial_is_http_not_tls() -> Result<(), Box<dyn Error>> {
+    let fixture = Box::pin(RuntimeFixture::new()).await?;
+    let handoff = fixture.handoff(fixture.grant).await?;
+    assert_eq!(
+        handoff.exchange(&fixture.client).send().await?.status(),
+        StatusCode::SEE_OTHER
+    );
+    let cookie = fixture.runtime_cookie(fixture.grant)?;
+    let allowed =
+        fixture.websocket_request(&fixture.runtime, fixture.grant, &cookie, "runtime.test.v1")?;
+    let (mut ws, _) = fixture.websocket(allowed).await?;
+    ws.send(WsMessage::Text("allowed".into())).await?;
+    assert_eq!(
+        ws.next().await.ok_or("positive WS failed")??,
+        WsMessage::Text("allowed".into())
+    );
+    let denied = fixture.websocket_request(
+        &fixture.runtime_b,
+        fixture.grant_b,
+        &cookie,
+        "runtime.test.v1",
+    )?;
+    fixture
+        .assert_websocket_denied(
+            denied,
+            StatusCode::FORBIDDEN,
+            "LW_ACCESS_RUNTIME_CAPABILITY_REJECTED",
+        )
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_websocket_rejects_unsupported_protocol_before_upgrade()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Box::pin(RuntimeFixture::new()).await?;
+    let handoff = fixture.handoff(fixture.grant).await?;
+    assert_eq!(
+        handoff.exchange(&fixture.client).send().await?.status(),
+        StatusCode::SEE_OTHER
+    );
+    let request = fixture.websocket_request(
+        &fixture.runtime,
+        fixture.grant,
+        &fixture.runtime_cookie(fixture.grant)?,
+        "unsupported.v1, unsupported.v2",
+    )?;
+    let error = fixture
+        .websocket(request)
+        .await
+        .err()
+        .ok_or("unsupported protocol upgraded")?;
+    let Some(tungstenite::Error::Http(response)) = error.downcast_ref::<tungstenite::Error>()
+    else {
+        return Err(
+            format!("unsupported protocol failed after downstream upgrade: {error}").into(),
+        );
+    };
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    Ok(())
+}
+
+#[tokio::test]
 async fn runtime_websocket_requires_and_rechecks_edit() -> Result<(), Box<dyn Error>> {
     let fixture = Box::pin(RuntimeFixture::new()).await?;
     let handoff = fixture.handoff(fixture.grant).await?;
@@ -1412,7 +1475,8 @@ async fn runtime_revocation_supervision_survives_backpressure_and_authority_stal
             headers,
             Bytes::new(),
         )
-        .await?;
+        .await
+        .map_err(|error| std::io::Error::other(error.diagnostic))?;
         assert_eq!(body.status(), StatusCode::OK);
         let mut request = fixture.websocket_request(
             &fixture.runtime,
