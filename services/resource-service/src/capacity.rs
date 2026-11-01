@@ -430,7 +430,7 @@ where
                 }
             }
             WatchEvent::Deleted(object) => {
-                writer.apply_watcher_event(&watcher::Event::Delete(object))
+                writer.apply_watcher_event(&watcher::Event::Delete(object));
             }
             WatchEvent::Bookmark(bookmark) => {
                 if !synced

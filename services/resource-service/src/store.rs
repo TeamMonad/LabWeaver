@@ -5305,6 +5305,34 @@ fn gpu_seed_matches(entry: &GpuCatalogEntry, seed: &GpuCatalogSeed) -> bool {
 }
 
 impl PgResourceStore {
+    async fn assert_gpu_observation_source(
+        &self,
+        provider_binding: &str,
+        source: &str,
+    ) -> Result<(), ResourceStoreError> {
+        let prefix = format!("{}/", self.gpu_observation_generation);
+        let source = source
+            .strip_prefix(&prefix)
+            .ok_or(ResourceStoreError::GpuObservationStale)?;
+        // HTTP and worker clones share these live sync epochs. A disconnected, changed,
+        // expired or not-yet-synced provider cannot reuse a still-valid database row.
+        let observer = self
+            .gpu_observers
+            .read()
+            .map_err(|_| ResourceStoreError::GpuObservationStale)?
+            .get(provider_binding)
+            .cloned();
+        if let Some(observer) = observer {
+            let (current_source, _) = observer
+                .source()
+                .await
+                .map_err(|_| ResourceStoreError::GpuObservationStale)?;
+            if source != current_source {
+                return Err(ResourceStoreError::GpuObservationStale);
+            }
+        }
+        Ok(())
+    }
     async fn resolve_gpu_allocation(
         &self,
         transaction: &mut Transaction<'_, Postgres>,
@@ -5365,27 +5393,8 @@ impl PgResourceStore {
             return Err(ResourceStoreError::GpuObservationStale);
         }
         let source: String = observation.try_get("source_binding")?;
-        let prefix = format!("{}/", self.gpu_observation_generation);
-        let source = source
-            .strip_prefix(&prefix)
-            .ok_or(ResourceStoreError::GpuObservationStale)?;
-        // HTTP and worker clones share these live sync epochs. A disconnected, changed,
-        // expired or not-yet-synced provider cannot reuse a still-valid database row.
-        let observer = self
-            .gpu_observers
-            .read()
-            .map_err(|_| ResourceStoreError::GpuObservationStale)?
-            .get(provider_binding)
-            .cloned();
-        if let Some(observer) = observer {
-            let (current_source, _) = observer
-                .source()
-                .await
-                .map_err(|_| ResourceStoreError::GpuObservationStale)?;
-            if source != current_source {
-                return Err(ResourceStoreError::GpuObservationStale);
-            }
-        }
+        self.assert_gpu_observation_source(provider_binding, &source)
+            .await?;
         let available: i64 = observation.try_get("available_units")?;
         // Work claims and Experiment environment reservations share one physical allocation binding,
         // so both durable reservation tables must be subtracted before admitting new capacity.

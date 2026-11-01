@@ -373,7 +373,7 @@ async fn source_deadline_epoch_disconnect_and_restart_fence_postgres_admission()
     ));
     // Quiet watch source expiry must invalidate an otherwise unexpired database row.
     *observer.cache.node_freshness.last_fresh.write().await =
-        Some(Instant::now() - Duration::from_secs(31));
+        Instant::now().checked_sub(Duration::from_secs(31));
     assert!(matches!(
         store
             .resolve_environment_resource_reservation(&admission_request())
