@@ -3186,8 +3186,8 @@ mod tests {
             .await?;
         assert_eq!(execution.audit.outcome, RuntimeAuditOutcome::Succeeded);
         assert_eq!(
-            serde_json::to_value(execution.document)?,
-            serde_json::json!({"kind":"environment","spec":candidate})
+            execution.document,
+            crate::claude_code::CandidateDocument::Environment(serde_json::from_value(candidate)?)
         );
         sqlx::query(
             "ALTER TABLE agent.idempotency_ledger RENAME TO unavailable_idempotency_ledger",
