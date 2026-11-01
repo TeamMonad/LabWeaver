@@ -3975,6 +3975,15 @@ def prepare_local_managed_bundle(work: Path, images: dict[str, str], version: di
             application[group][name] = {}
             for key in keys:
                 content = (work / "app-input" / directory / name / key).read_bytes()
+                if group == "configMaps" and key == "config.yaml" and name in {
+                    "control-service-config", "access-service-config", "agent-service-config",
+                    "evaluation-service-config", "build-executor-config",
+                }:
+                    configuration = yaml.safe_load(content)
+                    nats = configuration["nats"]
+                    nats.pop("server")
+                    nats["serverFile"] = "/etc/labweaver/secrets/nats-server"
+                    content = yaml.safe_dump(configuration, sort_keys=False).encode()
                 reference = f"{prefix}/{name}/{key}"
                 if group == "secrets" and content in seen_secrets:
                     reference = seen_secrets[content]

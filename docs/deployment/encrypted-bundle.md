@@ -133,6 +133,8 @@ nats:
 
 派生阶段将 databaseUrlFile 与 NATS CA 路径指向上述只读投影。Environment 的 Container/KubeVirt 执行器共用真实启动解析器，`server` 与 `serverFile` 必须恰好提供一个；缺失、同时提供或文件内容 trim 后为空均返回 `LW_ENVIRONMENT_CONFIG_INVALID`，保留未知字段拒绝。文件中的 endpoint 只读入进程内存，不写回 ConfigMap。原非 Bundle YAML 可继续提供单个 `server` 字符串。NATS clientCertificateFile、clientPrivateKeyFile、credentialsFile 继续由 TLS 客户端读取各执行器已有 Secret；databaseUrlFile 由启动代码读取。每个执行器的请求 subject 必须与同一 Bundle 的 owner providers.json 对应角色一致；工具不签发 NATS 用户、不扩大发布/订阅/响应权限。
 
+Control、Access、Agent、Agent build executor 和 Evaluation 的启动 NATS 配置同样支持且只能选择一个 `server` 或 `serverFile`；缺失、两者并存、文件不可读或内容为空均在启动解析时拒绝。非 Bundle 输入可继续使用原单个 `server`。管理 Bundle 的这些服务使用 `serverFile: /etc/labweaver/secrets/nats-server`，不能把 endpoint 内联回 ConfigMap。派生器从同一 Environment owner 的 `nats-server` 源文件生成各服务既有 Secret 挂载中的 endpoint 键；不新增凭据、权限或第二个 endpoint 真源。原 Secret-location 检查保持不变。
+
 可运行 `environment-service --check-runtime-executor-config <runtime.yaml>` 校验同一真实启动解析器及 NATS endpoint 文件读取；该入口不连接数据库、NATS、Kubernetes 或模型服务，不代表完整部署已启动。普通 local_dev 与 external-fixtures 的完整真实投影 YAML 均由 Python 部署回归送入此 Rust 入口，测试仅将挂载文件 locator 映射到临时 Secret 目录，不替换为内联 endpoint。
 
 有 `resource` profile 时，工具核对已有 Resource allowlist、Environment client ID、audience 和 OIDC issuer 与 owner 匹配，保留原权限集合。没有该 profile 时，外部 Resource 的对应 allowlist、原三个 ResourceUsage scope、CA 与服务身份必须由其原 owner 配置；本工具不能证明这些外部条件成立。
@@ -521,7 +523,7 @@ configurationExecutor:
 
 观察仍复用下述 Deployment→ReplicaSet→Pod roster 与进程快照检查。统一执行器使用已有 kubectl 对准确的 Pod 做临时回环 port-forward；HTTPS 始终校验 Control Service DNS 与 Bundle 内的 CA，不依赖控制器能直连 Pod CIDR，不使用 Pod exec 或关闭 TLS。端口转发退出后必定回收。
 
-`cargo xtask deploy --env <环境> --stage configuration --yes` 是同一执行器的配置投影阶段：在 prepare 与 finish 之间，使用现有 Helm chart 将实际管理版本、来源和策略挂载到已有 release，等待升级完成。它不初始化其他基础设施或替换其权限。该阶段仍要求已经登记且请求应用的真实 intent；没有 bypass 旗标，命令退出成功也不能代替 loaded 观察。
+`cargo xtask deploy --env <环境> --stage configuration --yes` 是同一执行器的配置投影阶段：在 prepare 与 finish 之间，应用本 Bundle 派生的应用 ConfigMap/Secret，再使用现有 Helm chart 将实际管理版本、来源和策略挂载到已有 release。对象摘要驱动服务按同一输入重启，并等待升级完成；NATS endpoint 在各服务启动时从其既有只读 Secret 挂载读取。它不初始化其他基础设施或替换其权限。该阶段仍要求已经登记且请求应用的真实 intent；没有 bypass 旗标，命令退出成功也不能代替 Control loaded 观察。
 
 
 完成已获准部署后，原执行者在 `verifying` 阶段收集一次实际观察：

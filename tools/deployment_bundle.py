@@ -1260,6 +1260,27 @@ def _stamp_objects(payload: bytes, installation_id: str | None) -> bytes:
     return yaml.safe_dump_all(documents, sort_keys=True).encode()
 
 
+def service_nats_endpoints(application: dict, files: dict, manifest: dict) -> dict[str, bytes]:
+    """Derive mounted endpoint files from the Environment owner's one source."""
+    projected = {}
+    for service in ("control-service", "access-service", "agent-service", "evaluation-service", "build-executor"):
+        config_name = service + "-config"
+        if config_name not in application["configMaps"]:
+            continue
+        config = _document(files[application["configMaps"][config_name]["config.yaml"]])
+        if not isinstance(config, dict) or "nats" not in config:
+            continue
+        nats = config["nats"]
+        if not isinstance(nats, dict) or "server" in nats or nats.get("serverFile") != "/etc/labweaver/secrets/nats-server":
+            raise BundleError("LW_BUNDLE_NATS_ENDPOINT_SOURCE_INVALID")
+        secret_name = service + "-secrets"
+        endpoint = files[application["secrets"]["environment-service-secrets"]["nats-server"]]
+        if "nats-server" not in manifest["secrets"][secret_name]:
+            manifest["secrets"][secret_name].append("nats-server")
+        projected[secret_name] = endpoint
+    return projected
+
+
 def derive_bundle(
     root: Path,
     output: Path,
@@ -1291,6 +1312,7 @@ def derive_bundle(
     workload_inputs["control-service"]["env"]["LABWEAVER_NOTIFICATIONS_FILE"] = "/etc/labweaver/config/notifications.json"
     if notification["smtp"]:
         manifest["secrets"]["control-service-secrets"].extend(["smtp-password", "smtp-ca.pem"])
+    nats_endpoints = service_nats_endpoints(application, files, manifest)
     workload_inputs = _ha_workload_inputs(model, files, workload_inputs)
     manifest["namespace"] = model["target"]["namespace"]
     manifest_output = output / "object-manifest.json"
@@ -1307,6 +1329,8 @@ def derive_bundle(
     if notification["smtp"]:
         for field, key in (("passwordFile", "smtp-password"), ("caFile", "smtp-ca.pem")):
             _write(inputs / "secrets/control-service-secrets" / key, files[model["notifications"]["smtp"][field]])
+    for secret_name, endpoint in nats_endpoints.items():
+        _write(inputs / "secrets" / secret_name / "nats-server", endpoint)
     payload = _stamp_objects(objects.render_bundle(manifest_output, inputs), model["target"].get("installationId"))
     object_output = output / "application.yaml"
     _write(object_output, payload)

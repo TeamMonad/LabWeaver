@@ -37,6 +37,8 @@ python tools/local_dev.py down
 
 管理 Bundle 来自本次真实应用输入及管理员保存的版本；Resource 保留既有独立渲染输入。本次 age 身份与归档在运行拥有的 `.private/local-dev/<runId>/` 中分别保存，运行解密目录退出即清理，`down` 仍按原归属流程清理整个一次性环境。`.private` 及其相关目录必须为当前用户拥有的 `0700` 目录；不要通过放宽权限或把客户端 Secret/会话写入普通日志解决启动错误。部署执行器只获得 Control 的 `control.platform_configuration.apply` client role，不获得平台管理员、Access 网关转发或 Keycloak realm 管理角色。
 
+为生成真实管理 Bundle，`up` 将 Control/Access/Agent/Evaluation/build executor 的本次 NATS YAML 输入收敛为 `serverFile`，各服务的既有 Secret 挂载从 Environment owner 的同一个 `nats-server` 输入派生，不再把 endpoint 复制进 ConfigMap。原内联输入只用于第一次尚未初始化管理配置的服务启动；配置执行阶段应用该同源派生对象并按对象摘要重启。所有服务的真实启动解析器都拒绝同时给出 `server`/`serverFile`、两者都没有、空文件和不可读文件，不绕过 Secret-location 校验。
+
 
 本地 MinIO 工件桶在首次创建时通过固定版本的 `mc mb --with-lock` 启用 Object Lock，并单独校验桶的锁能力和版本控制。Bootstrap 不设置固定的桶默认保留期；Evaluation freeze 会为每个对象写入 Governance 模式和 `retainUntil`。如果已有桶缺少 Object Lock，启动会立即失败并保留原桶，不删除、重建或迁移其中的数据；需要使用本次运行拥有的本地环境重新执行 `down` 后再 `up`。
 

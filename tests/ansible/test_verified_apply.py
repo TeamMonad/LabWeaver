@@ -120,8 +120,14 @@ class VerifiedApplyBundleTests(unittest.TestCase):
             model, files = fixtures.bundle.load_bundle(root, manifest)
             self.assertEqual(source["configurationSha256"], self.fixture.version["configurationSha256"])
             self.assertEqual(source["encryptedBundleSha256"], metadata["encryptedBundleSha256"])
-            self.assertEqual(files[model["application"]["configMaps"]["control-service-config"]["config.yaml"]],
-                             (work / "app-input/configmaps/control-service-config/config.yaml").read_bytes())
+            actual = yaml.safe_load(files[model["application"]["configMaps"]["control-service-config"]["config.yaml"]])
+            expected = yaml.safe_load((work / "app-input/configmaps/control-service-config/config.yaml").read_bytes())
+            expected["nats"].pop("server")
+            expected["nats"]["serverFile"] = "/etc/labweaver/secrets/nats-server"
+            self.assertEqual(actual, expected)
+            objects = list(yaml.safe_load_all((rendered / "application.yaml").read_bytes()))
+            endpoints = [obj for obj in objects if obj["kind"] == "Secret" and "nats-server" in obj["data"]]
+            self.assertGreaterEqual(len(endpoints), 5)
             self.assertEqual(files[model["configurationExecutor"]["clientSecretFile"]], clients["deployment-executor"].encode())
 
 

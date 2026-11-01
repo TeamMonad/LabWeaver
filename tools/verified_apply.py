@@ -271,12 +271,17 @@ def run(action):
         overlay = {
             "managedControlConfiguration": values["managedControlConfiguration"],
             "platformConfigurationPolicy": values["platformConfigurationPolicy"],
+            "deploymentIdentity": values["deploymentIdentity"],
             "workloads": {"control-service": {"env": {
                 "LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS": values["workloadInputs"]["control-service"]["env"]["LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS"],
             }}},
         }
         overlay_file = rendered / "verified-control-values.yaml"
         bundle._write(overlay_file, bundle.yaml.safe_dump(overlay).encode())
+        applied = subprocess.run(["kubectl", "apply", "-f", str(rendered / "application.yaml")],
+                                 capture_output=True, timeout=60, check=False)
+        if applied.returncode:
+            fail("apply")
         result = subprocess.run([
             "helm", "upgrade", source["installation"]["releaseName"],
             str(Path(__file__).resolve().parents[1] / "deploy/helm/labweaver"),
