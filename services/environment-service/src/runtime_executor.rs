@@ -1898,65 +1898,8 @@ impl KubernetesContainerExecutor {
             return Err(rejected());
         }
         if target.retain_disk {
-            let namespace = self
-                .owned_namespace(&plan.namespace, plan.environment_id, plan.project_id)
-                .await?
-                .ok_or_else(rejected)?;
-            if pointer_uuid(&namespace, "/metadata/uid")? != target.uid {
-                return Err(rejected());
-            }
-            if target.purge_disk {
-                self.ensure_disk_unmounted(&plan.namespace, "rootdisk")
-                    .await?;
-                self.delete_pinned_object(
-                    plan.environment_id,
-                    plan.project_id,
-                    &plan.namespace,
-                    "DataVolume",
-                    "rootdisk",
-                    target,
-                    fence.deadline_at,
-                    Some(permit),
-                )
+            self.retire_or_purge_kubevirt_disk(fence, plan, permit, target)
                 .await?;
-                self.delete_pinned_object(
-                    plan.environment_id,
-                    plan.project_id,
-                    &plan.namespace,
-                    "PersistentVolumeClaim",
-                    "rootdisk",
-                    target,
-                    fence.deadline_at,
-                    Some(permit),
-                )
-                .await?;
-            } else {
-                let identities = self.kubevirt_stop_identity(plan).await?;
-                for (resource, uid) in [
-                    ("virtualmachines", identities.0),
-                    ("persistentvolumeclaims", identities.1),
-                ] {
-                    if !target
-                        .objects
-                        .iter()
-                        .any(|object| object.resource == resource && object.uid == uid.to_string())
-                    {
-                        return Err(rejected());
-                    }
-                }
-                self.kubevirt_lifecycle_subresource(
-                    fence,
-                    &plan.namespace,
-                    "runtime",
-                    "stop",
-                    permit,
-                )
-                .await?;
-                self.observe_kubevirt_stopped(fence, plan, identities)
-                    .await?;
-                self.ensure_disk_unmounted(&plan.namespace, "rootdisk")
-                    .await?;
-            }
             return self
                 .kubevirt_absence_evidence(fence, plan)
                 .await
@@ -1974,6 +1917,69 @@ impl KubernetesContainerExecutor {
         self.kubevirt_absence_evidence(fence, plan)
             .await
             .map(ProviderOutcome::Completed)
+    }
+
+    async fn retire_or_purge_kubevirt_disk(
+        &self,
+        fence: &KubeVirtBackendFence,
+        plan: &KubeVirtCleanupPlan,
+        permit: &crate::KubeVirtExecutionPermit,
+        target: &EnvironmentCleanupTarget,
+    ) -> Result<(), ProviderFailure> {
+        let namespace = self
+            .owned_namespace(&plan.namespace, plan.environment_id, plan.project_id)
+            .await?
+            .ok_or_else(rejected)?;
+        if pointer_uuid(&namespace, "/metadata/uid")? != target.uid {
+            return Err(rejected());
+        }
+        if target.purge_disk {
+            self.ensure_disk_unmounted(&plan.namespace, "rootdisk")
+                .await?;
+            self.delete_pinned_object(
+                plan.environment_id,
+                plan.project_id,
+                &plan.namespace,
+                "DataVolume",
+                "rootdisk",
+                target,
+                fence.deadline_at,
+                Some(permit),
+            )
+            .await?;
+            self.delete_pinned_object(
+                plan.environment_id,
+                plan.project_id,
+                &plan.namespace,
+                "PersistentVolumeClaim",
+                "rootdisk",
+                target,
+                fence.deadline_at,
+                Some(permit),
+            )
+            .await?;
+        } else {
+            let identities = self.kubevirt_stop_identity(plan).await?;
+            for (resource, uid) in [
+                ("virtualmachines", identities.0),
+                ("persistentvolumeclaims", identities.1),
+            ] {
+                if !target
+                    .objects
+                    .iter()
+                    .any(|object| object.resource == resource && object.uid == uid.to_string())
+                {
+                    return Err(rejected());
+                }
+            }
+            self.kubevirt_lifecycle_subresource(fence, &plan.namespace, "runtime", "stop", permit)
+                .await?;
+            self.observe_kubevirt_stopped(fence, plan, identities)
+                .await?;
+            self.ensure_disk_unmounted(&plan.namespace, "rootdisk")
+                .await?;
+        }
+        Ok(())
     }
 
     async fn kubevirt_absence_evidence(

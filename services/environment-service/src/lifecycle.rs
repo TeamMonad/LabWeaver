@@ -3,6 +3,7 @@ use contracts::environment::{
     EnvironmentInstance, EnvironmentLeaseAuthorization, EnvironmentLifecycleCommand,
     EnvironmentOperation, EnvironmentOperationKind, ObservedEnvironmentState, OperationState,
 };
+use contracts::environment::{EnvironmentDiskRetention, EnvironmentDiskState};
 use contracts::{ArtifactRef, OperationId, Revision, UtcTimestamp};
 use serde::{Deserialize, Serialize};
 
@@ -117,7 +118,6 @@ pub fn plan_command_authorized(
     authority_now: UtcTimestamp,
 ) -> Result<EnvironmentInstance, LifecycleError> {
     current.validate()?;
-    use contracts::environment::{EnvironmentDiskRetention, EnvironmentDiskState};
     if matches!(
         command.kind,
         EnvironmentOperationKind::Restore | EnvironmentOperationKind::Purge
@@ -693,13 +693,14 @@ const fn desired_state(
         EnvironmentOperationKind::Start | EnvironmentOperationKind::Restart => {
             DesiredEnvironmentState::Running
         }
-        EnvironmentOperationKind::Stop => DesiredEnvironmentState::Stopped,
+        EnvironmentOperationKind::Stop | EnvironmentOperationKind::Restore => {
+            DesiredEnvironmentState::Stopped
+        }
         EnvironmentOperationKind::Cancel
         | EnvironmentOperationKind::Expire
         | EnvironmentOperationKind::Delete
-        | EnvironmentOperationKind::Cleanup => DesiredEnvironmentState::Deleted,
-        EnvironmentOperationKind::Purge => DesiredEnvironmentState::Deleted,
-        EnvironmentOperationKind::Restore => DesiredEnvironmentState::Stopped,
+        | EnvironmentOperationKind::Cleanup
+        | EnvironmentOperationKind::Purge => DesiredEnvironmentState::Deleted,
         EnvironmentOperationKind::Reset
         | EnvironmentOperationKind::Retry
         | EnvironmentOperationKind::Recover

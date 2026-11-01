@@ -64,7 +64,7 @@ async fn retained() -> TestResult<Context> {
             .worker(context.executor.clone())?
             .run_once("retire", context.store.current_time().await?)
             .await?,
-        crate::ReconcileWorkerOutcome::Completed { .. }
+        crate::ReconcileWorkerOutcome::Advanced { terminal: true, .. }
     ));
     let retained = context.store.load(current.id).await?;
     assert_eq!(
@@ -181,7 +181,7 @@ async fn expiry_purges_only_target_disk_and_repeated_purge_is_idempotent() -> Te
             .worker(context.executor.clone())?
             .run_once("purge", context.store.current_time().await?)
             .await?,
-        crate::ReconcileWorkerOutcome::Completed { .. }
+        crate::ReconcileWorkerOutcome::Advanced { terminal: true, .. }
     ));
     let purged = context.store.load(before.id).await?;
     let disk = purged.disk_retention.as_ref().ok_or("purge fact")?;
