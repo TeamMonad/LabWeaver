@@ -137,6 +137,7 @@ pub fn finite_retention() -> RetentionSnapshot {
 pub fn ready_instance() -> EnvironmentInstance {
     let accepted_at = timestamp("2026-07-14T00:00:00.000Z");
     EnvironmentInstance {
+        disk_retention: None,
         id: EnvironmentId::new(),
         display_label: "Ready environment".to_owned(),
         project_id: ProjectId::new(),
@@ -206,6 +207,7 @@ pub fn ready_instance() -> EnvironmentInstance {
 pub fn requested_instance() -> EnvironmentInstance {
     let accepted_at = timestamp("2026-07-14T00:00:00.000Z");
     EnvironmentInstance {
+        disk_retention: None,
         id: EnvironmentId::new(),
         display_label: "Requested environment".to_owned(),
         project_id: ProjectId::new(),

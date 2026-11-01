@@ -144,6 +144,33 @@ pub struct PgEnvironmentStore {
 }
 
 impl PgEnvironmentStore {
+    /// Enqueues expiry against the same revisioned owner; concurrent schedulers share one key.
+    pub(crate) async fn enqueue_expired_disk_purges(&self) -> Result<(), EnvironmentStoreError> {
+        let rows: Vec<Value> = sqlx::query_scalar("SELECT contract FROM environment.environment_instances WHERE observed_state='deleted' AND contract->'diskRetention'->>'state'='retained' AND (contract->'diskRetention'->>'expiresAt')::timestamptz <= clock_timestamp() ORDER BY updated_at LIMIT 16")
+            .fetch_all(&self.pool).await?;
+        for row in rows {
+            let instance = decode_contract(row)?;
+            let now = self.current_time().await?;
+            let command = LifecycleCommand {
+                environment_id: instance.id,
+                kind: EnvironmentOperationKind::Purge,
+                expected_revision: instance.revision,
+                actor_id: instance.owner_id,
+                trace_id: format!("purge-{}", instance.generation),
+                accepted_at: now,
+                deadline_at: UtcTimestamp::from_utc(now.get() + time::Duration::minutes(10))?,
+                access_revocation_revision: instance.operation.access_revocation_revision,
+                preserve_mutable_disk: false,
+                max_attempts: 3,
+                reset_target: None,
+            };
+            match self.accept_command(&format!("disk-purge-{}-{}", instance.id, instance.generation), &command).await {
+                Ok(_) | Err(EnvironmentStoreError::RevisionConflict) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -840,8 +867,25 @@ impl PgEnvironmentStore {
         &self,
         environment_id: EnvironmentId,
     ) -> Result<ResourceWorkCleanupStatus, EnvironmentStoreError> {
-        let instance = self.load(environment_id).await?;
-        cleanup_status_from_instance(&instance)
+        let mut transaction = self.pool.begin().await?;
+        let instance = load_locked(&mut transaction, environment_id).await?;
+        let now = database_now(&mut transaction).await?;
+        crate::disk_retention::record_storage_usage(&mut transaction, &instance, now).await?;
+        let mut status = cleanup_status_from_instance(&instance)?;
+        if let Some(disk) = &instance.disk_retention {
+            let row = sqlx::query("SELECT measured_until,storage_bytes::text AS bytes,closed_at IS NOT NULL AS closed FROM environment.retained_disk_usage WHERE environment_id=$1 AND started_at=$2")
+                .bind(instance.id.as_uuid()).bind(disk.started_at.get()).fetch_optional(&mut *transaction).await?;
+            if let Some(row) = row {
+                status.retained_storage_usage = Some(contracts::environment::EnvironmentRetainedStorageUsage {
+                    started_at: disk.started_at,
+                    measured_until: UtcTimestamp::from_utc(row.try_get("measured_until")?)?,
+                    storage_bytes: row.try_get::<String,_>("bytes")?.parse().map_err(|_| EnvironmentStoreError::MeteringInvalid)?,
+                    closed: row.try_get("closed")?,
+                });
+            }
+        }
+        transaction.commit().await?;
+        Ok(status)
     }
 
     /// Refreshes only the Resource-owned Lease fence of an existing Work
@@ -1473,6 +1517,7 @@ fn build_create_instance(
         return Err(EnvironmentStoreError::LeaseAuthorizationRequired);
     }
     let instance = EnvironmentInstance {
+        disk_retention: None,
         id: command.environment_id,
         display_label: spec.display_label.clone(),
         project_id: spec.project_id,
@@ -1719,6 +1764,14 @@ fn cleanup_status_from_instance(
     {
         return Err(EnvironmentStoreError::LeaseAuthorizationInvalid);
     }
+    let compute_retired = instance.disk_retention.as_ref().map_or(
+        instance.observed_state == ObservedEnvironmentState::Deleted && instance.observed_generation == instance.generation,
+        |disk| disk.compute_retired_at.is_some() && disk.state != contracts::environment::EnvironmentDiskState::Restored,
+    );
+    let storage_purged = instance.disk_retention.as_ref().map_or(
+        compute_retired && instance.cleanup_evidence.is_some(),
+        |disk| disk.state == contracts::environment::EnvironmentDiskState::Purged,
+    );
     let status = ResourceWorkCleanupStatus {
         version: 1,
         environment_id: instance.id,
@@ -1730,7 +1783,12 @@ fn cleanup_status_from_instance(
         capacity_binding: capacity_binding.clone(),
         revision: instance.revision,
         observed_state: instance.observed_state,
-        cleanup_complete: instance.observed_state == ObservedEnvironmentState::Deleted,
+        generation: instance.generation,
+        compute_retired,
+        storage_purged,
+        cleanup_complete: compute_retired && storage_purged,
+        disk_retention: instance.disk_retention.clone(),
+        retained_storage_usage: None,
         diagnostic_code: instance.last_diagnostic_code.clone(),
     };
     status.validate()?;

@@ -4904,6 +4904,20 @@ pub const OPERATIONS: &[OperationContract] = &[
     ),
     op!(
         Public,
+        Post,
+        "/api/v1/environments/{environmentId}/restore",
+        "restoreEnvironment",
+        "environment:write",
+        Oidc,
+        IdempotentRevisioned,
+        202,
+        true,
+        true,
+        TEACHER_OR_STUDENT,
+        Environment
+    ),
+    op!(
+        Public,
         Delete,
         "/api/v1/environments/{environmentId}",
         "deleteEnvironment",

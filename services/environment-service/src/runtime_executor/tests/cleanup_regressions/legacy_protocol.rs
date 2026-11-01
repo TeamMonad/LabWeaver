@@ -330,6 +330,8 @@ async fn legacy_lease_cannot_mint_protocol_or_target_via_cas() -> TestResult {
         .await?
         .ok_or("lease")?;
     let target = EnvironmentCleanupTarget {
+        purge_disk: false,
+        retain_disk: false,
         namespace: format!("lw-env-{}", context.initial.id),
         uid: uuid::Uuid::from_u128(999),
         objects: Vec::new(),

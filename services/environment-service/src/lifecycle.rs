@@ -53,9 +53,11 @@ pub enum LifecycleError {
 /// Pins the first read-only cleanup observation under the existing worker persistence CAS.
 pub(crate) fn pin_cleanup_target(
     current: &EnvironmentInstance,
-    target: contracts::environment::EnvironmentCleanupTarget,
+    mut target: contracts::environment::EnvironmentCleanupTarget,
 ) -> Result<EnvironmentInstance, LifecycleError> {
     target.validate()?;
+    target.retain_disk = current.disk_retention.is_some();
+    target.purge_disk = current.operation.kind == EnvironmentOperationKind::Purge;
     if current.operation.cleanup_target.is_some()
         || current.operation.cleanup_protocol_version
             != Some(contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION)
@@ -115,6 +117,16 @@ pub fn plan_command_authorized(
     authority_now: UtcTimestamp,
 ) -> Result<EnvironmentInstance, LifecycleError> {
     current.validate()?;
+    use contracts::environment::{EnvironmentDiskRetention, EnvironmentDiskState};
+    if matches!(command.kind, EnvironmentOperationKind::Restore | EnvironmentOperationKind::Purge) {
+        let retention = current.disk_retention.as_ref().ok_or(LifecycleError::CommandInvalid)?;
+        if retention.state != EnvironmentDiskState::Retained
+            || (command.kind == EnvironmentOperationKind::Restore && authority_now >= retention.expires_at)
+            || (command.kind == EnvironmentOperationKind::Purge && authority_now < retention.expires_at)
+        {
+            return Err(LifecycleError::CommandInvalid);
+        }
+    }
     if current.id != command.environment_id || current.revision != command.expected_revision {
         return Err(LifecycleError::RevisionConflict);
     }
@@ -161,6 +173,8 @@ pub fn plan_command_authorized(
                 | EnvironmentOperationKind::Cleanup
                 | EnvironmentOperationKind::Retry
                 | EnvironmentOperationKind::Recover
+                | EnvironmentOperationKind::Restore
+                | EnvironmentOperationKind::Purge
         )
     {
         return Err(LifecycleError::CommandInvalid);
@@ -222,6 +236,33 @@ pub fn plan_command_authorized(
             .checked_add(1)
             .ok_or(LifecycleError::GenerationOverflow)?;
     }
+    match command.kind {
+        EnvironmentOperationKind::Delete | EnvironmentOperationKind::Expire => {
+            if planned.disk_retention.as_ref().is_none_or(|disk| disk.state == EnvironmentDiskState::Restored) {
+                planned.disk_retention = Some(EnvironmentDiskRetention {
+                    state: EnvironmentDiskState::Retiring,
+                    started_at: authority_now,
+                    expires_at: UtcTimestamp::from_utc(authority_now.get() + time::Duration::days(7))
+                        .map_err(|_| LifecycleError::CommandInvalid)?,
+                    retired_generation: planned.generation,
+                    compute_retired_at: None,
+                    restored_generation: None,
+                    purged_at: None,
+                });
+            }
+        }
+        EnvironmentOperationKind::Restore => {
+            let disk = planned.disk_retention.as_mut().ok_or(LifecycleError::CommandInvalid)?;
+            disk.state = EnvironmentDiskState::Restored;
+            disk.restored_generation = Some(planned.generation);
+            planned.observed_generation = planned.generation;
+            planned.endpoints.clear();
+        }
+        EnvironmentOperationKind::Purge => {
+            planned.disk_retention.as_mut().ok_or(LifecycleError::CommandInvalid)?.state = EnvironmentDiskState::Purging;
+        }
+        _ => {}
+    }
     if invalidates_endpoints(command.kind) {
         for endpoint in &mut planned.endpoints {
             endpoint.health = if destructive {
@@ -236,7 +277,9 @@ pub fn plan_command_authorized(
     planned.operation = EnvironmentOperation {
         id: operation_id,
         kind: command.kind,
-        state: if command.kind == EnvironmentOperationKind::Cancel {
+        state: if command.kind == EnvironmentOperationKind::Restore {
+            OperationState::Succeeded
+        } else if command.kind == EnvironmentOperationKind::Cancel {
             OperationState::Cancelling
         } else {
             OperationState::Accepted
@@ -254,8 +297,13 @@ pub fn plan_command_authorized(
         cleanup_protocol_version: Some(
             contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION,
         ),
-        cleanup_target: if current.desired_state == DesiredEnvironmentState::Deleted {
-            current.operation.cleanup_target.clone()
+        cleanup_target: if current.desired_state == DesiredEnvironmentState::Deleted
+            || (current.disk_retention.as_ref().is_some_and(|disk| disk.state == contracts::environment::EnvironmentDiskState::Restored)
+                && !matches!(command.kind, EnvironmentOperationKind::Delete | EnvironmentOperationKind::Expire)) {
+            current.operation.cleanup_target.clone().map(|mut target| {
+                target.purge_disk = command.kind == EnvironmentOperationKind::Purge;
+                target
+            })
         } else {
             None
         },
@@ -625,6 +673,8 @@ const fn desired_state(
         | EnvironmentOperationKind::Expire
         | EnvironmentOperationKind::Delete
         | EnvironmentOperationKind::Cleanup => DesiredEnvironmentState::Deleted,
+        EnvironmentOperationKind::Purge => DesiredEnvironmentState::Deleted,
+        EnvironmentOperationKind::Restore => DesiredEnvironmentState::Stopped,
         EnvironmentOperationKind::Reset
         | EnvironmentOperationKind::Retry
         | EnvironmentOperationKind::Recover
@@ -640,6 +690,8 @@ fn accepted_observed_state(
     let current_state = current.observed_state;
     let next = match kind {
         EnvironmentOperationKind::Stop => ObservedEnvironmentState::Stopping,
+        EnvironmentOperationKind::Restore => ObservedEnvironmentState::Stopped,
+        EnvironmentOperationKind::Purge => ObservedEnvironmentState::Deleting,
         EnvironmentOperationKind::Reset if current_state == ObservedEnvironmentState::Failed => {
             ObservedEnvironmentState::Validating
         }

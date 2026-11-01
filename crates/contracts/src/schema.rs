@@ -2391,7 +2391,7 @@ fn environment_management_errors(operation_id: &str) -> Option<Value> {
             "LW_HTTP_INTERNAL",
         ],
         "startEnvironment" | "restartEnvironment" | "retryEnvironment" | "recoverEnvironment"
-        | "resetEnvironment" => vec![
+        | "restoreEnvironment" | "resetEnvironment" => vec![
             "LW_CONTRACT_DOCUMENT_INVALID",
             "LW_ACCESS_DENIED",
             "LW_IDEMPOTENCY_CONFLICT",
@@ -2776,6 +2776,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
             "retryEnvironment",
             "cancelEnvironmentOperation",
             "recoverEnvironment",
+            "restoreEnvironment",
             "deleteEnvironment",
             "freezeSubmission",
             "createResourceRequest",
@@ -2800,6 +2801,7 @@ fn response_schema(operation_id: &str) -> Option<Value> {
                 "retryEnvironment",
                 "cancelEnvironmentOperation",
                 "recoverEnvironment",
+                "restoreEnvironment",
                 "deleteEnvironment",
             ]
             .contains(&id)

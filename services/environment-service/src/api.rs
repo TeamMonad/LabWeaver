@@ -162,6 +162,10 @@ pub fn environment_api_router(state: EnvironmentApiState) -> Router {
             post(recover_environment),
         )
         .route(
+            "/api/v1/environments/{environment_id}/restore",
+            post(restore_environment),
+        )
+        .route(
             "/api/v1/environments/{environment_id}",
             axum::routing::delete(delete_environment),
         )
@@ -1005,6 +1009,12 @@ lifecycle_handler!(
     EnvironmentOperationKind::Delete,
     Some("environment_deleted"),
     false
+);
+lifecycle_handler!(
+    restore_environment,
+    EnvironmentOperationKind::Restore,
+    Some("environment_restored"),
+    true
 );
 
 async fn reset_environment(

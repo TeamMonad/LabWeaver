@@ -366,6 +366,8 @@ mod tests {
         assert_eq!(classify_instance(&instance), OrphanDecision::Unverified);
         instance.operation.access_revocation_revision = Some(instance.revision);
         instance.operation.cleanup_target = Some(EnvironmentCleanupTarget {
+            purge_disk: false,
+            retain_disk: false,
             namespace: format!("lw-env-{}", instance.id),
             uid: uuid::Uuid::now_v7(),
             objects: Vec::new(),
