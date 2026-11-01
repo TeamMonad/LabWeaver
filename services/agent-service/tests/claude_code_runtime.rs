@@ -5823,7 +5823,7 @@ async fn public_run_diagnostics_preserve_resource_admission_and_sanitized_exit()
             Duration::from_secs(10),
         )?;
         let (package, input) = work_package_input(&policy, b"diagnostic material".to_vec()).await?;
-        let now = UtcTimestamp::from_utc(OffsetDateTime::now_utc())?;
+        let now = UtcTimestamp::from_utc(OffsetDateTime::now_utc().replace_nanosecond(0)?)?;
         let dispatch = reserve_prepared_work_dispatch(
             &store,
             &policy,
