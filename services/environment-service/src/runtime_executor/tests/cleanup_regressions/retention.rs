@@ -273,7 +273,7 @@ async fn expiry_purges_only_target_disk_and_repeated_purge_is_idempotent() -> Te
             .closed
     );
     let project_deliveries: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM environment.resource_usage_deliveries WHERE environment_id=$1",
+        "SELECT count(*) FROM environment.resource_meter_deliveries WHERE environment_id=$1",
     )
     .bind(before.id.as_uuid())
     .fetch_one(&context.pool)
@@ -545,7 +545,16 @@ async fn restore_without_new_compute_never_renews_platform_retention() -> TestRe
         .store
         .accept_command("delete-restored-stopped", &deleted)
         .await?;
-    Box::pin(context.pin()).await?;
+    assert!(matches!(
+        context
+            .worker(context.executor.clone())?
+            .run_once(
+                "pin-restored-retirement",
+                context.store.current_time().await?
+            )
+            .await?,
+        crate::ReconcileWorkerOutcome::Pending
+    ));
     context
         .worker(context.executor.clone())?
         .run_once("retire-again", context.store.current_time().await?)

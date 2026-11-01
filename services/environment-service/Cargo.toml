@@ -44,6 +44,7 @@ x509-parser = "0.18.1"
 workspace = true
 
 [dev-dependencies]
+artifact-store = { path = "../../crates/artifact-store", features = ["test-support"] }
 resource-service = { path = "../resource-service" }
 jsonwebtoken.workspace = true
 rcgen = { version = "=0.14.7", default-features = false, features = ["crypto", "pem", "ring"] }
