@@ -760,6 +760,9 @@ impl Debug for ClaudeCodeProcessOutput {
             .field("stderr_sha256", &self.stderr_sha256)
             .field("stderr_bytes", &self.stderr_bytes)
             .field("failure_class", &self.failure_class)
+            .field("gateway_request_observed", &self.gateway_request_observed)
+            .field("resource_admission", &self.resource_admission)
+            .field("stderr_category", &self.stderr_category)
             .field("has_image_export", &self.image_export.is_some())
             .finish()
     }
@@ -1152,32 +1155,14 @@ async fn execute_process(
     // retained below.
     let outcome = tokio::select! {
         biased;
-        () = cancellation.cancelled() => ProcessOutcome::Cancelled,
-        () = tokio::time::sleep(command.timeout) => ProcessOutcome::TimedOut,
-        result = lifecycle.complete() => ProcessOutcome::Finished(result),
+        () = cancellation.cancelled() => Err(ClaudeCodeProcessError::Cancelled),
+        () = tokio::time::sleep(command.timeout) => Err(ClaudeCodeProcessError::TimedOut),
+        result = lifecycle.complete() => result,
     };
-    match outcome {
-        ProcessOutcome::Finished(result) => {
-            if result.is_err() {
-                lifecycle.abort().await;
-            }
-            result
-        }
-        ProcessOutcome::Cancelled => {
-            lifecycle.abort().await;
-            Err(ClaudeCodeProcessError::Cancelled)
-        }
-        ProcessOutcome::TimedOut => {
-            lifecycle.abort().await;
-            Err(ClaudeCodeProcessError::TimedOut)
-        }
+    if outcome.is_err() {
+        lifecycle.abort().await;
     }
-}
-
-enum ProcessOutcome {
-    Finished(Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError>),
-    Cancelled,
-    TimedOut,
+    outcome
 }
 
 struct ProcessLifecycle {
@@ -4442,6 +4427,20 @@ mod tests {
         assert_eq!(diagnostic.category, "required_field_missing");
         assert_eq!(diagnostic.diagnostic_code, "LW_EVAL_SPEC_DOCUMENT_INVALID");
         Ok(())
+    }
+
+    #[test]
+    fn gateway_resource_admission_takes_precedence_over_generic_cli_failure() {
+        let output =
+            ClaudeCodeProcessOutput::from_raw(Some(1), Vec::new(), b"private provider error")
+                .with_gateway_request_observed(Some(true))
+                .with_resource_admission(Some("LW_RESOURCE_RATE_UNCONFIGURED"));
+        assert_eq!(
+            output
+                .classified_error()
+                .map(|error| error.diagnostic_code()),
+            Some("LW_RESOURCE_RATE_UNCONFIGURED")
+        );
     }
 
     #[test]

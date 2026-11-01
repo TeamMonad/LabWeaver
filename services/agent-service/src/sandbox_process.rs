@@ -1319,20 +1319,17 @@ impl SandboxAuthoringProcess {
             .await?;
         let observation = sqlx::query_scalar::<_, Option<serde_json::Value>>("SELECT result FROM agent.idempotency_ledger WHERE operation='model_gateway_request' AND idempotency_key=$1")
             .bind(frozen.task_run_id.to_string()).fetch_optional(self.store.pool()).await;
-        let (observed, admission) = match observation {
-            Ok(row) => {
-                let admission = row
-                    .as_ref()
-                    .and_then(Option::as_ref)
-                    .and_then(|value| value.get("admissionDiagnostic"))
-                    .and_then(serde_json::Value::as_str)
-                    .and_then(task_execution::resource::resource_admission_diagnostic);
-                (Some(row.is_some()), admission)
-            }
-            Err(_) => {
-                tracing::warn!(event = "agent.authoring.sandbox.gateway_observation_unavailable", task_run_id = %frozen.task_run_id, outcome = "unknown");
-                (None, None)
-            }
+        let (observed, admission) = if let Ok(row) = observation {
+            let admission = row
+                .as_ref()
+                .and_then(Option::as_ref)
+                .and_then(|value| value.get("admissionDiagnostic"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(task_execution::resource::resource_admission_diagnostic);
+            (Some(row.is_some()), admission)
+        } else {
+            tracing::warn!(event = "agent.authoring.sandbox.gateway_observation_unavailable", task_run_id = %frozen.task_run_id, outcome = "unknown");
+            (None, None)
         };
         Ok(output
             .with_gateway_request_observed(observed)

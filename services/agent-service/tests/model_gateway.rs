@@ -45,6 +45,7 @@ enum Mode {
     Connect,
     Tls,
     Timeout,
+    Unconfigured,
 }
 #[derive(Clone)]
 struct Upstream {
@@ -174,9 +175,11 @@ impl Fixture {
         drop(connection);
         let authority = ModelAuthorizationFixture::start(pool.clone(), &billing).await?;
         let project = authority.project;
-        billing
-            .model_tariffs(project, "fixture-model", funded)
-            .await?;
+        if !matches!(mode, Mode::Unconfigured) {
+            billing
+                .model_tariffs(project, "fixture-model", funded)
+                .await?;
+        }
         let calls = Arc::new(AtomicUsize::new(0));
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let upstream_url = format!("http://{}/", listener.local_addr()?);
@@ -790,5 +793,30 @@ async fn gateway_observability_covers_admission_transport_and_http_without_secre
             "gateway logs must not contain secret or raw content"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_preserves_native_resource_rate_unconfigured_without_upstream_call()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = Fixture::new(Mode::Unconfigured, true).await?;
+    let response = f.request("missing-rate").send().await?;
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    let body: serde_json::Value = response.json().await?;
+    assert_eq!(body["lwCode"], "LW_RESOURCE_RATE_UNCONFIGURED");
+    let task_id = match &f.authority.scope {
+        agent_service::model_gateway::ModelGatewayScope::Authoring { task_run_id, .. } => {
+            task_run_id.to_string()
+        }
+        _ => return Err("authoring task required".into()),
+    };
+    let observation: serde_json::Value = sqlx::query_scalar("SELECT result FROM agent.idempotency_ledger WHERE operation='model_gateway_request' AND idempotency_key=$1")
+        .bind(task_id).fetch_one(&f.pool).await?;
+    assert_eq!(
+        observation,
+        json!({"admissionDiagnostic":"LW_RESOURCE_RATE_UNCONFIGURED"})
+    );
+    assert_eq!(f.calls.load(Ordering::SeqCst), 0);
+    assert!(f.holds().await?.is_empty());
     Ok(())
 }
