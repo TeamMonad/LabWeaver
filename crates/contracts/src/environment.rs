@@ -2739,7 +2739,7 @@ mod tests {
             "Work cannot silently drop its lease"
         );
     }
-    const OPERATIONS: [EnvironmentOperationKind; 12] = [
+    const OPERATIONS: [EnvironmentOperationKind; 14] = [
         EnvironmentOperationKind::Create,
         EnvironmentOperationKind::Start,
         EnvironmentOperationKind::Stop,
@@ -2752,6 +2752,8 @@ mod tests {
         EnvironmentOperationKind::Delete,
         EnvironmentOperationKind::Cleanup,
         EnvironmentOperationKind::Freeze,
+        EnvironmentOperationKind::Restore,
+        EnvironmentOperationKind::Purge,
     ];
 
     #[test]
@@ -2808,6 +2810,7 @@ mod tests {
                             | State::Expiring
                             | State::Deleting
                     ) | (State::Deleting, State::Deleted | State::Failed)
+                        | (State::Deleted, State::Stopped | State::Deleting)
                 );
                 assert_eq!(
                     EnvironmentInstance::ensure_transition(from, to).is_ok(),
@@ -2826,6 +2829,7 @@ mod tests {
             for operation in OPERATIONS {
                 let expected = match operation {
                     Operation::Create => state == State::Requested,
+                    Operation::Restore | Operation::Purge => state == State::Deleted,
                     Operation::Start => state == State::Stopped,
                     Operation::Stop | Operation::Freeze => state == State::Ready,
                     Operation::Restart | Operation::Reset => {
