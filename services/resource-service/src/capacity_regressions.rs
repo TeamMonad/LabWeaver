@@ -247,18 +247,7 @@ async fn persist_snapshot(
     entry: &GpuCatalogEntry,
 ) -> Result<UtcTimestamp, Box<dyn std::error::Error>> {
     let snapshot = observer.observe(std::slice::from_ref(entry), &[]).await?;
-    let deadline =
-        UtcTimestamp::from_utc(snapshot.observed_at.get() + time::Duration::seconds(30))?;
-    store
-        .record_gpu_capacity_observation(
-            entry.id,
-            snapshot.units[&entry.id],
-            &snapshot.source_binding,
-            snapshot.observed_at,
-            deadline,
-        )
-        .await?;
-    Ok(deadline)
+    Ok(snapshot.persist(store, observer.observation_ttl).await?)
 }
 
 #[tokio::test]

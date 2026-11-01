@@ -636,6 +636,34 @@ struct GpuCapacitySnapshot {
     observed_at: UtcTimestamp,
 }
 
+impl GpuCapacitySnapshot {
+    async fn persist(
+        &self,
+        store: &crate::store::PgResourceStore,
+        ttl: Duration,
+    ) -> Result<UtcTimestamp, crate::store::ResourceStoreError> {
+        let ttl_seconds = i64::try_from(ttl.as_secs())
+            .map_err(|_| crate::store::ResourceStoreError::CapacityReadbackInvalid)?;
+        // Cache reads never renew the provider's source observation deadline.
+        let observed_at = self.observed_at;
+        let valid_until =
+            UtcTimestamp::from_utc(observed_at.get() + time::Duration::seconds(ttl_seconds))
+                .map_err(|_| crate::store::ResourceStoreError::CapacityReadbackInvalid)?;
+        for (&entry_id, &available_units) in &self.units {
+            store
+                .record_gpu_capacity_observation(
+                    entry_id,
+                    available_units,
+                    &self.source_binding,
+                    observed_at,
+                    valid_until,
+                )
+                .await?;
+        }
+        Ok(valid_until)
+    }
+}
+
 fn read_bearer_token(path: &Path) -> Result<String, CapacityProviderError> {
     let token = std::fs::read(path).map_err(|_| CapacityProviderError::ObservationUnavailable)?;
     if token.len() > MAX_KUBERNETES_TOKEN_BYTES {
@@ -1445,32 +1473,11 @@ impl CapacityReconcileWorker {
                 );
                 continue;
             };
-            let ttl_seconds = i64::try_from(observer.observation_ttl.as_secs())
-                .map_err(|_| crate::store::ResourceStoreError::CapacityReadbackInvalid)?;
             match observer.observe(&entries, &active_reservations).await {
                 Ok(observations) => {
-                    // Cache reads never renew the provider's source observation deadline.
-                    let observed_at = observations.observed_at;
-                    let valid_until = UtcTimestamp::from_utc(
-                        observed_at.get() + time::Duration::seconds(ttl_seconds),
-                    )
-                    .map_err(|_| crate::store::ResourceStoreError::CapacityReadbackInvalid)?;
-                    for entry in entries {
-                        let available_units = observations
-                            .units
-                            .get(&entry.id)
-                            .copied()
-                            .ok_or(crate::store::ResourceStoreError::GpuObservationInvalid)?;
-                        self.store
-                            .record_gpu_capacity_observation(
-                                entry.id,
-                                available_units,
-                                &observations.source_binding,
-                                observed_at,
-                                valid_until,
-                            )
-                            .await?;
-                    }
+                    observations
+                        .persist(&self.store, observer.observation_ttl)
+                        .await?;
                     did_work = true;
                 }
                 Err(error) => {
