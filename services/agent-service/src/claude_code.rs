@@ -731,6 +731,13 @@ impl ClaudeCodeProcessOutput {
             .or_else(|| self.failure_class.map(RuntimeFailureClass::runtime_error))
     }
 
+    fn admission_priority(&self, error: ClaudeCodeRuntimeError) -> ClaudeCodeRuntimeError {
+        self.resource_admission
+            .map_or(error, ClaudeCodeRuntimeError::ResourceAdmission)
+    }
+    // Usage validation, overflow checks and budget enforcement still run. Their independent
+    // diagnostic is retained in the audit/review failure instead of replacing verified admission.
+
     // A verified Resource receipt is authoritative even when the CLI emits a generic model-error
     // envelope. Without that receipt, preserve the existing envelope-before-stderr precedence.
     fn envelope_failure(&self, envelope: &ClaudeCodeResultEnvelope) -> ClaudeCodeRuntimeError {
@@ -751,7 +758,7 @@ impl ClaudeCodeProcessOutput {
         self
     }
 
-    fn process_diagnostic(&self) -> ClaudeCodeProcessDiagnostic {
+    pub(crate) fn process_diagnostic(&self) -> ClaudeCodeProcessDiagnostic {
         ClaudeCodeProcessDiagnostic {
             exit_status: self.exit_code,
             gateway_request_observed: self.gateway_request_observed,
@@ -779,7 +786,7 @@ impl Debug for ClaudeCodeProcessOutput {
 }
 
 /// Finite process evidence; no provider payload, command, URL or credential is retained.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ClaudeCodeProcessDiagnostic {
     /// Numeric process exit status; absent when terminated without a status.
@@ -1359,6 +1366,9 @@ pub enum ClaudeCodeProcessError {
     ResourceApprovalTimeout,
     #[error("{0}")]
     ResourceAdmission(&'static str),
+    /// The durable gateway receipt could not be read; no candidate may be accepted.
+    #[error("LW_MODEL_CALL_ID_UNAVAILABLE")]
+    GatewayObservationUnavailable(ClaudeCodeProcessDiagnostic),
     #[error("LW_RESOURCE_APPROVAL_EXPIRED")]
     ResourceApprovalExpired,
     #[error("LW_RESOURCE_TASK_LEASE_EXPIRED")]
@@ -1499,6 +1509,9 @@ pub struct ClaudeCodeAudit {
     pub usage: LlmUsage,
     /// Whether Claude Code returned an envelope from which usage could be observed.
     pub usage_observed: bool,
+    /// Independent usage-validation or accounting diagnostic; never raw provider output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_diagnostic_code: Option<String>,
     /// Raw stderr identity without its content.
     pub stderr_sha256: Option<Sha256Digest>,
     /// Bounded process and gateway evidence, including failures with no result envelope.
@@ -1611,6 +1624,10 @@ impl ClaudeCodeFailure {
                 "资源准入配置未满足，任务未启动模型调用。",
                 "检查 Resource 费率、额度和准入配置后重试。",
             ),
+            E::GatewayObservationUnavailable => (
+                "模型调用观测不可用，未接受本次候选。",
+                "请管理员检查 Agent 数据库及模型调用观测后显式重试。",
+            ),
             E::RateLimited => (
                 "模型服务限流，任务未完成。",
                 "稍后显式重试，并查看已有用量。",
@@ -1661,6 +1678,8 @@ pub struct ClaudeCodeReviewFailure {
     pub error: ClaudeCodeRuntimeError,
     /// Cumulative usage observed across all provider attempts, when available.
     pub usage: Option<LlmUsage>,
+    /// Independent usage-validation or accounting failure, retained even when admission is primary.
+    pub usage_error: Option<ClaudeCodeRuntimeError>,
 }
 
 struct AuditContext<'a> {
@@ -2092,6 +2111,10 @@ impl ClaudeCodeRuntime {
                     .await
             };
             let process_output = process_result.map_err(|error| {
+                let process_diagnostic = match error {
+                    ClaudeCodeProcessError::GatewayObservationUnavailable(detail) => Some(detail),
+                    _ => None,
+                };
                 let runtime_error = match error {
                     ClaudeCodeProcessError::Unavailable => {
                         ClaudeCodeRuntimeError::RuntimeUnavailable
@@ -2110,6 +2133,9 @@ impl ClaudeCodeRuntime {
                     ClaudeCodeProcessError::ResourceAdmission(code) => {
                         ClaudeCodeRuntimeError::ResourceAdmission(code)
                     }
+                    ClaudeCodeProcessError::GatewayObservationUnavailable(_) => {
+                        ClaudeCodeRuntimeError::GatewayObservationUnavailable
+                    }
                     ClaudeCodeProcessError::OutputLimitExceeded => {
                         ClaudeCodeRuntimeError::OutputLimitExceeded
                     }
@@ -2126,6 +2152,7 @@ impl ClaudeCodeRuntime {
                 );
                 failure.audit.usage = total_usage;
                 failure.audit.usage_observed = false;
+                failure.audit.process_diagnostic = process_diagnostic;
                 failure
             })?;
             let mut parsed = self
@@ -2157,6 +2184,7 @@ impl ClaudeCodeRuntime {
                     );
                     failure.audit.usage = total_usage;
                     failure.audit.usage_observed = false;
+                    failure.audit.usage_diagnostic_code = Some(error.diagnostic_code().to_owned());
                     failure
                 })?;
             }
@@ -2172,6 +2200,7 @@ impl ClaudeCodeRuntime {
                 );
                 failure.audit.usage = total_usage;
                 failure.audit.usage_observed = all_usage_observed;
+                failure.audit.usage_diagnostic_code = Some(error.diagnostic_code().to_owned());
                 return Err(failure);
             }
             if cancellation.is_cancelled() {
@@ -2405,6 +2434,10 @@ impl ClaudeCodeRuntime {
                         ClaudeCodeRuntimeError::ResourceAdmission(code),
                         usage_option(total_usage),
                     ),
+                    ClaudeCodeProcessError::GatewayObservationUnavailable(_) => review_failure(
+                        ClaudeCodeRuntimeError::GatewayObservationUnavailable,
+                        usage_option(total_usage),
+                    ),
                     ClaudeCodeProcessError::Io => review_failure(
                         ClaudeCodeRuntimeError::ExecutionFailed,
                         usage_option(total_usage),
@@ -2426,14 +2459,19 @@ impl ClaudeCodeRuntime {
                 }
             };
             let envelope = parsed.envelope;
-            let usage = envelope
-                .usage()
-                .map_err(|error| review_failure(error, usage_option(total_usage)))?;
-            total_usage = accumulate_usage(total_usage, usage)
-                .map_err(|error| review_failure(error, usage_option(total_usage)))?;
-            enforce_budget(&self.policy.budget, total_usage)
-                .map_err(|error| review_failure(error, usage_option(total_usage)))?;
-            if !process_output.is_success() || envelope.is_error {
+            let usage = envelope.usage().map_err(|error| {
+                review_usage_failure(&process_output, error, usage_option(total_usage))
+            })?;
+            total_usage = accumulate_usage(total_usage, usage).map_err(|error| {
+                review_usage_failure(&process_output, error, usage_option(total_usage))
+            })?;
+            enforce_budget(&self.policy.budget, total_usage).map_err(|error| {
+                review_usage_failure(&process_output, error, usage_option(total_usage))
+            })?;
+            if process_output.resource_admission.is_some()
+                || !process_output.is_success()
+                || envelope.is_error
+            {
                 return Err(review_failure(
                     process_output.envelope_failure(&envelope),
                     usage_option(total_usage),
@@ -2503,7 +2541,7 @@ impl ClaudeCodeRuntime {
         clippy::too_many_arguments,
         reason = "one parse boundary carries the immutable candidate, policy and audit identity"
     )]
-    pub(crate) async fn parse_result(
+    async fn parse_result(
         &self,
         track: AgentTrackKind,
         input: &ImmutableEgressInput,
@@ -2535,7 +2573,7 @@ impl ClaudeCodeRuntime {
         };
         let envelope = stream.envelope;
         let usage = envelope.usage().map_err(|error| {
-            self.failure(
+            let mut failure = self.failure(
                 track,
                 input,
                 schema,
@@ -2543,7 +2581,9 @@ impl ClaudeCodeRuntime {
                 tool_policy,
                 error,
                 Some(process_output),
-            )
+            );
+            failure.audit.usage_diagnostic_code = Some(error.diagnostic_code().to_owned());
+            failure
         })?;
         let mut audit = self.audit(AuditContext {
             track,
@@ -2558,11 +2598,14 @@ impl ClaudeCodeRuntime {
         });
         if audit.schema_sha256.is_none() {
             return Err(failure_with_audit(
-                ClaudeCodeRuntimeError::ProtocolInvalid,
+                process_output.admission_priority(ClaudeCodeRuntimeError::ProtocolInvalid),
                 audit,
             ));
         }
-        if !process_output.is_success() || envelope.is_error {
+        if process_output.resource_admission.is_some()
+            || !process_output.is_success()
+            || envelope.is_error
+        {
             let error = process_output.envelope_failure(&envelope);
             return Err(failure_with_audit(error, audit));
         }
@@ -2982,6 +3025,7 @@ impl ClaudeCodeRuntime {
         error: ClaudeCodeRuntimeError,
         process_output: Option<&ClaudeCodeProcessOutput>,
     ) -> ClaudeCodeFailure {
+        let primary_error = process_output.map_or(error, |output| output.admission_priority(error));
         // The returned audit deliberately carries no reason, so the stable
         // diagnostic and the closed error kind are recorded here: an authoring
         // attempt that fails before any cluster object exists is otherwise
@@ -3004,7 +3048,7 @@ impl ClaudeCodeRuntime {
             usage: zero_usage(),
             usage_observed: false,
         });
-        failure_with_audit(error, audit)
+        failure_with_audit(primary_error, audit)
     }
 
     fn audit(&self, context: AuditContext<'_>) -> ClaudeCodeAudit {
@@ -3041,6 +3085,7 @@ impl ClaudeCodeRuntime {
             session_id: context.session_id,
             usage: context.usage,
             usage_observed: context.usage_observed,
+            usage_diagnostic_code: None,
             stderr_sha256: context
                 .process_output
                 .and_then(|output| output.stderr_sha256),
@@ -3078,6 +3123,9 @@ impl ClaudeCodeRuntime {
                     }
                     ClaudeCodeProcessError::ResourceAdmission(code) => {
                         ClaudeCodeRuntimeError::ResourceAdmission(code)
+                    }
+                    ClaudeCodeProcessError::GatewayObservationUnavailable(_) => {
+                        ClaudeCodeRuntimeError::GatewayObservationUnavailable
                     }
                     ClaudeCodeProcessError::Cancelled
                     | ClaudeCodeProcessError::Io
@@ -3989,7 +4037,29 @@ fn review_failure(
     error: ClaudeCodeRuntimeError,
     usage: Option<LlmUsage>,
 ) -> ClaudeCodeReviewFailure {
-    ClaudeCodeReviewFailure { error, usage }
+    ClaudeCodeReviewFailure {
+        error,
+        usage,
+        usage_error: None,
+    }
+}
+
+fn review_usage_failure(
+    output: &ClaudeCodeProcessOutput,
+    error: ClaudeCodeRuntimeError,
+    usage: Option<LlmUsage>,
+) -> ClaudeCodeReviewFailure {
+    tracing::warn!(
+        event = "agent.claude_code.usage_rejected",
+        diagnostic_code = output.admission_priority(error).diagnostic_code(),
+        error_kind = error.diagnostic_code(),
+        outcome = "rejected"
+    );
+    ClaudeCodeReviewFailure {
+        error: output.admission_priority(error),
+        usage,
+        usage_error: Some(error),
+    }
 }
 
 fn enforce_budget(budget: &LlmBudget, usage: LlmUsage) -> Result<(), ClaudeCodeRuntimeError> {
@@ -4292,6 +4362,9 @@ pub enum ClaudeCodeRuntimeError {
     ResourceLeaseExpired,
     #[error("{0}")]
     ResourceAdmission(&'static str),
+    /// A durable model gateway observation could not be read.
+    #[error("LW_MODEL_CALL_ID_UNAVAILABLE")]
+    GatewayObservationUnavailable,
     /// Claude Code reported provider throttling after its own bounded retries.
     #[error("LW_LLM_RATE_LIMITED: Claude Code provider rate limit exhausted")]
     RateLimited,
@@ -4328,6 +4401,7 @@ impl ClaudeCodeRuntimeError {
             Self::ResourceApprovalExpired => "LW_RESOURCE_APPROVAL_EXPIRED",
             Self::ResourceApprovalTimeout => "LW_TASK_RESOURCE_APPROVAL_TIMEOUT",
             Self::ResourceAdmission(code) => code,
+            Self::GatewayObservationUnavailable => "LW_MODEL_CALL_ID_UNAVAILABLE",
             Self::RateLimited => diagnostic::RATE_LIMITED,
             Self::Refused => diagnostic::PROVIDER_REJECTED,
         }

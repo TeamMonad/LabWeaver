@@ -14,7 +14,8 @@
 //! before authorization, cost admission or forwarding. Unsigned input cannot identify an attempt.
 //! Sandbox failure diagnostics combine this exact task-generation receipt with a process exit
 //! status and an allowlisted stderr category. Missing observations due to a read failure remain
-//! `unknown`, not `not-observed`. Runs predating these receipts cannot establish non-delivery.
+//! `unknown`, not `not-observed`, and reject the candidate with `LW_MODEL_CALL_ID_UNAVAILABLE`
+//! even if Claude exited successfully. Runs predating these receipts cannot establish non-delivery.
 use axum::{
     Router,
     body::{Body, Bytes},
@@ -118,6 +119,7 @@ impl ScopedTokenIssuer {
         let signature = hmac_sha256(&self.key, payload.as_bytes());
         format!("{payload}.{}", URL_SAFE_NO_PAD.encode(signature))
     }
+    #[cfg(test)]
     fn validate(&self, token: &str) -> Result<TokenClaims, &'static str> {
         self.validate_at(
             token,
@@ -127,6 +129,7 @@ impl ScopedTokenIssuer {
                 .as_secs(),
         )
     }
+    #[cfg(test)]
     fn validate_at(&self, token: &str, now: u64) -> Result<TokenClaims, &'static str> {
         let claims = self.verify_signature(token)?;
         if now >= claims.expires_at {
@@ -1125,13 +1128,25 @@ async fn authorize_tool(
             "gateway token required",
         );
     };
-    let claims = match state.issuer.validate(token) {
+    let claims = match state.issuer.verify_signature(token) {
         Ok(claims) => claims,
         Err(code) => {
             return error_response(StatusCode::UNAUTHORIZED, code, "gateway token rejected");
         }
     };
     let error_response = verified_rejection(&claims, None);
+    if SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        >= claims.expires_at
+    {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "LW_MODEL_GATEWAY_TOKEN_EXPIRED",
+            "gateway token rejected",
+        );
+    }
     match state.authorize(&claims).await {
         Ok(_) => {
             let input: Value = match contracts::parse_strict_json(&body) {

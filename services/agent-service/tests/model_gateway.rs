@@ -824,6 +824,66 @@ async fn gateway_observability_covers_admission_transport_and_http_without_secre
         .get("operation_id")
         .ok_or("missing denied call identity")?
         .parse()?;
+    let expired = denied.runtime.issuer.issue_for(
+        denied.project,
+        denied.run_id.as_uuid(),
+        denied.attempt,
+        denied.authority.scope.clone(),
+        Duration::ZERO,
+    );
+    let before = logs.events().len();
+    assert_eq!(
+        reqwest::Client::new()
+            .post(denied.runtime.base_url.join("authorize")?)
+            .bearer_auth(&expired)
+            .json(&json!({}))
+            .send()
+            .await?
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let events = logs.events();
+    let expired_event = events[before..]
+        .iter()
+        .find(|event| {
+            event
+                .get("diagnostic_code")
+                .is_some_and(|code| code == "LW_MODEL_GATEWAY_TOKEN_EXPIRED")
+                && event.get("run_id") == Some(&denied.run_id.to_string())
+        })
+        .ok_or("expired authorize request must retain verified run identity")?;
+    assert_eq!(
+        expired_event.get("attempt"),
+        Some(&denied.attempt.to_string())
+    );
+    assert!(!expired_event.contains_key("operation_id"));
+    let invalid = format!("{expired}invalid-signature");
+    let before = logs.events().len();
+    assert_eq!(
+        reqwest::Client::new()
+            .post(denied.runtime.base_url.join("authorize")?)
+            .bearer_auth(&invalid)
+            .json(&json!({}))
+            .send()
+            .await?
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let events = logs.events();
+    let invalid_event = events[before..]
+        .iter()
+        .find(|event| {
+            event
+                .get("diagnostic_code")
+                .is_some_and(|code| code == "LW_MODEL_GATEWAY_TOKEN_SCOPE")
+        })
+        .ok_or("invalid signature rejection must be logged")?;
+    for field in ["run_id", "attempt", "operation_id"] {
+        assert!(
+            !invalid_event.contains_key(field),
+            "unverified {field} must not be logged"
+        );
+    }
     let rendered = format!("{events:?}");
     for secret in [
         "upstream-private-key",
@@ -831,6 +891,8 @@ async fn gateway_observability_covers_admission_transport_and_http_without_secre
         "Hello",
         "ANTHROPIC_API_KEY",
         &denied.capability,
+        &expired,
+        &invalid,
     ] {
         assert!(
             !rendered.contains(secret),
