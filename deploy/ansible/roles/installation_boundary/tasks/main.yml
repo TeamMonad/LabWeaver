@@ -1,0 +1,128 @@
+---
+- name: Require authenticated infrastructure installation identity
+  ansible.builtin.assert:
+    that:
+      - labweaver_installation_id | default('') is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - labweaver_installation_id == lookup('ansible.builtin.env', 'LW_BUNDLE_INSTALLATION_ID')
+    fail_msg: INFRASTRUCTURE_INSTALLATION_ID_REQUIRED
+
+- name: Initialize the complete infrastructure mutation inventory
+  ansible.builtin.set_fact:
+    installation_boundary_manifest_objects: "{{ installation_boundary_objects }}"
+    installation_boundary_chart_objects: []
+    installation_boundary_owned_objects: []
+    installation_boundary_helm_post_renderer: "{{ installation_boundary_post_renderer_path }}"
+
+- name: Read all pinned infrastructure sources before mutation
+  ansible.builtin.include_tasks: source.yml
+  loop: "{{ installation_boundary_sources }}"
+  loop_control:
+    loop_var: installation_boundary_source
+
+- name: Verify and render every planned infrastructure Helm release
+  ansible.builtin.include_tasks: helm.yml
+  loop: "{{ installation_boundary_helm_releases }}"
+  loop_control:
+    loop_var: installation_boundary_release
+
+- name: Bind all infrastructure target namespaces including Helm-created namespaces
+  ansible.builtin.set_fact:
+    installation_boundary_namespace_names: >-
+      {{ (((installation_boundary_manifest_objects + installation_boundary_chart_objects) |
+           selectattr('metadata.namespace', 'defined') | map(attribute='metadata.namespace') | list) +
+          (installation_boundary_helm_releases | map(attribute='namespace') | list)) |
+         unique | difference(installation_boundary_shared_namespaces) }}
+    installation_boundary_namespace_producers: >-
+      {{ ((installation_boundary_manifest_objects + installation_boundary_chart_objects) |
+          selectattr('kind', 'equalto', 'Namespace') | map(attribute='metadata.name') | list) +
+         (installation_boundary_helm_releases | map(attribute='namespace') | list) }}
+
+- name: Inspect every infrastructure target namespace before mutation
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ installation_boundary_kubeconfig }}"
+    api_version: v1
+    kind: Namespace
+    name: "{{ item }}"
+  loop: "{{ installation_boundary_namespace_names }}"
+  register: installation_boundary_namespace_observations
+  changed_when: false
+
+- name: Refuse infrastructure namespaces owned by another installation
+  ansible.builtin.assert:
+    that:
+      - item.resources | length == 0 or
+        item.resources[0].metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id
+      - item.resources | length > 0 or item.item in installation_boundary_namespace_producers
+    fail_msg: INFRASTRUCTURE_NAMESPACE_OWNERSHIP_CONFLICT
+  loop: "{{ installation_boundary_namespace_observations.results }}"
+
+- name: Inspect every complete planned infrastructure mutation target
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ installation_boundary_kubeconfig }}"
+    api_version: "{{ item.apiVersion }}"
+    kind: "{{ item.kind }}"
+    namespace: "{{ item.metadata.namespace | default(omit) }}"
+    name: "{{ item.metadata.name }}"
+  loop: "{{ installation_boundary_manifest_objects + installation_boundary_chart_objects }}"
+  register: installation_boundary_object_observations
+  changed_when: false
+  no_log: true
+
+- name: Refuse to overwrite unowned infrastructure mutation targets
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/jq
+      - --exit-status
+      - --arg
+      - installation
+      - "{{ labweaver_installation_id }}"
+      - >-
+        .items as $all |
+        def owned($object; $seen):
+          (($object.metadata.annotations["labweaver.io/installation-id"] // "") == $installation) or
+          any($object.metadata.ownerReferences[]?.uid;
+            . as $uid | $uid != null and ($seen | index($uid)) == null and
+            any($all[]; .metadata.uid == $uid and owned(.; $seen + [$uid])));
+        all($all[]; owned(.; []))
+    stdin: >-
+      {{ {'items': installation_boundary_object_observations.results | map(attribute='resources') | flatten} | to_json }}
+  changed_when: false
+  no_log: true
+
+- name: Bind installation identity to every non-Helm infrastructure producer
+  ansible.builtin.set_fact:
+    installation_boundary_owned_objects: >-
+      {{ installation_boundary_owned_objects +
+         [item | combine({'metadata': {'annotations': {'labweaver.io/installation-id': labweaver_installation_id}}}, recursive=True)] }}
+  loop: "{{ installation_boundary_manifest_objects }}"
+  no_log: true
+
+- name: Retain the validated source and explicit producer groups
+  ansible.builtin.set_fact:
+    installation_boundary_owned_source_objects: "{{ installation_boundary_owned_objects[(installation_boundary_objects | length):] }}"
+    installation_boundary_owned_explicit_objects: "{{ installation_boundary_owned_objects[:(installation_boundary_objects | length)] }}"
+
+- name: Verify Helm identity post-renderer dependencies before any namespace creation
+  ansible.builtin.command:
+    argv: [python3, -c, 'import yaml']
+  changed_when: false
+  when: installation_boundary_helm_releases | length > 0
+
+- name: Stage the Helm installation identity producer
+  ansible.builtin.copy:
+    src: stamp-installation.py
+    dest: "{{ installation_boundary_post_renderer_path }}"
+    mode: '0700'
+  when: installation_boundary_helm_releases | length > 0
+
+- name: Create only verified-absent infrastructure namespaces after complete validation
+  ansible.builtin.command:
+    argv: [kubectl, --kubeconfig, "{{ installation_boundary_kubeconfig }}", create, -f, '-']
+    stdin: >-
+      {{ ((installation_boundary_manifest_objects + installation_boundary_chart_objects) |
+          selectattr('kind', 'equalto', 'Namespace') | selectattr('metadata.name', 'equalto', item.item) | first |
+          default({'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': item.item}})) |
+         combine({'metadata': {'annotations': {'labweaver.io/installation-id': labweaver_installation_id}}}, recursive=True) | to_json }}
+  loop: "{{ installation_boundary_namespace_observations.results }}"
+  when: item.resources | length == 0
+  changed_when: true

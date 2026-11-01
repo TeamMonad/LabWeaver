@@ -1,12 +1,26 @@
 ---
+- name: Bind the complete addon producer inventory
+  ansible.builtin.set_fact:
+    cluster_addons_boundary_objects: >-
+      {{ (lookup('template', 'gateway.yml.j2') | from_yaml_all | list) +
+         [{'apiVersion': 'cert-manager.io/v1', 'kind': 'ClusterIssuer', 'metadata': {'name': 'dev-selfsigned'},
+           'spec': {'selfSigned': {}}}] }}
+
+- name: Verify every addon mutation target before changing the cluster
+  ansible.builtin.include_role:
+    name: installation_boundary
+  vars:
+    installation_boundary_sources:
+      - >-
+        {{ cert_manager_manifest_file | default('https://github.com/cert-manager/cert-manager/releases/download/'
+           ~ cert_manager_version ~ '/cert-manager.yaml') }}
+    installation_boundary_objects: "{{ cluster_addons_boundary_objects }}"
+
 - name: Install cert-manager
   kubernetes.core.k8s:
     kubeconfig: /etc/kubernetes/admin.conf
     state: present
-    src: >-
-      {{ cert_manager_manifest_file
-         | default('https://github.com/cert-manager/cert-manager/releases/download/'
-                   ~ cert_manager_version ~ '/cert-manager.yaml') }}
+    definition: "{{ installation_boundary_owned_source_objects }}"
 
 - name: Wait for cert-manager controllers
   ansible.builtin.command: "kubectl -n cert-manager wait deployment/{{ item }} --for=condition=Available --timeout=5m"
@@ -40,7 +54,9 @@
       - --type=json
       - -p
       - >-
-        [{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--dns01-recursive-nameservers-only"},
+        [{"op":"test","path":"/metadata/uid","value":{{ cluster_addons_cert_manager.resources[0].metadata.uid | to_json }}},
+         {"op":"test","path":"/metadata/resourceVersion","value":{{ cluster_addons_cert_manager.resources[0].metadata.resourceVersion | to_json }}},
+         {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--dns01-recursive-nameservers-only"},
          {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--dns01-recursive-nameservers=1.1.1.1:53,8.8.8.8:53"}]
   environment:
     KUBECONFIG: /etc/kubernetes/admin.conf
@@ -60,17 +76,13 @@
   kubernetes.core.k8s:
     kubeconfig: /etc/kubernetes/admin.conf
     state: present
-    definition:
-      apiVersion: cert-manager.io/v1
-      kind: ClusterIssuer
-      metadata: { name: dev-selfsigned }
-      spec: { selfSigned: {} }
+    definition: "{{ installation_boundary_owned_explicit_objects | selectattr('kind', 'equalto', 'ClusterIssuer') | list }}"
 
 - name: Apply namespaces, quota, Gateway, and HTTPRoute
   kubernetes.core.k8s:
     kubeconfig: /etc/kubernetes/admin.conf
     state: present
-    definition: "{{ lookup('template', 'gateway.yml.j2') | from_yaml_all | list }}"
+    definition: "{{ installation_boundary_owned_explicit_objects | rejectattr('kind', 'equalto', 'ClusterIssuer') | list }}"
 
 - name: Verify programmed internal Gateway
   ansible.builtin.command: kubectl -n labweaver-demo wait gateway/public-gateway --for=condition=Programmed --timeout=5m

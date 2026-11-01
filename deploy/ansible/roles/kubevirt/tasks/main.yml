@@ -48,11 +48,64 @@
     label: "{{ item.nodeSelector | default({}) | to_json }}"
   tags: [kubevirt-mdev]
 
-- name: Label selected KVM-capable workers for KubeVirt scheduling
-  ansible.builtin.command: >-
-    kubectl label node {{ item }} {{ kubevirt_node_label }}=true --overwrite
-  changed_when: false
+- name: Read the exact selected KubeVirt nodes before bounded label changes
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Node
+    name: "{{ item }}"
   loop: "{{ [verify_nfs_writer_node, verify_nfs_reader_node] | unique }}"
+  register: kubevirt_node_ownership
+
+- name: Refuse to claim a KubeVirt node label owned by another installation
+  ansible.builtin.assert:
+    that:
+      - item.resources | length == 1
+      - item.resources[0].metadata.uid | length > 0
+      - item.resources[0].metadata.resourceVersion | length > 0
+      - item.resources[0].metadata.annotations['labweaver.io/kubevirt-installation-id'] | default('') in ['', labweaver_installation_id]
+      - >-
+        kubevirt_node_label not in item.resources[0].metadata.labels | default({}) or
+        item.resources[0].metadata.annotations['labweaver.io/kubevirt-installation-id'] | default('') == labweaver_installation_id
+    fail_msg: KUBEVIRT_NODE_LABEL_OWNERSHIP_CONFLICT
+  loop: "{{ kubevirt_node_ownership.results }}"
+
+- name: Verify every KubeVirt and CDI mutation target before changing the cluster
+  ansible.builtin.include_role:
+    name: installation_boundary
+    apply:
+      tags: [always]
+  tags: [always]
+  vars:
+    installation_boundary_sources:
+      - "{{ kubevirt_operator_file | default('https://github.com/kubevirt/kubevirt/releases/download/' ~ kubevirt_version ~ '/kubevirt-operator.yaml') }}"
+      - "{{ kubevirt_cr_file | default('https://github.com/kubevirt/kubevirt/releases/download/' ~ kubevirt_version ~ '/kubevirt-cr.yaml') }}"
+      - "{{ cdi_operator_file | default('https://github.com/kubevirt/containerized-data-importer/releases/download/' ~ cdi_version ~ '/cdi-operator.yaml') }}"
+      - "{{ cdi_cr_file | default('https://github.com/kubevirt/containerized-data-importer/releases/download/' ~ cdi_version ~ '/cdi-cr.yaml') }}"
+    installation_boundary_objects:
+      - {apiVersion: apps/v1, kind: Deployment, metadata: {name: virt-api, namespace: kubevirt}}
+      - {apiVersion: apps/v1, kind: Deployment, metadata: {name: virt-controller, namespace: kubevirt}}
+      - {apiVersion: apps/v1, kind: Deployment, metadata: {name: virt-operator, namespace: kubevirt}}
+      - apiVersion: cilium.io/v2
+        kind: CiliumNetworkPolicy
+        metadata: {name: kubevirt-control-plane, namespace: kubevirt}
+
+- name: Label selected KVM-capable workers for KubeVirt scheduling
+  kubernetes.core.k8s_json_patch:
+    api_version: v1
+    kind: Node
+    name: "{{ item.resources[0].metadata.name }}"
+    patch:
+      - {op: test, path: /metadata/uid, value: "{{ item.resources[0].metadata.uid }}"}
+      - {op: test, path: /metadata/resourceVersion, value: "{{ item.resources[0].metadata.resourceVersion }}"}
+      - op: add
+        path: /metadata/labels
+        value: "{{ item.resources[0].metadata.labels | default({}) | combine({kubevirt_node_label: 'true'}) }}"
+      - op: add
+        path: /metadata/annotations
+        value: >-
+          {{ item.resources[0].metadata.annotations | default({}) |
+             combine({'labweaver.io/kubevirt-installation-id': labweaver_installation_id}) }}
+  loop: "{{ kubevirt_node_ownership.results }}"
 
 - name: Verify selected workers are schedulable for KubeVirt
   ansible.builtin.command: "kubectl get nodes -l {{ kubevirt_node_label }}=true --no-headers"
@@ -60,13 +113,10 @@
   register: kubevirt_nodes
   failed_when: kubevirt_nodes.stdout_lines | length < 2
 
-- name: Install KubeVirt operator and custom resource
+- name: Install the verified KubeVirt and CDI operators and custom resources
   kubernetes.core.k8s:
     state: present
-    src: "{{ item }}"
-  loop:
-    - "{{ kubevirt_operator_file | default('https://github.com/kubevirt/kubevirt/releases/download/' ~ kubevirt_version ~ '/kubevirt-operator.yaml') }}"
-    - "{{ kubevirt_cr_file | default('https://github.com/kubevirt/kubevirt/releases/download/' ~ kubevirt_version ~ '/kubevirt-cr.yaml') }}"
+    definition: "{{ installation_boundary_owned_source_objects }}"
 
 - name: Wait for KubeVirt availability
   ansible.builtin.command: "kubectl -n kubevirt wait kv/kubevirt --for=condition=Available --timeout=10m"
@@ -81,6 +131,8 @@
       metadata:
         name: kubevirt
         namespace: kubevirt
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
       spec:
         configuration:
           developerConfiguration:
@@ -98,6 +150,8 @@
       metadata:
         name: kubevirt
         namespace: kubevirt
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
       spec:
         configuration:
           permittedHostDevices:
@@ -107,14 +161,6 @@
                  'nodeMediatedDeviceTypes': kubevirt_mediated_devices_configuration} }}
   when: kubevirt_permitted_mediated_devices | length > 0
   tags: [kubevirt-mdev]
-
-- name: Install CDI operator and custom resource
-  kubernetes.core.k8s:
-    state: present
-    src: "{{ item }}"
-  loop:
-    - "{{ cdi_operator_file | default('https://github.com/kubevirt/containerized-data-importer/releases/download/' ~ cdi_version ~ '/cdi-operator.yaml') }}"
-    - "{{ cdi_cr_file | default('https://github.com/kubevirt/containerized-data-importer/releases/download/' ~ cdi_version ~ '/cdi-cr.yaml') }}"
 
 - name: Wait for CDI availability
   ansible.builtin.command: kubectl -n cdi wait cdi/cdi --for=condition=Available --timeout=10m
@@ -128,6 +174,8 @@
       kind: CDI
       metadata:
         name: cdi
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
       spec:
         config:
           scratchSpaceStorageClass: "{{ storageclass_local_path }}"
@@ -188,6 +236,8 @@
       kind: CDI
       metadata:
         name: cdi
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
       spec:
         config:
           imagePullSecrets: "{{ kubevirt_cdi_image_pull_secrets }}"
@@ -203,6 +253,8 @@
       metadata:
         name: kubevirt-control-plane
         namespace: kubevirt
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
       spec:
         endpointSelector: {}
         egress:
@@ -221,26 +273,46 @@
 - name: Place the KubeVirt control plane on the selected nodes
   when: kubevirt_control_plane_node_selector | length > 0
   block:
-    - name: Remove the control-plane-only affinity from KubeVirt control-plane deployments
-      kubernetes.core.k8s_json_patch:
+    - name: Read the installation-owned KubeVirt controller root
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: KubeVirt
+        namespace: kubevirt
+        name: kubevirt
+      register: kubevirt_control_plane_owner
+
+    - name: Read the exact KubeVirt control-plane deployment mutation targets
+      kubernetes.core.k8s_info:
         api_version: apps/v1
         kind: Deployment
         namespace: kubevirt
         name: "{{ item }}"
-        patch:
-          - op: remove
-            path: /spec/template/spec/affinity/nodeAffinity/requiredDuringSchedulingIgnoredDuringExecution
       loop: [virt-operator, virt-api, virt-controller]
-      failed_when: false
+      register: kubevirt_control_plane_targets
+
+    - name: Refuse control-plane changes outside the verified KubeVirt installation
+      ansible.builtin.assert:
+        that:
+          - kubevirt_control_plane_owner.resources | length == 1
+          - kubevirt_control_plane_owner.resources[0].metadata.annotations['labweaver.io/installation-id'] == labweaver_installation_id
+          - item.resources | length == 1
+          - >-
+            item.resources[0].metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id or
+            kubevirt_control_plane_owner.resources[0].metadata.uid in
+              (item.resources[0].metadata.ownerReferences | default([]) | map(attribute='uid') | list)
+        fail_msg: KUBEVIRT_CONTROL_PLANE_OWNERSHIP_CONFLICT
+      loop: "{{ kubevirt_control_plane_targets.results }}"
 
     - name: Apply the reviewed KubeVirt control-plane node selector
       kubernetes.core.k8s_json_patch:
         api_version: apps/v1
         kind: Deployment
         namespace: kubevirt
-        name: "{{ item }}"
-        patch:
-          - op: add
-            path: /spec/template/spec/nodeSelector
-            value: "{{ kubevirt_control_plane_node_selector }}"
-      loop: [virt-operator, virt-api, virt-controller]
+        name: "{{ item.metadata.name }}"
+        patch: >-
+          {{ [{'op': 'test', 'path': '/metadata/uid', 'value': item.metadata.uid},
+              {'op': 'test', 'path': '/metadata/resourceVersion', 'value': item.metadata.resourceVersion}] +
+             ([{'op': 'remove', 'path': '/spec/template/spec/affinity/nodeAffinity/requiredDuringSchedulingIgnoredDuringExecution'}]
+              if item.spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution is defined else []) +
+             [{'op': 'add', 'path': '/spec/template/spec/nodeSelector', 'value': kubevirt_control_plane_node_selector}] }}
+      loop: "{{ kubevirt_control_plane_targets.results | map(attribute='resources') | flatten }}"

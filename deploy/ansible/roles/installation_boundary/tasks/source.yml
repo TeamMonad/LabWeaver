@@ -1,0 +1,24 @@
+---
+- name: Read a pinned infrastructure manifest from its configured external source
+  ansible.builtin.uri:
+    url: "{{ installation_boundary_source }}"
+    return_content: true
+    status_code: 200
+  register: installation_boundary_source_http
+  check_mode: false
+  environment: "{{ labweaver_controller_proxy_env | default({}) }}"
+  when: installation_boundary_source is match('^https?://')
+
+- name: Read a pinned infrastructure manifest from its configured local locator
+  ansible.builtin.slurp:
+    src: "{{ installation_boundary_source }}"
+  register: installation_boundary_source_file
+  when: installation_boundary_source is not match('^https?://')
+
+- name: Add every pinned manifest object to the complete mutation inventory
+  ansible.builtin.set_fact:
+    installation_boundary_manifest_objects: >-
+      {{ installation_boundary_manifest_objects +
+         ((installation_boundary_source_http.content if installation_boundary_source is match('^https?://')
+           else installation_boundary_source_file.content | b64decode) | from_yaml_all | select('mapping') | list) }}
+  no_log: true

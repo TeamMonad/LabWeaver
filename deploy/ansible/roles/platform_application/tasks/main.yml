@@ -42,6 +42,15 @@
     fail_msg: PLATFORM_APPLICATION_NAMESPACE_OWNERSHIP_CONFLICT
   changed_when: false
 
+- name: Verify sibling release installation identities before probing namespace objects
+  ansible.builtin.include_role:
+    name: installation_boundary
+    tasks_from: releases
+  vars:
+    installation_boundary_helm: "{{ platform_application_helm }}"
+    installation_boundary_kubeconfig: "{{ platform_application_kubeconfig }}"
+    installation_boundary_release_namespace: "{{ platform_application_namespace }}"
+
 - name: Refuse to adopt unowned platform objects
   ansible.builtin.shell:
     cmd: >-
@@ -50,9 +59,9 @@
       --namespace {{ platform_application_namespace }} get {{ 'all,configmap,secret,serviceaccount,role,rolebinding,' ~
         'datavolume,persistentvolumeclaim,datasource,networkpolicy,ciliumnetworkpolicy,referencegrant' }}
       --output json |
-      jq -e '.items as $all |
+      jq -e '.items as $all | {{ installation_boundary_verified_release_names | to_json }} as $releases |
         def owned($object; $seen):
-          (($object.metadata.annotations["meta.helm.sh/release-name"] // "") == "{{ platform_application_release_name }}"
+          ((($object.metadata.annotations["meta.helm.sh/release-name"] // "") as $release | $releases | index($release)) != null
             and ($object.metadata.annotations["meta.helm.sh/release-namespace"] // "") == "{{ platform_application_namespace }}"
             and ($object.metadata.labels["app.kubernetes.io/managed-by"] // "") == "Helm")
           or (($object.metadata.annotations["labweaver.io/installation-id"] // "") == "{{ platform_application_installation_id }}"
@@ -62,8 +71,8 @@
             any($all[]; .metadata.uid == $uid and owned(.; $seen + [$uid])));
         [$all[] | select(.kind != "ServiceAccount" or .metadata.name != "default") |
           select(.kind != "ConfigMap" or .metadata.name != "kube-root-ca.crt") |
-          select(.kind != "Secret" or .type != "helm.sh/release.v1" or
-            .metadata.labels.owner != "helm" or .metadata.labels.name != "{{ platform_application_release_name }}") |
+          select(.kind != "Secret" or .type != "helm.sh/release.v1" or .metadata.labels.owner != "helm" or
+            ((.metadata.labels.name // "") as $release | $releases | index($release)) == null) |
           select(owned(.; []) | not)] | length == 0'
   args:
     executable: /bin/bash
@@ -307,102 +316,6 @@
       - platform_application_postgres_forward_port | int < 65536
     fail_msg: PLATFORM_APPLICATION_POSTGRES_FORWARD_INPUT_INVALID
   when: platform_application_postgres_forward_enabled | bool
-
-- name: Install the persistent PostgreSQL port-forward
-  ansible.builtin.template:
-    src: postgres-port-forward.service.j2
-    dest: /etc/systemd/system/{{ platform_application_postgres_forward_service_name }}
-    owner: root
-    group: root
-    mode: "0644"
-  notify: Restart the retained PostgreSQL port-forward
-  when: platform_application_postgres_forward_enabled | bool
-
-- name: Apply the PostgreSQL port-forward before database reconciliation
-  ansible.builtin.meta: flush_handlers
-  when: platform_application_postgres_forward_enabled | bool
-
-- name: Require the retained PostgreSQL port-forward endpoint
-  ansible.builtin.wait_for:
-    host: 127.0.0.1
-    port: "{{ platform_application_postgres_forward_port }}"
-    state: started
-    timeout: 30
-  when: platform_application_postgres_forward_enabled | bool
-
-- name: Validate the NATS port-forward contract
-  ansible.builtin.assert:
-    that:
-      - platform_application_nats_forward_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
-      - platform_application_nats_forward_kubernetes_service is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
-      - platform_application_nats_forward_hostname is match('^[a-z0-9][a-z0-9.-]+$')
-      - platform_application_nats_forward_hostname == 'nats.labweaver-data.svc'
-      - platform_application_nats_forward_address == '127.0.0.1'
-      - platform_application_nats_forward_address is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
-      - platform_application_nats_forward_service_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.service$')
-      - platform_application_nats_forward_port | int > 1024
-      - platform_application_nats_forward_port | int < 65536
-    fail_msg: PLATFORM_APPLICATION_NATS_FORWARD_INPUT_INVALID
-  when: platform_application_nats_forward_enabled | bool
-
-- name: Install the persistent NATS port-forward
-  ansible.builtin.template:
-    src: nats-port-forward.service.j2
-    dest: /etc/systemd/system/{{ platform_application_nats_forward_service_name }}
-    owner: root
-    group: root
-    mode: "0644"
-  notify: Restart the retained NATS port-forward
-  when: platform_application_nats_forward_enabled | bool
-
-- name: Apply the NATS port-forward before JetStream reconciliation
-  ansible.builtin.meta: flush_handlers
-  when: platform_application_nats_forward_enabled | bool
-
-- name: Require the retained NATS port-forward endpoint
-  ansible.builtin.wait_for:
-    host: 127.0.0.1
-    port: "{{ platform_application_nats_forward_port }}"
-    state: started
-    timeout: 30
-  when: platform_application_nats_forward_enabled | bool
-
-- name: Validate the MinIO port-forward contract
-  ansible.builtin.assert:
-    that:
-      - platform_application_minio_forward_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
-      - platform_application_minio_forward_kubernetes_service is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
-      - platform_application_minio_forward_hostname is match('^[a-z0-9][a-z0-9.-]+$')
-      - platform_application_minio_forward_hostname == 'minio.labweaver-data.svc'
-      - platform_application_minio_forward_address == '127.0.0.1'
-      - platform_application_minio_forward_address is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
-      - platform_application_minio_forward_service_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?\.service$')
-      - platform_application_minio_forward_port | int > 1024
-      - platform_application_minio_forward_port | int < 65536
-    fail_msg: PLATFORM_APPLICATION_MINIO_FORWARD_INPUT_INVALID
-  when: platform_application_minio_forward_enabled | bool
-
-- name: Install the persistent MinIO port-forward
-  ansible.builtin.template:
-    src: minio-port-forward.service.j2
-    dest: /etc/systemd/system/{{ platform_application_minio_forward_service_name }}
-    owner: root
-    group: root
-    mode: "0644"
-  notify: Restart the retained MinIO port-forward
-  when: platform_application_minio_forward_enabled | bool
-
-- name: Apply the MinIO port-forward before bucket reconciliation
-  ansible.builtin.meta: flush_handlers
-  when: platform_application_minio_forward_enabled | bool
-
-- name: Require the retained MinIO port-forward endpoint
-  ansible.builtin.wait_for:
-    host: 127.0.0.1
-    port: "{{ platform_application_minio_forward_port }}"
-    state: started
-    timeout: 30
-  when: platform_application_minio_forward_enabled | bool
 
 - name: Validate controller-owned reviewed inputs
   ansible.builtin.stat:
@@ -904,6 +817,183 @@
     owner: root
     group: root
     mode: "0700"
+
+- name: Copy reviewed Helm chart
+  ansible.builtin.copy:
+    src: "{{ platform_application_chart_source }}/"
+    dest: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/chart/"
+    owner: root
+    group: root
+    mode: preserve
+
+- name: Copy reviewed private values files
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/{{ item | basename }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ platform_application_values_files }}"
+  no_log: true
+
+- name: Build immutable Helm arguments
+  ansible.builtin.set_fact:
+    platform_application_values_argv: >-
+      {%- set values = [] -%}
+      {%- for values_file in platform_application_values_files -%}
+      {%- set _ = values.append(
+        '--values=' + platform_application_work_root + '/' + platform_application_run_id
+        + '/' + (values_file | basename)) -%}
+      {%- endfor -%}
+      {{ values }}
+    platform_application_image_argv: >-
+      {%- set values = [
+        '--set-string',
+        'imagePullSecrets[0].name=' + platform_application_image_pull_secret_name,
+        '--set-string',
+        'deploymentIdentity.configurationBundleSha256=' + platform_application_configuration_bundle_sha256
+      ] -%}
+      {%- for image in platform_application_package.images -%}
+      {%- set _ = values.extend(['--set-string', 'images.' + (image.component | replace('-', '_')) + '=' + image.reference]) -%}
+      {%- endfor -%}
+      {{ values }}
+    platform_application_route_argv: >-
+      {%- set values = [] -%}
+      {%- if platform_application_portal_route_name | length > 0 -%}
+      {%- set _ = values.extend([
+        '--set', 'portalRoute.enabled=true',
+        '--set-string', 'portalRoute.namespace=' + platform_application_portal_route_namespace,
+        '--set-string', 'portalRoute.name=' + platform_application_portal_route_name,
+        '--set-string', 'portalRoute.hostname=' + platform_application_portal_hostname,
+        '--set-string', 'portalRoute.gatewayName=' + platform_application_portal_gateway_name,
+        '--set-string', 'portalRoute.gatewaySectionName=' + platform_application_portal_gateway_listener_name,
+        '--set-string', 'runtimeRoute.baseHostname=' + platform_application_runtime_base_hostname,
+        '--set-string', 'runtimeRoute.gatewayName=' + platform_application_runtime_gateway_name,
+        '--set-string', 'runtimeRoute.gatewayClassName=' + platform_application_runtime_gateway_class_name,
+        '--set-string', 'runtimeRoute.tlsHostname=' + platform_application_runtime_tls_hostname,
+        '--set-string', 'runtimeRoute.tlsSecretName=' + platform_application_runtime_tls_secret_name
+      ]) -%}
+      {%- endif -%}
+      {%- if platform_application_object_store_route_enabled -%}
+      {%- set _ = values.extend([
+        '--set', 'objectStoreRoute.enabled=true',
+        '--set-string', 'objectStoreRoute.namespace=' + platform_application_data_namespace,
+        '--set-string', 'objectStoreRoute.serviceName=' + platform_application_object_store_service_name,
+        '--set', 'objectStoreRoute.servicePort=' + (platform_application_object_store_service_port | string),
+        '--set-string', 'objectStoreRoute.pathPrefix=/' + platform_application_minio_bucket,
+        '--set-string', 'objectStoreRoute.backendHostname=' + platform_application_object_store_backend_hostname,
+        '--set-file', 'objectStoreRoute.caCertificate=' + platform_application_minio_ca_file,
+        '--set-string', 'workloads.control-service.externalEgress[0].cidr=' + platform_application_object_store_external_cidr,
+        '--set', 'workloads.control-service.externalEgress[0].ports[0]=443'
+      ]) -%}
+      {%- endif -%}
+      {%- if platform_application_ssh_load_balancer_ip | length > 0 -%}
+      {%- set _ = values.extend([
+        '--set', 'sshGatewayService.enabled=true',
+        '--set-string', 'sshGatewayService.loadBalancerIP=' + platform_application_ssh_load_balancer_ip,
+        '--set-string', 'sshGatewayService.sharedIPKey=' + platform_application_ssh_shared_ip_key
+      ]) -%}
+      {%- endif -%}
+      {{ values }}
+
+- name: Verify every final Helm mutation target before Kubernetes reconciliation
+  ansible.builtin.include_tasks: chart-ownership.yml
+
+- name: Install the persistent PostgreSQL port-forward
+  ansible.builtin.template:
+    src: postgres-port-forward.service.j2
+    dest: /etc/systemd/system/{{ platform_application_postgres_forward_service_name }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart the retained PostgreSQL port-forward
+  when: platform_application_postgres_forward_enabled | bool
+
+- name: Apply the PostgreSQL port-forward before database reconciliation
+  ansible.builtin.meta: flush_handlers
+  when: platform_application_postgres_forward_enabled | bool
+
+- name: Require the retained PostgreSQL port-forward endpoint
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ platform_application_postgres_forward_port }}"
+    state: started
+    timeout: 30
+  when: platform_application_postgres_forward_enabled | bool
+
+- name: Validate the NATS port-forward contract
+  ansible.builtin.assert:
+    that:
+      - platform_application_nats_forward_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - platform_application_nats_forward_kubernetes_service is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - platform_application_nats_forward_hostname is match('^[a-z0-9][a-z0-9.-]+$')
+      - platform_application_nats_forward_hostname == 'nats.labweaver-data.svc'
+      - platform_application_nats_forward_address == '127.0.0.1'
+      - platform_application_nats_forward_address is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+      - platform_application_nats_forward_service_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.service$')
+      - platform_application_nats_forward_port | int > 1024
+      - platform_application_nats_forward_port | int < 65536
+    fail_msg: PLATFORM_APPLICATION_NATS_FORWARD_INPUT_INVALID
+  when: platform_application_nats_forward_enabled | bool
+
+- name: Install the persistent NATS port-forward
+  ansible.builtin.template:
+    src: nats-port-forward.service.j2
+    dest: /etc/systemd/system/{{ platform_application_nats_forward_service_name }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart the retained NATS port-forward
+  when: platform_application_nats_forward_enabled | bool
+
+- name: Apply the NATS port-forward before JetStream reconciliation
+  ansible.builtin.meta: flush_handlers
+  when: platform_application_nats_forward_enabled | bool
+
+- name: Require the retained NATS port-forward endpoint
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ platform_application_nats_forward_port }}"
+    state: started
+    timeout: 30
+  when: platform_application_nats_forward_enabled | bool
+
+- name: Validate the MinIO port-forward contract
+  ansible.builtin.assert:
+    that:
+      - platform_application_minio_forward_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - platform_application_minio_forward_kubernetes_service is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - platform_application_minio_forward_hostname is match('^[a-z0-9][a-z0-9.-]+$')
+      - platform_application_minio_forward_hostname == 'minio.labweaver-data.svc'
+      - platform_application_minio_forward_address == '127.0.0.1'
+      - platform_application_minio_forward_address is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+      - platform_application_minio_forward_service_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?\.service$')
+      - platform_application_minio_forward_port | int > 1024
+      - platform_application_minio_forward_port | int < 65536
+    fail_msg: PLATFORM_APPLICATION_MINIO_FORWARD_INPUT_INVALID
+  when: platform_application_minio_forward_enabled | bool
+
+- name: Install the persistent MinIO port-forward
+  ansible.builtin.template:
+    src: minio-port-forward.service.j2
+    dest: /etc/systemd/system/{{ platform_application_minio_forward_service_name }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart the retained MinIO port-forward
+  when: platform_application_minio_forward_enabled | bool
+
+- name: Apply the MinIO port-forward before bucket reconciliation
+  ansible.builtin.meta: flush_handlers
+  when: platform_application_minio_forward_enabled | bool
+
+- name: Require the retained MinIO port-forward endpoint
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ platform_application_minio_forward_port }}"
+    state: started
+    timeout: 30
+  when: platform_application_minio_forward_enabled | bool
 
 - name: Resolve actual primary and retained data-service endpoints
   ansible.builtin.command:
@@ -2292,87 +2382,6 @@
     - "{{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak-truststore.p12.tmp"
   check_mode: false
   no_log: true
-
-- name: Copy reviewed Helm chart
-  ansible.builtin.copy:
-    src: "{{ platform_application_chart_source }}/"
-    dest: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/chart/"
-    owner: root
-    group: root
-    mode: preserve
-
-- name: Copy reviewed private values files
-  ansible.builtin.copy:
-    src: "{{ item }}"
-    dest: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/{{ item | basename }}"
-    owner: root
-    group: root
-    mode: "0600"
-  loop: "{{ platform_application_values_files }}"
-  no_log: true
-
-- name: Build immutable Helm arguments
-  ansible.builtin.set_fact:
-    platform_application_values_argv: >-
-      {%- set values = [] -%}
-      {%- for values_file in platform_application_values_files -%}
-      {%- set _ = values.append(
-        '--values=' + platform_application_work_root + '/' + platform_application_run_id
-        + '/' + (values_file | basename)) -%}
-      {%- endfor -%}
-      {{ values }}
-    platform_application_image_argv: >-
-      {%- set values = [
-        '--set-string',
-        'imagePullSecrets[0].name=' + platform_application_image_pull_secret_name,
-        '--set-string',
-        'deploymentIdentity.configurationBundleSha256=' + platform_application_configuration_bundle_sha256
-      ] -%}
-      {%- for image in platform_application_package.images -%}
-      {%- set _ = values.extend(['--set-string', 'images.' + (image.component | replace('-', '_')) + '=' + image.reference]) -%}
-      {%- endfor -%}
-      {{ values }}
-    platform_application_route_argv: >-
-      {%- set values = [] -%}
-      {%- if platform_application_portal_route_name | length > 0 -%}
-      {%- set _ = values.extend([
-        '--set', 'portalRoute.enabled=true',
-        '--set-string', 'portalRoute.namespace=' + platform_application_portal_route_namespace,
-        '--set-string', 'portalRoute.name=' + platform_application_portal_route_name,
-        '--set-string', 'portalRoute.hostname=' + platform_application_portal_hostname,
-        '--set-string', 'portalRoute.gatewayName=' + platform_application_portal_gateway_name,
-        '--set-string', 'portalRoute.gatewaySectionName=' + platform_application_portal_gateway_listener_name,
-        '--set-string', 'runtimeRoute.baseHostname=' + platform_application_runtime_base_hostname,
-        '--set-string', 'runtimeRoute.gatewayName=' + platform_application_runtime_gateway_name,
-        '--set-string', 'runtimeRoute.gatewayClassName=' + platform_application_runtime_gateway_class_name,
-        '--set-string', 'runtimeRoute.tlsHostname=' + platform_application_runtime_tls_hostname,
-        '--set-string', 'runtimeRoute.tlsSecretName=' + platform_application_runtime_tls_secret_name
-      ]) -%}
-      {%- endif -%}
-      {%- if platform_application_object_store_route_enabled -%}
-      {%- set _ = values.extend([
-        '--set', 'objectStoreRoute.enabled=true',
-        '--set-string', 'objectStoreRoute.namespace=' + platform_application_data_namespace,
-        '--set-string', 'objectStoreRoute.serviceName=' + platform_application_object_store_service_name,
-        '--set', 'objectStoreRoute.servicePort=' + (platform_application_object_store_service_port | string),
-        '--set-string', 'objectStoreRoute.pathPrefix=/' + platform_application_minio_bucket,
-        '--set-string', 'objectStoreRoute.backendHostname=' + platform_application_object_store_backend_hostname,
-        '--set-file', 'objectStoreRoute.caCertificate=' + platform_application_minio_ca_file,
-        '--set-string', 'workloads.control-service.externalEgress[0].cidr=' + platform_application_object_store_external_cidr,
-        '--set', 'workloads.control-service.externalEgress[0].ports[0]=443'
-      ]) -%}
-      {%- endif -%}
-      {%- if platform_application_ssh_load_balancer_ip | length > 0 -%}
-      {%- set _ = values.extend([
-        '--set', 'sshGatewayService.enabled=true',
-        '--set-string', 'sshGatewayService.loadBalancerIP=' + platform_application_ssh_load_balancer_ip,
-        '--set-string', 'sshGatewayService.sharedIPKey=' + platform_application_ssh_shared_ip_key
-      ]) -%}
-      {%- endif -%}
-      {{ values }}
-
-- name: Verify every final Helm mutation target before Kubernetes reconciliation
-  ansible.builtin.include_tasks: chart-ownership.yml
 
 - name: Reconcile application namespace without deleting retained state
   kubernetes.core.k8s:

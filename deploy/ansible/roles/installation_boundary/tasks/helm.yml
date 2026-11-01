@@ -1,0 +1,99 @@
+---
+- name: List the exact infrastructure release before any cluster mutation
+  ansible.builtin.command:
+    argv:
+      - "{{ installation_boundary_helm }}"
+      - --kubeconfig
+      - "{{ installation_boundary_kubeconfig }}"
+      - list
+      - --all
+      - --namespace
+      - "{{ installation_boundary_release.namespace }}"
+      - --filter
+      - "^{{ installation_boundary_release.name | regex_escape }}$"
+      - --output
+      - json
+  register: installation_boundary_release_list
+  changed_when: false
+  check_mode: false
+
+- name: Read exact infrastructure release metadata
+  ansible.builtin.command:
+    argv:
+      - "{{ installation_boundary_helm }}"
+      - --kubeconfig
+      - "{{ installation_boundary_kubeconfig }}"
+      - get
+      - metadata
+      - "{{ installation_boundary_release.name }}"
+      - --namespace
+      - "{{ installation_boundary_release.namespace }}"
+      - --output
+      - json
+  register: installation_boundary_release_metadata
+  changed_when: false
+  check_mode: false
+  when: installation_boundary_release_list.stdout | from_json | length == 1
+
+- name: Read the stored infrastructure release installation identity
+  ansible.builtin.command:
+    argv:
+      - "{{ installation_boundary_helm }}"
+      - --kubeconfig
+      - "{{ installation_boundary_kubeconfig }}"
+      - get
+      - values
+      - "{{ installation_boundary_release.name }}"
+      - --namespace
+      - "{{ installation_boundary_release.namespace }}"
+      - --output
+      - json
+  register: installation_boundary_release_values
+  changed_when: false
+  check_mode: false
+  no_log: true
+  when: installation_boundary_release_list.stdout | from_json | length == 1
+
+- name: Refuse a foreign same-name infrastructure Helm release
+  ansible.builtin.assert:
+    that:
+      - installation_boundary_release_list.stdout | from_json | length <= 1
+      - >-
+        installation_boundary_release_list.stdout | from_json | length == 0 or
+        ((installation_boundary_release_metadata.stdout | from_json).name == installation_boundary_release.name and
+         (installation_boundary_release_metadata.stdout | from_json).namespace == installation_boundary_release.namespace and
+         (installation_boundary_release_values.stdout | from_json).labweaverInstallationId | default('') == labweaver_installation_id)
+    fail_msg: INFRASTRUCTURE_RELEASE_OWNERSHIP_CONFLICT
+  no_log: true
+
+- name: Render every exact infrastructure Helm target before mutation
+  ansible.builtin.command:
+    argv:
+      - "{{ installation_boundary_helm }}"
+      - --kubeconfig
+      - "{{ installation_boundary_kubeconfig }}"
+      - template
+      - "{{ installation_boundary_release.name }}"
+      - "{{ installation_boundary_release.chart_ref }}"
+      - --version
+      - "{{ installation_boundary_release.chart_version }}"
+      - --namespace
+      - "{{ installation_boundary_release.namespace }}"
+      - --include-crds
+      - --values
+      - '-'
+    stdin: >-
+      {{ installation_boundary_release['values'] | default({}) |
+         combine({'labweaverInstallationId': labweaver_installation_id}) | to_json }}
+  environment: "{{ labweaver_controller_proxy_env | default({}) }}"
+  register: installation_boundary_release_render
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Retain the exact rendered infrastructure Helm targets
+  ansible.builtin.set_fact:
+    installation_boundary_chart_objects: >-
+      {{ installation_boundary_chart_objects +
+         (installation_boundary_release_render.stdout | from_yaml_all | select('mapping') | list) }}
+  no_log: true

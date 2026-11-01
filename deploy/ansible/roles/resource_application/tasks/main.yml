@@ -56,6 +56,16 @@
   when: resource_application_kubeconfig is defined
 
 
+- name: Verify sibling release installation identities before probing namespace objects
+  ansible.builtin.include_role:
+    name: installation_boundary
+    tasks_from: releases
+  vars:
+    installation_boundary_helm: "{{ resource_application_helm }}"
+    installation_boundary_kubeconfig: "{{ resource_application_kubeconfig }}"
+    installation_boundary_release_namespace: "{{ resource_application_namespace }}"
+  when: resource_application_kubeconfig is defined
+
 - name: Refuse to adopt unowned Resource objects
   ansible.builtin.shell:
     cmd: >-
@@ -63,9 +73,9 @@
       {{ resource_application_kubectl }} --kubeconfig {{ resource_application_kubeconfig }}
       --namespace {{ resource_application_namespace }} get all,configmap,secret,serviceaccount,role,rolebinding,networkpolicy
       --output json |
-      jq -e '.items as $all |
+      jq -e '.items as $all | {{ installation_boundary_verified_release_names | to_json }} as $releases |
         def owned($object; $seen):
-          (($object.metadata.annotations["meta.helm.sh/release-name"] // "") == "{{ resource_application_release_name }}"
+          ((($object.metadata.annotations["meta.helm.sh/release-name"] // "") as $release | $releases | index($release)) != null
             and ($object.metadata.annotations["meta.helm.sh/release-namespace"] // "") == "{{ resource_application_namespace }}"
             and ($object.metadata.labels["app.kubernetes.io/managed-by"] // "") == "Helm")
           or (($object.metadata.annotations["labweaver.io/installation-id"] // "") == "{{ resource_application_installation_id }}"
@@ -75,8 +85,8 @@
             any($all[]; .metadata.uid == $uid and owned(.; $seen + [$uid])));
         [$all[] | select(.kind != "ServiceAccount" or .metadata.name != "default") |
           select(.kind != "ConfigMap" or .metadata.name != "kube-root-ca.crt") |
-          select(.kind != "Secret" or .type != "helm.sh/release.v1" or
-            .metadata.labels.owner != "helm" or .metadata.labels.name != "{{ resource_application_release_name }}") |
+          select(.kind != "Secret" or .type != "helm.sh/release.v1" or .metadata.labels.owner != "helm" or
+            ((.metadata.labels.name // "") as $release | $releases | index($release)) == null) |
           select(owned(.; []) | not)] | length == 0'
   args:
     executable: /bin/bash

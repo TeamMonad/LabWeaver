@@ -1,29 +1,48 @@
 ---
+- name: Add NFS CSI repository
+  kubernetes.core.helm_repository:
+    name: csi-driver-nfs
+    repo_url: https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/master/charts
+  environment: "{{ labweaver_controller_proxy_env | default({}) }}"
+
+- name: Bind the complete storage producer inventory
+  ansible.builtin.set_fact:
+    storage_controllers_boundary_objects: >-
+      {{ (lookup('template', 'local-path.yml.j2') | from_yaml_all | list) +
+         (lookup('template', 'nfs-rwx.yml.j2') | from_yaml_all | list) +
+         [{'apiVersion': 'storage.k8s.io/v1', 'kind': 'StorageClass', 'metadata': {'name': storageclass_local_path}}] }}
+
+- name: Verify every storage controller mutation target before changing the cluster
+  ansible.builtin.include_role:
+    name: installation_boundary
+  vars:
+    installation_boundary_shared_namespaces: [kube-system]
+    installation_boundary_sources:
+      - >-
+        {{ local_path_manifest_file | default('https://raw.githubusercontent.com/rancher/local-path-provisioner/'
+           ~ local_path_provisioner_version ~ '/deploy/local-path-storage.yaml') }}
+    installation_boundary_objects: "{{ storage_controllers_boundary_objects }}"
+    installation_boundary_helm_releases:
+      - name: csi-driver-nfs
+        namespace: kube-system
+        chart_ref: csi-driver-nfs/csi-driver-nfs
+        chart_version: "{{ nfs_csi_chart_version }}"
+
 - name: Install Local Path Provisioner
   kubernetes.core.k8s:
     state: present
-    src: >-
-      {{ local_path_manifest_file
-         | default('https://raw.githubusercontent.com/rancher/local-path-provisioner/'
-                   ~ local_path_provisioner_version
-                   ~ '/deploy/local-path-storage.yaml') }}
+    definition: "{{ installation_boundary_owned_source_objects }}"
 
 - name: Configure Local Path storage
   kubernetes.core.k8s:
     state: present
-    definition: "{{ lookup('template', 'local-path.yml.j2') | from_yaml_all | list }}"
+    definition: "{{ installation_boundary_owned_explicit_objects | selectattr('kind', 'equalto', 'ConfigMap') | list }}"
 
 - name: Make Local Path the explicit default StorageClass
   ansible.builtin.command: >-
     kubectl annotate storageclass {{ storageclass_local_path }}
     storageclass.kubernetes.io/is-default-class=true --overwrite
   changed_when: false
-
-- name: Add NFS CSI repository
-  kubernetes.core.helm_repository:
-    name: csi-driver-nfs
-    repo_url: https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/master/charts
-  environment: "{{ labweaver_controller_proxy_env | default({}) }}"
 
 - name: Install pinned NFS CSI
   kubernetes.core.helm:
@@ -32,9 +51,12 @@
     chart_version: "{{ nfs_csi_chart_version }}"
     release_namespace: kube-system
     create_namespace: false
-  environment: "{{ labweaver_controller_proxy_env | default({}) }}"
+    values:
+      labweaverInstallationId: "{{ labweaver_installation_id }}"
+    post_renderer: "{{ installation_boundary_helm_post_renderer }}"
+  environment: "{{ labweaver_controller_proxy_env | default({}) | combine({'LW_BUNDLE_INSTALLATION_ID': labweaver_installation_id}) }}"
 
 - name: Configure the NFS RWX StorageClass after its CSI driver exists
   kubernetes.core.k8s:
     state: present
-    definition: "{{ lookup('template', 'nfs-rwx.yml.j2') | from_yaml_all | list }}"
+    definition: "{{ installation_boundary_owned_explicit_objects | selectattr('metadata.name', 'equalto', storageclass_nfs_rwx) | list }}"
