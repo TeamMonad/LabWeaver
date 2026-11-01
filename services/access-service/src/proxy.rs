@@ -3414,7 +3414,7 @@ mod tests {
         use reqwest::cookie::{CookieStore, Jar};
         let grant = contracts::EndpointGrantId::new();
         let runtime = reqwest::Url::parse("https://g.runtime.example.test/")?;
-        let portal = reqwest::Url::parse("https://portal.example.test/")?;
+        let portal = reqwest::Url::parse(&format!("https://portal.example.test/connect/{grant}/"))?;
         for attributes in [
             "Domain=.example.test",
             "Domain = .example.test",
