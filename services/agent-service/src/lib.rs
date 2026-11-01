@@ -12,6 +12,10 @@ extern crate self as agent_service;
 #[path = "../tests/support/build_billing.rs"]
 pub(crate) mod build_billing;
 
+#[cfg(test)]
+#[path = "../tests/support/model_authorization.rs"]
+pub(crate) mod model_authorization;
+
 #[path = "../../service_runtime.rs"]
 pub mod service_runtime;
 

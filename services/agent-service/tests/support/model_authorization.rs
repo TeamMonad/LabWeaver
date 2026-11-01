@@ -69,8 +69,6 @@ pub struct ModelAuthorizationFixture {
     pub session: uuid::Uuid,
     pub attempt: u32,
     pub scope: ModelGatewayScope,
-    pub policy: ProjectLlmEgressPolicy,
-    pub prepared: agent_service::claude_code::ImmutableEgressInput,
     pub now: UtcTimestamp,
     pub lease: uuid::Uuid,
     pub control_base_uri: reqwest::Url,
@@ -84,6 +82,34 @@ impl Drop for ModelAuthorizationFixture {
     }
 }
 impl ModelAuthorizationFixture {
+    #[allow(
+        dead_code,
+        reason = "the sandbox assembly unit boundary consumes persisted input; gateway-only targets do not"
+    )]
+    pub async fn runtime_input(
+        &self,
+        pool: &PgPool,
+    ) -> Result<(
+        ProjectLlmEgressPolicy,
+        agent_service::claude_code::ImmutableEgressInput,
+    )> {
+        use sqlx::Row as _;
+        let row =
+            sqlx::query("SELECT package,policy FROM agent.agent_run_dispatches WHERE run_id=$1")
+                .bind(self.run_id.as_uuid())
+                .fetch_one(pool)
+                .await?;
+        let package: ProblemPackage = serde_json::from_value(row.try_get("package")?)?;
+        let policy: ProjectLlmEgressPolicy = serde_json::from_value(row.try_get("policy")?)?;
+        let selected: Vec<_> = package.files.iter().map(|file| file.path.clone()).collect();
+        let prepared = ProblemPackageEgressGate::new(
+            Arc::new(PackageBytes(package.files[0].object.clone())),
+            self.authorization.classifier.clone(),
+        )
+        .prepare(&package, &policy, &selected)
+        .await?;
+        Ok((policy, prepared))
+    }
     pub async fn start(pool: PgPool, billing: &BuildBillingFixture) -> Result<Self> {
         sqlx::query("CREATE ROLE lw_control_runtime NOLOGIN")
             .execute(&pool)
@@ -342,8 +368,6 @@ impl ModelAuthorizationFixture {
             session: session.session_id,
             attempt: track.attempt,
             scope,
-            policy,
-            prepared,
             now,
             lease,
             control_base_uri: base,

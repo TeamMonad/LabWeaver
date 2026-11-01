@@ -2247,10 +2247,7 @@ impl ClaudeCodeProcess for SandboxAuthoringProcess {
 }
 
 #[cfg(test)]
-use crate::build_billing;
-#[cfg(test)]
-#[path = "../tests/support/model_authorization.rs"]
-mod model_authorization;
+use crate::model_authorization;
 
 #[cfg(test)]
 mod tests {
@@ -2711,6 +2708,7 @@ mod tests {
         let authority =
             super::model_authorization::ModelAuthorizationFixture::start(pool.clone(), &billing)
                 .await?;
+        let (policy, prepared) = authority.runtime_input(&pool).await?;
         let task_run_id = match authority.scope {
             crate::model_gateway::ModelGatewayScope::Authoring { task_run_id, .. } => {
                 task_run_id.as_uuid()
@@ -2738,7 +2736,7 @@ mod tests {
             stderr_size_bytes: 0,
             stderr_sha256: empty.clone(),
             exit_code: 1,
-            claude_version: authority.policy.binding.claude_code_version.clone(),
+            claude_version: policy.binding.claude_code_version.clone(),
             export_size_bytes: 0,
             export_sha256: empty,
         };
@@ -2751,7 +2749,7 @@ mod tests {
         .await
         .map_err(|error| format!("{error:?}"))?;
         let runtime = ClaudeCodeRuntime::new(
-            authority.policy.clone(),
+            policy,
             Arc::new(TokioClaudeCodeProcess::new(BTreeMap::new())),
         )?;
         let store = PostgresAgentRunStore::new(pool.clone());
@@ -2808,7 +2806,7 @@ mod tests {
             let failure = runtime
                 .parse_result(
                     AgentTrackKind::Environment,
-                    &authority.prepared,
+                    &prepared,
                     &json!({"type":"object"}),
                     "controlled prompt",
                     Sha256Digest::of_bytes(b"tool-policy"),

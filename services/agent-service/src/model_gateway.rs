@@ -1055,8 +1055,7 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 use crate::build_billing;
 #[cfg(test)]
-#[path = "../tests/support/model_authorization.rs"]
-mod model_authorization;
+use crate::model_authorization;
 
 #[cfg(test)]
 mod tests {
