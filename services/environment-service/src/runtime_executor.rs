@@ -705,6 +705,7 @@ impl KubernetesContainerExecutor {
         project_id: contracts::ProjectId,
         namespace: &str,
         work: Option<&ContainerResourcePlan>,
+        virtual_machine: bool,
     ) -> Result<Option<EnvironmentCleanupTarget>, ProviderFailure> {
         let observed = if let Some(plan) = work {
             self.verify_container_namespace(plan).await?;
@@ -741,25 +742,12 @@ impl KubernetesContainerExecutor {
                 ("Secret", "registry-pull"),
                 ("PersistentVolumeClaim", "workspace"),
             ];
-            if work.is_none() {
+            if virtual_machine {
                 kinds = vec![
                     ("VirtualMachine", "runtime"),
                     ("PersistentVolumeClaim", "rootdisk"),
                     ("DataVolume", "rootdisk"),
                 ];
-                if self
-                    .get_json("Deployment", namespace, "runtime")
-                    .await?
-                    .is_some()
-                {
-                    kinds = vec![
-                        ("Deployment", "runtime"),
-                        ("Service", "runtime"),
-                        ("ServiceAccount", "runtime"),
-                        ("Secret", "registry-pull"),
-                        ("PersistentVolumeClaim", "workspace"),
-                    ];
-                }
             }
             for (kind, suffix) in kinds {
                 let name = placement.resource_name(suffix);
@@ -805,6 +793,7 @@ impl KubernetesContainerExecutor {
                     plan.project_id,
                     &plan.namespace,
                     plan.namespace_uid.map(|_| plan),
+                    false,
                 )
                 .await?
             {
@@ -855,7 +844,10 @@ impl KubernetesContainerExecutor {
         plan: &ContainerResourcePlan,
         target: &EnvironmentCleanupTarget,
     ) -> Result<(), ProviderFailure> {
-        if target.purge_disk {
+        if !target.retain_disk || target.purge_disk {
+            if !target.retain_disk {
+                self.retire_work_compute(fence, plan, target).await?;
+            }
             self.wait_for_work_pods_absent(fence, plan).await?;
             self.delete_owned_work_object(fence, plan, "PersistentVolumeClaim", "workspace", target)
                 .await
@@ -1885,7 +1877,13 @@ impl KubernetesContainerExecutor {
         }
         let Some(target) = target else {
             if let Some(target) = self
-                .capture_cleanup_target(plan.environment_id, plan.project_id, &plan.namespace, None)
+                .capture_cleanup_target(
+                    plan.environment_id,
+                    plan.project_id,
+                    &plan.namespace,
+                    None,
+                    true,
+                )
                 .await?
             {
                 return Ok(ProviderOutcome::CleanupTarget(target));
@@ -5076,6 +5074,7 @@ mod tests {
                 plan.project_id,
                 &plan.namespace,
                 Some(plan),
+                false,
             )
             .await
             .map_err(|error| format!("cleanup observation: {error:?}"))?

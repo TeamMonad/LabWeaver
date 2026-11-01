@@ -8,6 +8,7 @@ use tokio::sync::watch;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 mod legacy_protocol;
+mod retention;
 
 // In-process transport at the existing Kubernetes seam, forwarding every operation to the
 // production executor. The lifecycle, worker CAS and PostgreSQL store are not replaced.
@@ -101,7 +102,7 @@ impl Context {
                 "cleanup-checkpoint-delete",
                 &crate::LifecycleCommand {
                     environment_id: initial.id,
-                    kind: EnvironmentOperationKind::Delete,
+                    kind: EnvironmentOperationKind::Cancel,
                     expected_revision: initial.revision,
                     actor_id: initial.owner_id,
                     trace_id: "cleanup-checkpoint".to_owned(),
@@ -439,6 +440,7 @@ async fn lost_worker_lease_cannot_commit_checkpoint_or_send_delete() -> TestResu
             context.initial.project_id,
             &format!("lw-env-{}", context.initial.id),
             None,
+            false,
         )
         .await
         .map_err(|error| format!("{error:?}"))?

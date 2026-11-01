@@ -2538,6 +2538,8 @@ const fn operation_name(kind: EnvironmentOperationKind) -> &'static str {
         EnvironmentOperationKind::Delete => "delete",
         EnvironmentOperationKind::Cleanup => "cleanup",
         EnvironmentOperationKind::Freeze => "freeze",
+        EnvironmentOperationKind::Restore => "restore",
+        EnvironmentOperationKind::Purge => "purge",
     }
 }
 
