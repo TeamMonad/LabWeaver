@@ -200,6 +200,35 @@ bounded timeout, an observation TTL of at most 300 seconds and non-zero node/pod
 observer for a GPU provider binding, a GPU request fails closed with `GpuObservationStale` rather
 than being admitted against an unobserved capacity.
 
+`clusterCaFile` contains a PEM certificate bundle (decoded to DER for the Kubernetes client).
+The read-only observer performs bounded paginated lists and a watch with `sendInitialEvents` and
+`resourceVersionMatch=NotOlderThan`. The API server must support streaming initial events and
+the `k8s.io/initial-events-end` bookmark; list completion or watch HTTP headers alone do not
+authorize admission. A missing/failed synchronization barrier remains unavailable.
+
+Node and Pod apply/delete events update the shared snapshot without a per-request cluster list.
+The durable deadline is based on the older source observation of the two streams, not the time
+the worker reads the cache. Admission checks the same live observer epoch as the persisted row;
+disconnect, source expiry, changed-but-not-persisted snapshots, shutdown and process restart
+cannot reuse an earlier observation. Reconnects, including successful empty watch responses,
+have a cancellable 100 ms minimum backoff. Shutdown waits for both observation tasks to exit.
+
+Both new allocations and suspended Environment reactivation validate the same observation's
+deadline, process generation and live Node/Pod revision inside the admission transaction.
+Observations are stored uniquely by `(entry_id, observer_generation, observed_at)` and each
+replica selects only its own generation. Equal-millisecond writes from different replicas
+coexist; they cannot overwrite each other or invalidate a healthy peer merely by being newer.
+Capacity reservations are still counted across all replicas under the shared admission lock.
+A restarted replica must synchronize and persist its own observation before admitting or
+reactivating GPU capacity.
+
+If the initial-events bookmark never arrives, EOF, stream failure or the 10-second sync
+deadline emits `resource.gpu_capacity.watch_failed` with stable
+`LW_RESOURCE_GPU_OBSERVATION_STALE`, `reason="initial-events bookmark missing"`,
+`provider_binding`, and `stream` (`Node` or `Pod`). The reconciliation log also retains the
+specific stale reason. Check streaming-initial-events support and API/proxy watch handling;
+do not bypass the barrier or extend old observations to restore service.
+
 `deploy/versions.lock.yml` `platform_gpu_classes` is the reviewed starting catalog
 (`class`, `mode`, `provider_binding`, `capacity_units`, `allocation_binding`). The
 `resource_application` role renders it into `resource-service-config/capacity.json`
