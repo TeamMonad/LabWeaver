@@ -64,12 +64,19 @@ mod tests {
     #[test]
     fn initial_services_start_but_only_a_real_administrator_can_initialize_configuration() {
         let deployed = std::cell::Cell::new(false);
-        let result = execute(true, |_| panic!("initial installation cannot report verified"), || {
-            deployed.set(true);
-            Ok(())
-        });
+        let result = execute(
+            true,
+            |_| panic!("initial installation cannot report verified"),
+            || {
+                deployed.set(true);
+                Ok(())
+            },
+        );
         assert!(deployed.get());
-        assert_eq!(result.unwrap_err().diagnostic_code(), "LW_PLATFORM_CONFIGURATION_ADMIN_INITIALIZATION_REQUIRED");
+        assert_eq!(
+            result.unwrap_err().diagnostic_code(),
+            "LW_PLATFORM_CONFIGURATION_ADMIN_INITIALIZATION_REQUIRED"
+        );
     }
 
     #[test]

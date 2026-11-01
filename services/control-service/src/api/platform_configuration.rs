@@ -94,13 +94,23 @@ async fn read_intent(
     Path(id): Path<OperationId>,
 ) -> Result<Response, ApiError> {
     let value = configuration::get(&state.control.pool).await?;
-    let attempt = value.latest_apply.as_ref().ok_or(ConfigurationError::NotFound)?;
-    if attempt.id != id || attempt.executor_client_id.as_deref().is_some_and(|client| client != executor.0) {
+    let attempt = value
+        .latest_apply
+        .as_ref()
+        .ok_or(ConfigurationError::NotFound)?;
+    if attempt.id != id
+        || attempt
+            .executor_client_id
+            .as_deref()
+            .is_some_and(|client| client != executor.0)
+    {
         return Err(ConfigurationError::ApplyConflict.into());
     }
     let revision = value.revision;
     let mut response = response(value, revision, StatusCode::OK)?;
-    response.headers_mut().insert("Cache-Control", HeaderValue::from_static("no-store"));
+    response
+        .headers_mut()
+        .insert("Cache-Control", HeaderValue::from_static("no-store"));
     Ok(response)
 }
 

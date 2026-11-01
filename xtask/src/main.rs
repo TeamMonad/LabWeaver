@@ -568,11 +568,19 @@ fn write_contract_artifacts(root: &Path) -> Result<(), AppError> {
 fn deploy(args: &EnvironmentArgs) -> Result<(), AppError> {
     if args.stage == DeploymentStage::Configuration {
         if !args.yes {
-            return Err(AppError::ConfirmationRequired { command: "deploy --stage configuration" });
+            return Err(AppError::ConfirmationRequired {
+                command: "deploy --stage configuration",
+            });
         }
-        if args.mode.is_some() || args.package_manifest.is_some() || args.resource_package_manifest.is_some()
-            || args.target.is_some() || args.scope.is_some() {
-            return Err(AppError::InvalidArgument { role: "configuration stage consumes only the authenticated managed Bundle" });
+        if args.mode.is_some()
+            || args.package_manifest.is_some()
+            || args.resource_package_manifest.is_some()
+            || args.target.is_some()
+            || args.scope.is_some()
+        {
+            return Err(AppError::InvalidArgument {
+                role: "configuration stage consumes only the authenticated managed Bundle",
+            });
         }
         return verified_apply::execute(
             false,
@@ -709,7 +717,10 @@ fn deploy_mode(args: &EnvironmentArgs, mode: DeploymentMode) -> Result<(), AppEr
 }
 
 /// Bind the mode to the authenticated Bundle snapshot, not ambient inventory or manifests.
-fn bundle_mode_inputs(args: &EnvironmentArgs, mode: DeploymentMode) -> Result<(String, bool), AppError> {
+fn bundle_mode_inputs(
+    args: &EnvironmentArgs,
+    mode: DeploymentMode,
+) -> Result<(String, bool), AppError> {
     let invalid = || AppError::InvalidArgument {
         role: "authenticated deployment Bundle source",
     };
@@ -754,7 +765,10 @@ fn bundle_mode_inputs(args: &EnvironmentArgs, mode: DeploymentMode) -> Result<(S
             }
         }
     }
-    Ok((id.to_owned(), model["configurationMode"].as_str() == Some("initial_settings")))
+    Ok((
+        id.to_owned(),
+        model["configurationMode"].as_str() == Some("initial_settings"),
+    ))
 }
 
 fn deployment_mode_name(mode: DeploymentMode) -> &'static str {
