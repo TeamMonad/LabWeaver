@@ -109,6 +109,7 @@ enum FakeMode {
     ReviewRepairThenSuccess,
     ReviewRepairThenCancel,
     ProcessFailure,
+    ResourceAdmission,
     OutputLimitExceeded,
     Cancelled,
     TimedOut,
@@ -443,6 +444,11 @@ impl ClaudeCodeProcess for FakeProcess {
         }
         if matches!(self.mode, FakeMode::OutputLimitExceeded) {
             return Err(ClaudeCodeProcessError::OutputLimitExceeded);
+        }
+        if matches!(self.mode, FakeMode::ResourceAdmission) {
+            return Err(ClaudeCodeProcessError::ResourceAdmission(
+                "LW_RESOURCE_RATE_UNCONFIGURED",
+            ));
         }
         let classified_stderr = match self.mode {
             FakeMode::RateLimited => Some(b"status code: 429 private-provider-detail".as_slice()),
@@ -5793,4 +5799,65 @@ impl agent_service::claude_code::ModelInputAuthorization for CancellingAuthoriza
         }
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn public_run_diagnostics_preserve_resource_admission_and_sanitized_exit()
+-> Result<(), Box<dyn Error>> {
+    let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let database_url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        postgres.get_host_port_ipv4(5432).await?
+    );
+    let (admin_pool, pool, database_name) = isolated_agent_database(&database_url).await?;
+    let store = PostgresAgentRunStore::new(pool.clone());
+    for (mode, code) in [
+        (FakeMode::ResourceAdmission, "LW_RESOURCE_RATE_UNCONFIGURED"),
+        (FakeMode::ProcessFailure, "LW_PROVIDER_UNAVAILABLE"),
+    ] {
+        let (runtime, _, policy) = work_runtime(mode)?;
+        let service = AgentRunService::new(
+            store.clone(),
+            runtime,
+            "diagnostic-worker".to_owned(),
+            Duration::from_secs(10),
+        )?;
+        let (package, input) = work_package_input(&policy, b"diagnostic material".to_vec()).await?;
+        let now = UtcTimestamp::from_utc(OffsetDateTime::now_utc())?;
+        let dispatch = reserve_prepared_work_dispatch(
+            &store,
+            &policy,
+            &package,
+            input.sha256(),
+            EnvironmentId::new(),
+            Revision::new(1)?,
+            ActorId::new(),
+            &IdempotencyKey::parse(code)?,
+            now,
+        )
+        .await?;
+        let AgentRunDispatch::Progressed(run) = service
+            .execute_reserved_dispatch(dispatch, input, RunCancellation::new(), now)
+            .await?
+        else {
+            return Err("failure was not persisted".into());
+        };
+        let diagnostics = store.diagnostics(run.id).await?;
+        assert_eq!(diagnostics.items.len(), 1);
+        let detail = &diagnostics.items[0];
+        assert_eq!(detail.diagnostic_code, code);
+        if matches!(mode, FakeMode::ProcessFailure) {
+            assert!(
+                detail.reason.contains(
+                    "exit_status=1; gateway_request=unknown; stderr_category=unclassified"
+                )
+            );
+        }
+        let rendered = serde_json::to_string(&diagnostics)?;
+        assert!(!rendered.contains("secret-token-must-never-escape"));
+        assert!(!rendered.contains("diagnostic material"));
+    }
+    drop(store);
+    remove_isolated_database(admin_pool, pool, &database_name).await?;
+    Ok(())
 }

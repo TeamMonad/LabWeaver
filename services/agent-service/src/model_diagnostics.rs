@@ -38,7 +38,7 @@ pub(crate) async fn record_failure(
             .diagnostic_code
             .clone()
             .ok_or(AgentRunStoreError::InvalidContract)?,
-        reason: guidance.0.to_owned(),
+        reason: failure_reason(audit, guidance.0),
         next_step: guidance.1.to_owned(),
         model: audit.model.clone(),
         runtime_binding: audit.runtime_binding.clone(),
@@ -53,6 +53,13 @@ pub(crate) async fn record_failure(
         expires_at,
     };
     insert_detail(transaction, run_id, &detail).await
+}
+
+fn failure_reason(audit: &ClaudeCodeAudit, guidance: &str) -> String {
+    audit.process_diagnostic.as_ref().map_or_else(
+        || guidance.to_owned(),
+        |process| format!("{guidance} [{}]", process.safe_summary()),
+    )
 }
 
 // Metadata projection remains readable when a legacy dispatch is denied for missing context.

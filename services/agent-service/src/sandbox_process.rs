@@ -667,7 +667,7 @@ impl SandboxAuthoringProcess {
                         .map_err(|_| ClaudeCodeProcessError::Io)?;
                     let frozen: FrozenSandboxReceipt = serde_json::from_value(canonical)
                         .map_err(|_| ClaudeCodeProcessError::Io)?;
-                    let output = frozen.assemble(self.objects.as_ref(), false).await?;
+                    let output = self.assemble_output(&frozen, false).await?;
                     self.store
                         .complete_sandbox_attempt(
                             &intent,
@@ -1014,10 +1014,7 @@ impl SandboxAuthoringProcess {
                         return Err(ClaudeCodeProcessError::Io);
                     }
                 }
-                return frozen
-                    .assemble(self.objects.as_ref(), true)
-                    .await
-                    .map_err(Into::into);
+                return self.assemble_output(&frozen, true).await;
             }
             let status = self
                 .resources
@@ -1092,10 +1089,7 @@ impl SandboxAuthoringProcess {
                         .map_err(|_| ClaudeCodeProcessError::Io)?;
                     let canonical: FrozenSandboxReceipt =
                         serde_json::from_value(value).map_err(|_| ClaudeCodeProcessError::Io)?;
-                    return canonical
-                        .assemble(self.objects.as_ref(), false)
-                        .await
-                        .map_err(Into::into);
+                    return self.assemble_output(&canonical, false).await;
                 }
                 KubernetesJobObservation::Running
                     if !cancellation.is_cancelled() && tokio::time::Instant::now() < deadline =>
@@ -1313,6 +1307,36 @@ impl SandboxAuthoringProcess {
         objects: &[ExecutionObjectRef],
     ) -> ExecutionCleanupStatus {
         cleanup_recovery_with_poll(&self.api, identity, objects).await
+    }
+
+    async fn assemble_output(
+        &self,
+        frozen: &FrozenSandboxReceipt,
+        verify_export: bool,
+    ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
+        let output = frozen
+            .assemble(self.objects.as_ref(), verify_export)
+            .await?;
+        let observation = sqlx::query_scalar::<_, Option<serde_json::Value>>("SELECT result FROM agent.idempotency_ledger WHERE operation='model_gateway_request' AND idempotency_key=$1")
+            .bind(frozen.task_run_id.to_string()).fetch_optional(self.store.pool()).await;
+        let (observed, admission) = match observation {
+            Ok(row) => {
+                let admission = row
+                    .as_ref()
+                    .and_then(Option::as_ref)
+                    .and_then(|value| value.get("admissionDiagnostic"))
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(task_execution::resource::resource_admission_diagnostic);
+                (Some(row.is_some()), admission)
+            }
+            Err(_) => {
+                tracing::warn!(event = "agent.authoring.sandbox.gateway_observation_unavailable", task_run_id = %frozen.task_run_id, outcome = "unknown");
+                (None, None)
+            }
+        };
+        Ok(output
+            .with_gateway_request_observed(observed)
+            .with_resource_admission(admission))
     }
 }
 
@@ -1986,13 +2010,19 @@ fn bridge_cancellation(cancellation: &RunCancellation) -> (CancellationToken, Ca
 fn map_task_resource(error: &TaskResourceError) -> ClaudeCodeProcessError {
     match error {
         TaskResourceError::Cancelled => ClaudeCodeProcessError::Cancelled,
-        TaskResourceError::ResourceLeaseExpired => ClaudeCodeProcessError::ResourceLeaseExpired,
+        TaskResourceError::ResourceLeaseExpired
+        | TaskResourceError::Client(task_execution::resource::ResourceClientError::LeaseExpired) => {
+            ClaudeCodeProcessError::ResourceLeaseExpired
+        }
         TaskResourceError::ResourceApprovalExpired => {
             ClaudeCodeProcessError::ResourceApprovalExpired
         }
         TaskResourceError::ResourceApprovalTimeout => {
             ClaudeCodeProcessError::ResourceApprovalTimeout
         }
+        TaskResourceError::Client(task_execution::resource::ResourceClientError::Admission(
+            code,
+        )) => ClaudeCodeProcessError::ResourceAdmission(code),
         _ => ClaudeCodeProcessError::Io,
     }
 }
@@ -2022,7 +2052,10 @@ fn sandbox_failure(diagnostic: &str) -> ClaudeCodeProcessError {
         "LW_RESOURCE_TASK_LEASE_EXPIRED" => ClaudeCodeProcessError::ResourceLeaseExpired,
         "LW_RESOURCE_APPROVAL_EXPIRED" => ClaudeCodeProcessError::ResourceApprovalExpired,
         "LW_TASK_RESOURCE_APPROVAL_TIMEOUT" => ClaudeCodeProcessError::ResourceApprovalTimeout,
-        _ => ClaudeCodeProcessError::Io,
+        _ => task_execution::resource::resource_admission_diagnostic(diagnostic).map_or(
+            ClaudeCodeProcessError::Io,
+            ClaudeCodeProcessError::ResourceAdmission,
+        ),
     }
 }
 
@@ -2215,9 +2248,35 @@ mod tests {
     use crate::claude_code::AuthoringAttemptScope;
     use contracts::authoring::AgentTrackKind;
     use contracts::{ActorId, AgentRunId, CourseId, ProjectId};
-
     #[test]
-    fn resource_approval_timeout_keeps_its_resource_diagnostic() {
+    fn resource_admission_diagnostic_is_not_collapsed_to_provider_failure() {
+        let error =
+            TaskResourceError::Client(task_execution::resource::ResourceClientError::Admission(
+                "LW_RESOURCE_RATE_UNCONFIGURED",
+            ));
+        assert_eq!(
+            map_task_resource(&error),
+            ClaudeCodeProcessError::ResourceAdmission("LW_RESOURCE_RATE_UNCONFIGURED")
+        );
+        assert_eq!(
+            crate::claude_code::ClaudeCodeRuntimeError::ResourceAdmission(
+                "LW_RESOURCE_RATE_UNCONFIGURED"
+            )
+            .diagnostic_code(),
+            "LW_RESOURCE_RATE_UNCONFIGURED"
+        );
+        assert_eq!(
+            map_task_resource(&TaskResourceError::ResourceTerminal),
+            ClaudeCodeProcessError::Io
+        );
+        assert_eq!(
+            sandbox_failure("LW_RESOURCE_RATE_UNCONFIGURED"),
+            ClaudeCodeProcessError::ResourceAdmission("LW_RESOURCE_RATE_UNCONFIGURED")
+        );
+        assert_eq!(
+            sandbox_failure("LW_RESOURCE_TASK_LEASE_EXPIRED"),
+            ClaudeCodeProcessError::ResourceLeaseExpired
+        );
         assert_eq!(
             map_task_resource(&TaskResourceError::ResourceApprovalTimeout),
             ClaudeCodeProcessError::ResourceApprovalTimeout
@@ -2227,15 +2286,14 @@ mod tests {
             ClaudeCodeProcessError::ResourceApprovalTimeout
         );
         assert_eq!(
-            map_task_resource(&TaskResourceError::Cancelled),
-            ClaudeCodeProcessError::Cancelled
+            sandbox_failure("LW_RESOURCE_APPROVAL_EXPIRED"),
+            ClaudeCodeProcessError::ResourceApprovalExpired
         );
         assert_eq!(
-            map_task_resource(&TaskResourceError::ResourceTerminal),
+            sandbox_failure("LW_UNKNOWN_SECRET"),
             ClaudeCodeProcessError::Io
         );
     }
-
     #[tokio::test]
     async fn sandbox_process_receives_only_scoped_gateway_credentials()
     -> Result<(), Box<dyn std::error::Error>> {

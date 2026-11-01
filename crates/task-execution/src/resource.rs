@@ -563,31 +563,61 @@ impl ResourceClient {
                 NotFound::TaskResource => ResourceClientError::TaskResourceMissing,
             });
         }
-        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-            return Err(ResourceClientError::Denied);
+        if status.is_success() {
+            return read_bounded_body(response, self.max_response_bytes).await;
         }
-        if status == StatusCode::CONFLICT || status == StatusCode::PRECONDITION_FAILED {
-            let body = read_bounded_body(response, self.max_response_bytes).await?;
-            if serde_json::from_slice::<contracts::ProblemDetails>(&body)
-                .ok()
-                .is_some_and(|problem| {
-                    problem.diagnostic_code.as_str() == "LW_RESOURCE_TASK_LEASE_EXPIRED"
-                })
-            {
-                return Err(ResourceClientError::LeaseExpired);
-            }
-            return Err(ResourceClientError::Conflict);
+        let body = read_bounded_body(response, self.max_response_bytes).await?;
+        Err(resource_response_error(status, &body))
+    }
+}
+
+fn resource_response_error(status: StatusCode, body: &[u8]) -> ResourceClientError {
+    // Never propagate server detail, URLs or arbitrary diagnostic strings into the Agent run.
+    if status.is_client_error()
+        && let Ok(problem) = serde_json::from_slice::<contracts::ProblemDetails>(body)
+    {
+        let code = problem.diagnostic_code.as_str();
+        if code == "LW_RESOURCE_TASK_LEASE_EXPIRED" {
+            return ResourceClientError::LeaseExpired;
         }
-        if status == StatusCode::PAYLOAD_TOO_LARGE {
-            return Err(ResourceClientError::RequestTooLarge);
+        if let Some(code) = resource_admission_diagnostic(code) {
+            return ResourceClientError::Admission(code);
         }
-        if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
-            return Err(ResourceClientError::Unavailable);
-        }
-        if !status.is_success() {
-            return Err(ResourceClientError::Rejected);
-        }
-        read_bounded_body(response, self.max_response_bytes).await
+    }
+    match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => ResourceClientError::Denied,
+        StatusCode::CONFLICT | StatusCode::PRECONDITION_FAILED => ResourceClientError::Conflict,
+        StatusCode::PAYLOAD_TOO_LARGE => ResourceClientError::RequestTooLarge,
+        StatusCode::TOO_MANY_REQUESTS => ResourceClientError::Unavailable,
+        status if status.is_server_error() => ResourceClientError::Unavailable,
+        _ => ResourceClientError::Rejected,
+    }
+}
+/// Returns only stable admission diagnostics known to the Resource API; response bodies are never
+/// propagated beyond this allowlist.
+#[must_use]
+pub fn resource_admission_diagnostic(code: &str) -> Option<&'static str> {
+    match code {
+        "LW_RESOURCE_RATE_UNCONFIGURED" => Some("LW_RESOURCE_RATE_UNCONFIGURED"),
+        "LW_RESOURCE_RATE_CURRENCY_CONFLICT" => Some("LW_RESOURCE_RATE_CURRENCY_CONFLICT"),
+        "LW_RESOURCE_RATE_SETTLED_CONFLICT" => Some("LW_RESOURCE_RATE_SETTLED_CONFLICT"),
+        "LW_RESOURCE_REQUEST_INVALID" => Some("LW_RESOURCE_REQUEST_INVALID"),
+        "LW_RESOURCE_SCOPE_CONFLICT" => Some("LW_RESOURCE_SCOPE_CONFLICT"),
+        "LW_RESOURCE_ESTIMATE_CHANGED" => Some("LW_RESOURCE_ESTIMATE_CHANGED"),
+        "LW_CREDITS_INSUFFICIENT" => Some("LW_CREDITS_INSUFFICIENT"),
+        "LW_CREDITS_SCOPE_DENIED" => Some("LW_CREDITS_SCOPE_DENIED"),
+        "LW_AUTH_SCOPE_DENIED" => Some("LW_AUTH_SCOPE_DENIED"),
+        "LW_CREDITS_CONFLICT" => Some("LW_CREDITS_CONFLICT"),
+        "LW_IDEMPOTENCY_CONFLICT" => Some("LW_IDEMPOTENCY_CONFLICT"),
+        "LW_RESOURCE_REQUEST_STATE_CONFLICT" => Some("LW_RESOURCE_REQUEST_STATE_CONFLICT"),
+        "LW_RESOURCE_APPROVAL_EXPIRED" => Some("LW_RESOURCE_APPROVAL_EXPIRED"),
+        "LW_RESOURCE_CAPACITY_EXHAUSTED" => Some("LW_RESOURCE_CAPACITY_EXHAUSTED"),
+        "LW_RESOURCE_GPU_CAPACITY_EXHAUSTED" => Some("LW_RESOURCE_GPU_CAPACITY_EXHAUSTED"),
+        "LW_RESOURCE_GPU_CATALOG_UNCONFIGURED" => Some("LW_RESOURCE_GPU_CATALOG_UNCONFIGURED"),
+        "LW_RESOURCE_GPU_CATALOG_AMBIGUOUS" => Some("LW_RESOURCE_GPU_CATALOG_AMBIGUOUS"),
+        "LW_RESOURCE_POLICY_INVALID" => Some("LW_RESOURCE_POLICY_INVALID"),
+        "LW_RESOURCE_GATEWAY_DENIED" => Some("LW_RESOURCE_GATEWAY_DENIED"),
+        _ => None,
     }
 }
 
@@ -1247,6 +1277,8 @@ pub enum ResourceClientError {
     RequestMissing,
     #[error("LW_TASK_RESOURCE_HTTP_TASK_MISSING")]
     TaskResourceMissing,
+    #[error("{0}")]
+    Admission(&'static str),
     #[error("LW_TASK_RESOURCE_HTTP_DENIED")]
     Denied,
     #[error("LW_TASK_RESOURCE_HTTP_CONFLICT")]
@@ -1257,4 +1289,58 @@ pub enum ResourceClientError {
     Rejected,
     #[error("LW_TASK_RESOURCE_HTTP_UNAVAILABLE")]
     Unavailable,
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::{ResourceClientError, resource_response_error};
+    use reqwest::StatusCode;
+
+    #[test]
+    fn resource_admission_problem_preserves_only_allowlisted_codes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (status, code) in [
+            (StatusCode::CONFLICT, "LW_RESOURCE_RATE_UNCONFIGURED"),
+            (StatusCode::CONFLICT, "LW_RESOURCE_RATE_CURRENCY_CONFLICT"),
+            (StatusCode::CONFLICT, "LW_RESOURCE_RATE_SETTLED_CONFLICT"),
+            (StatusCode::CONFLICT, "LW_RESOURCE_SCOPE_CONFLICT"),
+            (StatusCode::CONFLICT, "LW_RESOURCE_ESTIMATE_CHANGED"),
+            (StatusCode::CONFLICT, "LW_RESOURCE_REQUEST_STATE_CONFLICT"),
+            (StatusCode::CONFLICT, "LW_RESOURCE_APPROVAL_EXPIRED"),
+            (StatusCode::CONFLICT, "LW_RESOURCE_CAPACITY_EXHAUSTED"),
+            (StatusCode::CONFLICT, "LW_RESOURCE_GPU_CAPACITY_EXHAUSTED"),
+            (StatusCode::CONFLICT, "LW_RESOURCE_GPU_CATALOG_UNCONFIGURED"),
+            (StatusCode::CONFLICT, "LW_RESOURCE_GPU_CATALOG_AMBIGUOUS"),
+            (StatusCode::CONFLICT, "LW_RESOURCE_POLICY_INVALID"),
+            (StatusCode::BAD_REQUEST, "LW_RESOURCE_REQUEST_INVALID"),
+            (StatusCode::CONFLICT, "LW_CREDITS_INSUFFICIENT"),
+            (StatusCode::FORBIDDEN, "LW_CREDITS_SCOPE_DENIED"),
+            (StatusCode::FORBIDDEN, "LW_AUTH_SCOPE_DENIED"),
+            (StatusCode::FORBIDDEN, "LW_RESOURCE_GATEWAY_DENIED"),
+            (StatusCode::CONFLICT, "LW_CREDITS_CONFLICT"),
+            (StatusCode::CONFLICT, "LW_IDEMPOTENCY_CONFLICT"),
+        ] {
+            let body = serde_json::to_vec(&contracts::ProblemDetails {
+                problem_type: "urn:labweaver:problem:test".to_owned(),
+                title: "blocked".to_owned(),
+                status: status.as_u16(),
+                detail: "secret-provider-url-and-key".to_owned(),
+                instance: "urn:labweaver:request:test".to_owned(),
+                diagnostic_code: contracts::DiagnosticCode::parse(code)?,
+                request_id: "test".to_owned(),
+                trace_id: None,
+                retryable: false,
+                violations: Vec::new(),
+            })?;
+            let error = resource_response_error(status, &body);
+            assert!(matches!(error, ResourceClientError::Admission(actual) if actual == code));
+            assert_eq!(error.to_string(), code);
+            assert!(!format!("{error:?}").contains("secret-provider"));
+        }
+        assert!(matches!(
+            resource_response_error(StatusCode::CONFLICT, b"not-json secret"),
+            ResourceClientError::Conflict
+        ));
+        Ok(())
+    }
 }

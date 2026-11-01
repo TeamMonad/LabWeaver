@@ -2,6 +2,8 @@
 #![allow(clippy::too_many_lines, clippy::expect_used)]
 #[path = "support/build_billing.rs"]
 mod build_billing;
+#[path = "support/gateway_logging.rs"]
+mod gateway_logging;
 #[path = "support/model_authorization.rs"]
 mod model_authorization;
 use agent_service::model_gateway::{GatewayState, ModelGatewayRuntime, ScopedTokenIssuer};
@@ -39,6 +41,10 @@ enum Mode {
     Disconnect,
     Missing,
     UnknownInterrupt,
+    Rejected,
+    Connect,
+    Tls,
+    Timeout,
 }
 #[derive(Clone)]
 struct Upstream {
@@ -59,6 +65,11 @@ async fn upstream(
     state.calls.fetch_add(1, Ordering::SeqCst);
     let usage = json!({"input_tokens":2,"output_tokens":3,"cache_read_input_tokens":5,"cache_creation_input_tokens":7});
     match state.mode {
+        Mode::Timeout => {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            StatusCode::OK.into_response()
+        }
+        Mode::Rejected => (StatusCode::FORBIDDEN, "private-provider-rejection").into_response(),
         Mode::Json => (
             StatusCode::OK,
             axum::Json(
@@ -184,16 +195,22 @@ impl Fixture {
             issuer: ScopedTokenIssuer::new(vec![11; 32], Duration::from_hours(24))
                 .ok_or("signer")?,
         };
+        let mut http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+        if matches!(mode, Mode::Timeout) {
+            http = http.timeout(Duration::from_millis(100));
+        }
         let state = GatewayState {
             background: agent_service::service_runtime::BackgroundTasks::default(),
-            upstream: upstream_url.parse()?,
+            upstream: if matches!(mode, Mode::Tls) {
+                upstream_url.replacen("http:", "https:", 1).parse()?
+            } else {
+                upstream_url.parse()?
+            },
             upstream_key: "upstream-private-key".into(),
             issuer: runtime.issuer.clone(),
             pool: pool.clone(),
             resource: billing.client.clone(),
-            http: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()?,
+            http: http.build()?,
             authorization: authority.authorization.clone(),
         };
         let gateway = tokio::spawn(async move {
@@ -679,5 +696,99 @@ async fn gateway_process_waits_for_disconnected_http_settlement()
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_observability_covers_admission_transport_and_http_without_secrets()
+-> Result<(), Box<dyn std::error::Error>> {
+    let logs = gateway_logging::GatewayLogs::default();
+    tracing::subscriber::set_global_default(logs.clone())?;
+    for mode in [
+        Mode::Json,
+        Mode::Rejected,
+        Mode::Connect,
+        Mode::Tls,
+        Mode::Timeout,
+    ] {
+        let mut f = Fixture::new(mode, true).await?;
+        if matches!(mode, Mode::Connect) {
+            f.upstream.abort();
+            let _ = (&mut f.upstream).await;
+        }
+        let response = f.request("observability-call").send().await?;
+        let expected = match mode {
+            Mode::Json => StatusCode::OK,
+            Mode::Rejected => StatusCode::FORBIDDEN,
+            _ => StatusCode::BAD_GATEWAY,
+        };
+        assert_eq!(response.status(), expected);
+        let _ = response.bytes().await?;
+        let events: Vec<_> = logs
+            .events()
+            .into_iter()
+            .filter(|event| {
+                event
+                    .get("run_id")
+                    .is_some_and(|id| id == &f.run_id.to_string())
+            })
+            .collect();
+        assert!(events.iter().any(|event| {
+            event
+                .get("outcome")
+                .is_some_and(|outcome| outcome == "accepted")
+        }));
+        let outcome = if matches!(mode, Mode::Json | Mode::Rejected) {
+            "upstream-http-status"
+        } else {
+            "upstream-connect-tls-or-timeout-error"
+        };
+        let event = events
+            .iter()
+            .find(|event| event.get("outcome").is_some_and(|value| value == outcome))
+            .ok_or("missing gateway outcome log")?;
+        if matches!(mode, Mode::Json | Mode::Rejected) {
+            assert_eq!(
+                event.get("http_status"),
+                Some(&expected.as_u16().to_string())
+            );
+        } else {
+            let kind = if matches!(mode, Mode::Timeout) {
+                "timeout"
+            } else {
+                "connect-or-tls"
+            };
+            assert_eq!(event.get("error_kind").map(String::as_str), Some(kind));
+        }
+        let recorded: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent.idempotency_ledger WHERE operation='model_gateway_request' AND idempotency_key=$1)")
+            .bind(match &f.authority.scope { agent_service::model_gateway::ModelGatewayScope::Authoring { task_run_id, .. } => task_run_id.to_string(), _ => return Err("authoring scope required".into()) }).fetch_one(&f.pool).await?;
+        assert!(
+            recorded,
+            "a request receipt survives upstream rejection and transport failure"
+        );
+    }
+    let denied = Fixture::new(Mode::Json, false).await?;
+    let response = denied.request("observability-denied").send().await?;
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    assert_eq!(denied.calls.load(Ordering::SeqCst), 0);
+    let events = logs.events();
+    assert!(events.iter().any(|event| {
+        event
+            .get("outcome")
+            .is_some_and(|value| value == "admission-denied")
+    }));
+    let rendered = format!("{events:?}");
+    for secret in [
+        "upstream-private-key",
+        "private-provider-rejection",
+        "Hello",
+        "ANTHROPIC_API_KEY",
+        &denied.capability,
+    ] {
+        assert!(
+            !rendered.contains(secret),
+            "gateway logs must not contain secret or raw content"
+        );
+    }
     Ok(())
 }

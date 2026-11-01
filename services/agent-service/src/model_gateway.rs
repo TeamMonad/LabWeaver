@@ -1,4 +1,16 @@
 //! Agent-owned Anthropic transport: scoped capability, durable call fence, Resource accounting.
+//!
+//! Operational events use the shared telemetry `outcome` field: `accepted`, `admission-denied`,
+//! `upstream-connect-tls-or-timeout-error` (with `error_kind=timeout|connect-or-tls|transport`),
+//! and `upstream-http-status` (with the numeric status). Validated requests and upstream events
+//! carry the Agent run and attempt identifiers; upstream events also carry the fenced call id.
+//! No URL, credential, request body, response body or raw transport error is logged.
+//!
+//! `model_gateway_request` ledger receipts mean only that an authoring capability reached the
+//! Messages handler. They do not imply admission, upstream delivery, token usage or settlement.
+//! Sandbox failure diagnostics combine this exact task-generation receipt with a process exit
+//! status and an allowlisted stderr category. Missing observations due to a read failure remain
+//! `unknown`, not `not-observed`. Runs predating these receipts cannot establish non-delivery.
 use axum::{
     Router,
     body::{Body, Bytes},
@@ -451,6 +463,12 @@ pub async fn serve(state: GatewayState, listener: TcpListener) -> Result<(), std
     Ok(())
 }
 fn error_response(status: StatusCode, code: &'static str, message: &str) -> Response {
+    tracing::warn!(
+        event = "agent.model_gateway.request_completed",
+        outcome = "admission-denied",
+        diagnostic_code = code,
+        http_status = status.as_u16()
+    );
     (status,axum::Json(json!({"type":"error","error":{"type":"invalid_request_error","message":message},"lwCode":code}))).into_response()
 }
 fn identity(parts: &[&[u8]]) -> Uuid {
@@ -498,6 +516,17 @@ async fn messages(
             return error_response(StatusCode::UNAUTHORIZED, code, "gateway token rejected");
         }
     };
+    tracing::info!(event = "agent.model_gateway.request_received", outcome = "received", run_id = %claims.agent_run_id, attempt = claims.attempt);
+    if let ModelGatewayScope::Authoring { task_run_id, .. } = &claims.scope {
+        // This receipt means only "a validated capability reached Messages", not admission,
+        // upstream delivery or billable usage. The task id distinguishes schema generations.
+        if sqlx::query("INSERT INTO agent.idempotency_ledger(operation,idempotency_key,request_sha256,state) VALUES('model_gateway_request',$1,$2,'in_progress') ON CONFLICT DO NOTHING")
+            .bind(task_run_id.to_string()).bind(format!("{:x}", Sha256::digest(&body)))
+            .execute(&state.pool).await.is_err()
+        {
+            return error_response(StatusCode::SERVICE_UNAVAILABLE, "LW_MODEL_CALL_ID_UNAVAILABLE", "gateway request observation unavailable; no upstream request sent");
+        }
+    }
     let expected_model = match state.authorize(&claims).await {
         Ok(model) => model,
         Err(code) => {
@@ -603,10 +632,21 @@ async fn messages(
         .await
     {
         Ok(value) => value,
-        Err(_) => {
+        Err(error) => {
+            let code = match error {
+                task_execution::resource::ResourceClientError::Admission(code) => code,
+                _ => "LW_MODEL_ADMISSION_REJECTED",
+            };
+            if let ModelGatewayScope::Authoring { task_run_id, .. } = &claims.scope {
+                let recorded = sqlx::query("UPDATE agent.idempotency_ledger SET result=jsonb_build_object('admissionDiagnostic',$2::text) WHERE operation='model_gateway_request' AND idempotency_key=$1")
+                    .bind(task_run_id.to_string()).bind(code).execute(&state.pool).await;
+                if recorded.is_err() {
+                    tracing::warn!(event = "agent.model_gateway.admission_observation_unavailable", outcome = "unknown", run_id = %claims.agent_run_id, diagnostic_code = code);
+                }
+            }
             return error_response(
                 StatusCode::PAYMENT_REQUIRED,
-                "LW_MODEL_ADMISSION_REJECTED",
+                code,
                 "model Credits admission rejected; no upstream request sent",
             );
         }
@@ -623,6 +663,13 @@ async fn messages(
             );
         }
     }
+    tracing::info!(
+        event = "agent.model_gateway.request_accepted",
+        outcome = "accepted",
+        run_id = %claims.agent_run_id,
+        attempt = claims.attempt,
+        operation_id = %call_id
+    );
     let (sender, receiver) = tokio::sync::oneshot::channel();
     // The task owns the irreversible request and settlement, independently of the HTTP handler.
     let background = state.background.clone();
@@ -683,14 +730,29 @@ async fn forward(
             request = request.header(name, value);
         }
     }
-    let Ok(upstream) = request.send().await else {
-        return error_response(
-            StatusCode::BAD_GATEWAY,
-            "LW_MODEL_UPSTREAM_FAILED",
-            "model upstream failed; hold pending reconciliation",
-        );
+    let upstream = match request.send().await {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            tracing::warn!(
+                event = "agent.model_gateway.request_completed",
+                outcome = "upstream-connect-tls-or-timeout-error",
+                error_kind = upstream_transport_class(&error),
+                run_id = %claims.agent_run_id,
+                attempt = claims.attempt,
+                operation_id = %call_id
+            );
+            return (StatusCode::BAD_GATEWAY, axum::Json(json!({"type":"error","error":{"type":"invalid_request_error","message":"model upstream failed; hold pending reconciliation"},"lwCode":"LW_MODEL_UPSTREAM_FAILED"}))).into_response();
+        }
     };
     let status = upstream.status();
+    tracing::info!(
+        event = "agent.model_gateway.request_completed",
+        outcome = "upstream-http-status",
+        http_status = status.as_u16(),
+        run_id = %claims.agent_run_id,
+        attempt = claims.attempt,
+        operation_id = %call_id,
+    );
     let content_type = upstream
         .headers()
         .get(header::CONTENT_TYPE)
@@ -737,6 +799,17 @@ async fn forward(
         Body::from_stream(stream),
     )
         .into_response()
+}
+
+fn upstream_transport_class(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        // reqwest intentionally does not expose a stable TLS-specific error discriminator.
+        "connect-or-tls"
+    } else {
+        "transport"
+    }
 }
 async fn settle(
     state: &GatewayState,
