@@ -19,6 +19,9 @@ except (ImportError, ModuleNotFoundError):
     Templar = None
 
 
+from test_deployment_install_modes import INSTALLATION
+
+
 ROOT = Path(__file__).resolve().parents[2]
 ROLE_DIR = ROOT / "deploy/ansible/roles/fastapi_dls"
 
@@ -72,6 +75,7 @@ class FastapiDlsDeploymentTests(unittest.TestCase):
         deployment_task = task_named(self.tasks, "Reconcile the FastAPI-DLS Deployment")
         deployment = render_definition(
             deployment_task["kubernetes.core.k8s"]["definition"],
+            labweaver_installation_id=INSTALLATION,
             fastapi_dls_service_name="fastapi-dls",
             fastapi_dls_namespace="labweaver-gpu-license",
             fastapi_dls_image=self.defaults["fastapi_dls_image"],
@@ -88,6 +92,8 @@ class FastapiDlsDeploymentTests(unittest.TestCase):
             fastapi_dls_tls_secret_name="fastapi-dls-tls",
             fastapi_dls_tls_public_checksum="public-tls-checksum",
         )
+        self.assertEqual(deployment['metadata']['annotations']['labweaver.io/installation-id'], INSTALLATION)
+        self.assertEqual(deployment['spec']['template']['metadata']['annotations']['labweaver.io/installation-id'], INSTALLATION)
         containers = deployment["spec"]["template"]["spec"]["containers"]
         self.assertFalse(deployment["spec"]["template"]["spec"]["automountServiceAccountToken"])
         self.assertEqual(
@@ -154,10 +160,12 @@ class FastapiDlsDeploymentTests(unittest.TestCase):
         service_task = task_named(self.tasks, "Reconcile the cluster-internal FastAPI-DLS Service")
         service = render_definition(
             service_task["kubernetes.core.k8s"]["definition"],
+            labweaver_installation_id=INSTALLATION,
             fastapi_dls_service_name="fastapi-dls",
             fastapi_dls_namespace="labweaver-gpu-license",
             fastapi_dls_service_port=443,
         )
+        self.assertEqual(service['metadata']['annotations']['labweaver.io/installation-id'], INSTALLATION)
         proxy = render_file(ROOT / "deploy/ansible/roles/fastapi_dls/templates/nginx.conf.j2")
         policy = yaml.safe_load(
             render_file(
@@ -238,6 +246,7 @@ class FastapiDlsDeploymentTests(unittest.TestCase):
         )
         config = render_definition(
             config_task["kubernetes.core.k8s"]["definition"],
+            labweaver_installation_id=INSTALLATION,
             fastapi_dls_namespace="labweaver-gpu-license",
             fastapi_dls_client_config_name="fastapi-dls-client",
             fastapi_dls_client_license_url="",
@@ -251,6 +260,7 @@ class FastapiDlsDeploymentTests(unittest.TestCase):
             fastapi_dls_signing_root_secret_namespace="labweaver-gpu-license",
             fastapi_dls_signing_root_secret_key="ca.crt",
         )
+        self.assertEqual(config['metadata']['annotations']['labweaver.io/installation-id'], INSTALLATION)
         data = config["data"]
 
         self.assertEqual(

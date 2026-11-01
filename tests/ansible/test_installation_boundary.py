@@ -239,6 +239,8 @@ class InstallationBoundaryTests(unittest.TestCase):
             for option in ('defaultDenyEnabled', 'cdiCloneSourcePolicyEnabled', 'ciliumIngressPolicyEnabled',
                            'resourceKubernetesApiCiliumPolicyEnabled'):
                 values['network'][option] = False
+            values['network']['kubernetesApiCidrs'] = ['10.0.0.1/32']
+            values['network']['kubernetesApiPorts'] = [6443]
             values_path = directory / 'values.yaml'
             values_path.write_text(yaml.safe_dump(values))
             helm = shutil.which('helm')
@@ -309,11 +311,21 @@ class InstallationBoundaryTests(unittest.TestCase):
             target = {'apiVersion': 'apps/v1', 'kind': 'Deployment', 'metadata': {'name': 'operator', 'namespace': 'component'}}
             (chart / 'templates/root.yaml').write_text(yaml.safe_dump(target))
             namespace = {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': 'component'}}
+            chart_namespace = {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': 'component-secrets',
+                               'labels': {'app.kubernetes.io/part-of': 'component'}}}
+            (chart / 'templates/namespace.yaml').write_text(yaml.safe_dump(chart_namespace))
             responses = {key('v1', 'Namespace', name='component'): observation(owned(namespace, 'namespace-uid')),
                          key('apps/v1', 'Deployment', 'component', 'operator'): observation(owned(target, 'operator-uid'))}
+            responses[key('v1', 'Namespace', name='component-secrets')] = {'resources': [], 'api_found': True}
             kubeconfig, reads, environment = prepare_kube_transport(directory, responses)
             roles = temporary_boundary_role(directory)
             environment['ANSIBLE_ROLES_PATH'] = str(roles) + os.pathsep + str(ROOT / 'deploy/ansible/roles')
+            namespace_capture, kubectl = directory / 'created-namespace.json', directory / 'kubectl'
+            kubectl.write_text(f'#!{sys.executable}\nimport pathlib, sys\n'
+                               'assert sys.argv[-3:] == ["create", "-f", "-"]\n'
+                               f'pathlib.Path({str(namespace_capture)!r}).write_text(sys.stdin.read())\n')
+            kubectl.chmod(0o755)
+            environment['PATH'] = str(directory) + os.pathsep + os.environ['PATH']
             fixture = directory / 'release.json'
             helm = directory / 'helm'
             real_helm = shutil.which('helm')
@@ -338,6 +350,12 @@ class InstallationBoundaryTests(unittest.TestCase):
             result = run_tasks([entry], variables, environment)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertTrue(producer.exists())
+            namespace_metadata = json.loads(namespace_capture.read_text())['metadata']
+            self.assertEqual(namespace_metadata['annotations']['labweaver.io/installation-id'], INSTALLATION)
+            self.assertEqual(namespace_metadata['annotations']['meta.helm.sh/release-name'], 'component')
+            self.assertEqual(namespace_metadata['annotations']['meta.helm.sh/release-namespace'], 'component')
+            self.assertEqual(namespace_metadata['labels']['app.kubernetes.io/managed-by'], 'Helm')
+            namespace_capture.unlink()
             producer.unlink()
             for variant in ('foreign-installation', 'wrong-namespace', 'read-error'):
                 with self.subTest(release=variant):
@@ -352,6 +370,40 @@ class InstallationBoundaryTests(unittest.TestCase):
                     result = run_tasks([entry], variables, environment)
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertFalse(producer.exists(), 'foreign or unreadable release must stop before producer staging')
+                    self.assertFalse(namespace_capture.exists(), 'foreign or unreadable release must prevent every namespace creation')
+
+    def test_chart_namespace_creation_has_exact_helm_identity_and_never_stamps_existing_namespaces(self):
+        source = tasks('deploy/ansible/roles/installation_boundary/tasks/main.yml')
+        producer = named(source, 'Create only verified-absent infrastructure namespaces after complete validation')
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            command, capture = directory / 'kubectl', directory / 'namespace.json'
+            command.write_text(f'#!{sys.executable}\nimport pathlib, sys\n'
+                               'assert sys.argv[-3:] == ["create", "-f", "-"]\n'
+                               f'pathlib.Path({str(capture)!r}).write_text(sys.stdin.read())\n')
+            command.chmod(0o755)
+            variables = {'labweaver_installation_id': INSTALLATION, 'installation_boundary_kubeconfig': 'unused',
+                'installation_boundary_manifest_objects': [], 'installation_boundary_chart_objects': [
+                    {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': 'cilium-secrets',
+                     'labels': {'app.kubernetes.io/part-of': 'cilium'}}}],
+                'installation_boundary_chart_namespace_metadata': {'cilium-secrets': {
+                    'annotations': {'meta.helm.sh/release-name': 'cilium', 'meta.helm.sh/release-namespace': 'kube-system'},
+                    'labels': {'app.kubernetes.io/managed-by': 'Helm'}}},
+                'installation_boundary_namespace_observations': {'results': [{'item': 'cilium-secrets', 'resources': []}]}}
+            environment = {'PATH': str(directory) + os.pathsep + os.environ['PATH']}
+            result = run_tasks([producer], variables, environment)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            metadata = json.loads(capture.read_text())['metadata']
+            self.assertEqual(metadata['annotations']['labweaver.io/installation-id'], INSTALLATION)
+            self.assertEqual(metadata['annotations']['meta.helm.sh/release-name'], 'cilium')
+            self.assertEqual(metadata['annotations']['meta.helm.sh/release-namespace'], 'kube-system')
+            self.assertEqual(metadata['labels']['app.kubernetes.io/managed-by'], 'Helm')
+            self.assertEqual(metadata['labels']['app.kubernetes.io/part-of'], 'cilium')
+            capture.unlink()
+            variables['installation_boundary_namespace_observations']['results'][0]['resources'] = [{'metadata': {'name': 'cilium-secrets'}}]
+            result = run_tasks([producer], variables, environment)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(capture.exists())
 
     def test_infrastructure_full_inventory_and_post_renderer_produce_verified_roots(self):
         with tempfile.TemporaryDirectory() as temporary:

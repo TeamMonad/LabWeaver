@@ -117,6 +117,8 @@ Harbor 新 namespace 仅在 API 明确返回 NotFound 时以 `create` 写入安�
 
 新装分支的 Cilium、MetalLB、NFS CSI、Local Path、cert-manager、KubeVirt/CDI 与 FastAPI-DLS 在首次集群变更前读取完整已配置 manifest/最终 Helm 渲染清单并核验安装归属。基础设施 Helm release 保存 `labweaverInstallationId`，post-renderer 为其根对象写入同一安装 ID；基础设施 Gateway 的生产者也写入该 ID，应用入口不为无 ID Gateway 补标。`kube-system` 等共享 namespace 只允许既定对象/字段协调，不据 namespace 名认领其内容。GPU/KubeVirt 节点标签使用独立字段归属标记及 UID/resourceVersion JSON Patch 测试；过期 GPU 标签清理不接受其他安装的布尔管理标签。旧入口对象的删除同时携带已观测 UID/resourceVersion。Sandbox 先验证 RuntimeClass/安装边界；stamp 读取错误与服务状态查询错误均不能当作缺失或已停止。
 
+Cilium 的 CRD 按锁定 chart 对应的 upstream tag 完整枚举，作为独立目标核验归属、写入安装 ID 并等待 Established；operator 禁止绕过该边界自行创建 CRD。离线 Bundle 可用 `cluster_network_cilium_crd_files` 提供匹配该版本的完整 CRD manifest 定位符。GatewayClass 显式参与最终清单，不因安装前尚未存在 Gateway API 而漏出预检查。
+
 清空仅能在另行授权的维护窗口执行，必须指定目标、范围和原 Bundle 安装 ID；先完成独立备份与数据处置审批。入口发现所有服务中的可删除 namespaced API 类型并完整分页读取，包括 Gateway、CDI 与其他 CR；发现/读取错误或外来对象在删除前阻断流程，不使用固定类型白名单。PV 缺少 `labweaver.io/installation-id` 时不会依赖 `claimRef` 推测归属。Helm 存储的 name/namespace、安装 ID、revision、UID/resourceVersion 与载荷指纹用于核验 release；从存储 manifest/hooks 找出命中的集群级及跨 namespace 对象，保留 Helm 通常保留的 CRD、范围外 Namespace 和 keep-policy 对象（已授权整 namespace 清空中的子对象不因 keep 标记获豁免）。wipe 不调用按名称卸载的 `helm uninstall`，每次 API DELETE 前重查范围与存储身份，并在 DELETE 上使用对象 UID/resourceVersion 前置条件；保护中的 PV 在 namespace 删除已提交后等待回收。外国 `lw-env-*` namespace 不因名称相似被选中，无标记旧安装不能自动采用或清空。
 
 Kubernetes 不提供“namespace 全部子对象快照 + namespace 删除”的跨资源事务，子对象插入不会改变 namespace 自身的 resourceVersion；上述重查与对象前置条件不能宣称消除该间隙。维护窗口必须阻止并行 Helm 升级及其他范围内写入，真实集群的中断恢复和并发控制仍需现场验收。本计划编写阶段不执行清空：
