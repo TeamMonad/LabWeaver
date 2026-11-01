@@ -1115,9 +1115,9 @@ const DEBIAN_BOOKWORM_PKGS: &[(&str, &str, &str)] = &[
         "http://deb.debian.org/debian-security/pool/updates/main/libs/libssh2/libssh2-1_1.10.0-3%2bdeb12u1_amd64.deb",
     ),
     (
-        "libssl3_3.0.22-1~deb12u1_amd64.deb",
-        "f0a8aa8429209e556c278a9936bbd5f7d2cdb9f7e4e23b1e43ed399217ba80c1",
-        "http://deb.debian.org/debian-security/pool/updates/main/o/openssl/libssl3_3.0.22-1%7edeb12u1_amd64.deb",
+        "libssl3_3.0.22-1~deb12u2_amd64.deb",
+        "cb4784740daa9b3b0eaea2b444bbefa686794afbbf3d678d238c1fd9875f2efd",
+        "http://deb.debian.org/debian-security/pool/updates/main/o/openssl/libssl3_3.0.22-1~deb12u2_amd64.deb",
     ),
     (
         "libtirpc-common_1.3.3+ds-1_all.deb",
@@ -1135,9 +1135,9 @@ const DEBIAN_BOOKWORM_PKGS: &[(&str, &str, &str)] = &[
         "https://deb.debian.org/debian/pool/main/m/media-types/media-types_10.0.0_all.deb",
     ),
     (
-        "openssl_3.0.22-1~deb12u1_amd64.deb",
-        "6f43fb5e9f3ceb0e36c91d0a148282a8eaf174b441c17d3665b6ba049b33d2c2",
-        "http://deb.debian.org/debian-security/pool/updates/main/o/openssl/openssl_3.0.22-1%7edeb12u1_amd64.deb",
+        "openssl_3.0.22-1~deb12u2_amd64.deb",
+        "5cdf0b735b1c8a96ae0bf83ed328c83c2170f8320dedb035e98705b60b2d0cfe",
+        "http://deb.debian.org/debian-security/pool/updates/main/o/openssl/openssl_3.0.22-1~deb12u2_amd64.deb",
     ),
     (
         "perl-base_5.36.0-7+deb12u3_amd64.deb",

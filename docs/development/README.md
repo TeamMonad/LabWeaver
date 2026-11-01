@@ -88,6 +88,8 @@ Platform Images 的路径范围还包括 `web/**`（Web 镜像上下文由 `carg
 
 离线 Alpine APK 的文件名、下载地址和 SHA-256 在 `xtask/src/platform_images.rs` 的 `ALPINE_V3_21_PKGS` 中锁定。更新包时，先检查全部锁定地址是否仍可下载，再对实际下载文件计算 SHA-256；保持校验启用。`musl-dev` 精确依赖同 revision 的 `musl`，因此两者必须一起锁定并传给 gateway builder 的 `apk add --no-network`，不能假设按 digest 固定的 Rust 基础镜像已包含新 revision。`containers/Containerfile.web` 的本地 Work fixture 也消费这份 APK 闭包。更新后运行 `cargo xtask package-prepare` 和受影响镜像构建；基础镜像 digest 未变时，不改 `deploy/versions.lock.yml`。
 
+离线 Debian bookworm DEB 在同一文件的 `DEBIAN_BOOKWORM_PKGS` 中锁定。安全仓库淘汰旧 revision 导致 404 时，同步刷新文件名、URL 和实际下载文件的 SHA-256，不关闭校验、不增加镜像源。每次刷新检查 Debian 与 Alpine 两张表的全部 URL，并用 `dpkg-deb -f <deb> Depends` 检查新包与其余锁定包、基础镜像的依赖关系。`libssl3` 与 `openssl` 同步锁定为 `3.0.22-1~deb12u2`；前者要求 `libc6 (>= 2.34)`，后者还要求 `libssl3 (>= 3.0.9)`。重新运行 `cargo xtask package-prepare`，再使用 `containers/Containerfile.rust` 固定的 `NODE_BUILDER` 镜像，在 `docker run --rm --network none` 中挂载 `containers/debian-bookworm-pkgs` 到 `/vendor/debian`，按 Containerfile 的 `apt-get install --yes --no-install-recommends -o Dir::Etc::sourcelist=/dev/null -o Dir::Etc::sourceparts=/dev/null ./*.deb` 离线安装完整闭包；下载成功不代表依赖闭包可安装。
+
 使用已有 Ansible 测试依赖，在本地检查所有 PR 目标和 main/develop push 的构建输入路径覆盖：
 
 ```sh
