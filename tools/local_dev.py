@@ -3446,6 +3446,13 @@ def make_app_input(
             if replacements != 1:
                 fail("control plane configuration has no evaluationRuntime.runnerImage")
             data = render_local_llm_policy_options(data, provider_environment)
+            # A policy identity is not the system actor identity carried in a
+            # Secret; keep their source values distinct in the managed Bundle.
+            control_document = yaml.safe_load(data)
+            control_document["control"]["retentionPolicyId"] = str(
+                uuid.uuid5(uuid.NAMESPACE_URL, "labweaver-local-retention:" + RUN_ID)
+            )
+            data = yaml.safe_dump(control_document, sort_keys=False)
         if source == "agent-control-plane.yaml.example":
             sandbox_image = images.get("authoring_sandbox")
             if not isinstance(sandbox_image, str) or not re.fullmatch(
