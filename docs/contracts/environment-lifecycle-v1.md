@@ -123,6 +123,8 @@ Orphan 传播删除该盘的原 DataVolume，再按 PVC UID/resourceVersion 清�
 未知读取或旧代次都不能授权删除。完成后保留 `purgedAt`、计算退役事实和操作历史；不删除 Resource 账本、
 Evaluation 成绩或其他磁盘。取消未完成的初次创建仍走原取消清理，不等于用户 Delete。
 
+到期扫描仅在实际需要受理命令时，将命令事务的 future 放到堆上，避免把大型事务状态机内联到调度器和调用者栈。空闲扫描不产生这次分配；运行与测试都不以放大线程栈作为前置条件。
+
 清理协议版本为 2：UID checkpoint 同时固定保盘/清盘权限。迁移将正常 Ready、Stopped 及历史操作的协议 1 标记切换为 2，原身份不变。旧版本尚未确认完成的破坏性清理保留原 UID checkpoint，并隔离为可查询的 Failed／`LW_ENVIRONMENT_CLEANUP_PROTOCOL_UPGRADE_REQUIRED`；不会继续删除、恢复执行或重新绑定 UID。迁移可重放，不能用删除 namespace 或清空数据库绕过盘身份检查。
 
 普通 Delete 与欠费/租约回收后的七天保留都由平台承担，实际占用以 `environment.retained_disk_usage` 独立保存
