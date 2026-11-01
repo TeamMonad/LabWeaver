@@ -38,7 +38,7 @@ async fn attach_real_object_store(context: &mut Context) -> TestResult {
     .await?;
     objects.ensure_bucket_for_test().await?;
     context.executor.objects = Arc::new(objects);
-    context._minio = Some(minio);
+    context.minio = Some(Box::new(minio));
     Ok(())
 }
 
@@ -62,6 +62,10 @@ fn command(
     })
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one real PostgreSQL/MinIO/Kubernetes journey verifies physical effects and the owner readback"
+)]
 async fn retained() -> TestResult<Context> {
     let mut context =
         Context::start_runtime_with_funding(contracts::authoring::RuntimeKind::Container, 1, true)

@@ -57,7 +57,7 @@ impl crate::ContainerProviderBackend for DirectKubernetes {
 
 struct Context {
     _postgres: ContainerAsync<Postgres>,
-    _minio: Option<ContainerAsync<testcontainers::GenericImage>>,
+    minio: Option<Box<ContainerAsync<testcontainers::GenericImage>>>,
     pool: sqlx::PgPool,
     store: crate::PgEnvironmentStore,
     mock: MockKubernetes,
@@ -136,7 +136,7 @@ impl Context {
         let (files, executor) = test_kubevirt_executor(&mock).await?;
         Ok(Self {
             _postgres: postgres,
-            _minio: None,
+            minio: None,
             pool,
             store,
             mock,
@@ -632,7 +632,7 @@ async fn shared_namespace_object_checkpoint_rejects_replacement_on_later_call() 
 }
 
 async fn run_inventory_pages(pages: Vec<InventoryPage>) -> TestResult {
-    let context = Context::start().await?;
+    let context = Box::pin(Context::start()).await?;
     context.mock.inventory_pages.lock().await.extend(pages);
     let (stop, shutdown) = watch::channel(false);
     let scanning = context.executor.clone().run_orphan_reconciler(
