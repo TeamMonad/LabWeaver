@@ -795,3 +795,78 @@ async fn assert_equal_millisecond_generations(
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn api_error_before_initial_bookmark_preserves_typed_cause_and_closes_cache()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_, client, server) = start_fake_api(ERROR_BEFORE_BARRIER).await?;
+    let nodes = tokio::sync::RwLock::new(Vec::new());
+    let pods = tokio::sync::RwLock::new(Vec::new());
+    let node_freshness = ObservationFreshness::new();
+    let pod_freshness = ObservationFreshness::new();
+    let node_api = Api::<Node>::all(client.clone());
+    let pod_api = Api::<Pod>::all(client.clone());
+    let (node_result, pod_result) = tokio::join!(
+        reflect_session(&node_api, &nodes, &node_freshness, 10, 10),
+        reflect_session(&pod_api, &pods, &pod_freshness, 10, 10)
+    );
+    for (kind, result) in [("Node", node_result), ("Pod", pod_result)] {
+        let error = result
+            .err()
+            .ok_or("pre-bookmark API ERROR must fail synchronization")?;
+        let sync_error = error
+            .downcast_ref::<InitialWatchSyncError>()
+            .ok_or("pre-bookmark API ERROR must retain the typed barrier wrapper")?;
+        assert!(
+            sync_error
+                .to_string()
+                .contains("LW_RESOURCE_GPU_OBSERVATION_STALE"),
+            "{kind}: {sync_error}"
+        );
+        assert!(
+            sync_error
+                .to_string()
+                .contains("initial-events bookmark missing"),
+            "{kind}: {sync_error}"
+        );
+        let cause = std::error::Error::source(sync_error).ok_or("missing Kubernetes cause")?;
+        let Some(kube::Error::Api(api_error)) = cause.downcast_ref::<kube::Error>() else {
+            return Err("barrier error source must be a typed Kubernetes API error".into());
+        };
+        assert_eq!(api_error.code, 410);
+        assert_eq!(api_error.status, "Failure");
+        assert_eq!(api_error.reason, "Expired");
+        assert_eq!(
+            api_error.message,
+            "requested resourceVersion 1 is older than 9"
+        );
+    }
+    assert!(nodes.read().await.is_empty());
+    assert!(pods.read().await.is_empty());
+    assert!(node_freshness.check(Duration::from_secs(30)).await.is_err());
+    assert!(pod_freshness.check(Duration::from_secs(30)).await.is_err());
+    let observer = test_observer(client);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if *observer.cache.node_freshness.reason.read().await
+                == "initial-events bookmark missing"
+                && *observer.cache.pod_freshness.reason.read().await
+                    == "initial-events bookmark missing"
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await?;
+    assert!(matches!(
+        observer.observe(&[entry()?], &[]).await,
+        Err(CapacityProviderError::ObservationStale(_))
+    ));
+    assert!(observer.cache.nodes.read().await.is_empty());
+    assert!(observer.cache.pods.read().await.is_empty());
+    observer.shutdown();
+    observer.cache.join().await;
+    server.abort();
+    Ok(())
+}

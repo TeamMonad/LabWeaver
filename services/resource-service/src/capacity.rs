@@ -488,7 +488,13 @@ where
                     synced = true;
                 }
             }
-            WatchEvent::Error(error) => return Err(format!("watch error: {}", error.code).into()),
+            WatchEvent::Error(error) => {
+                let error = kube::Error::Api(error);
+                if !synced {
+                    return Err(InitialWatchSyncError(error).into());
+                }
+                return Err(error.into());
+            }
         }
         if synced {
             if reader.len() > max_items {
@@ -2028,6 +2034,7 @@ mod tests {
     const DISCONNECT: u8 = 3;
     const HEALTH_CHANGE: u8 = 4;
     const SYNC_PENDING: u8 = 5;
+    const ERROR_BEFORE_BARRIER: u8 = 10;
     const EMPTY_WATCH: u8 = 6;
     const NO_BARRIER: u8 = 8;
     const NO_BARRIER_OPEN: u8 = 9;
@@ -2085,7 +2092,9 @@ mod tests {
             .into_iter()
             .map(|object| json!({"type":"ADDED", "object":object}))
             .collect::<std::collections::VecDeque<_>>();
-        if !matches!(state.mode, NO_BARRIER | NO_BARRIER_OPEN) {
+        if state.mode == ERROR_BEFORE_BARRIER {
+            initial.push_back(json!({"type":"ERROR", "object":{"apiVersion":"v1", "kind":"Status", "status":"Failure", "code":410, "reason":"Expired", "message":"requested resourceVersion 1 is older than 9"}}));
+        } else if !matches!(state.mode, NO_BARRIER | NO_BARRIER_OPEN) {
             initial.push_back(json!({"type":"BOOKMARK", "object":{"apiVersion":"v1", "kind":"PartialObjectMetadata", "metadata":{"resourceVersion":"2", "annotations":{"k8s.io/initial-events-end":"true"}}}}));
         }
         let events = if is_node {
