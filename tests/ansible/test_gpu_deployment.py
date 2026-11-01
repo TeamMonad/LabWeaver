@@ -15,6 +15,9 @@ except (ImportError, ModuleNotFoundError):
     Templar = None
 
 
+from test_deployment_install_modes import INSTALLATION
+
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -179,6 +182,7 @@ class GpuDeploymentTests(unittest.TestCase):
         definition = configure["kubernetes.core.k8s"]["definition"]
         payload = render_definition(
             definition,
+            labweaver_installation_id=INSTALLATION,
             kubevirt_permitted_mediated_devices=[
                 {
                     "mdevNameSelector": "nvidia-195",
@@ -194,6 +198,7 @@ class GpuDeploymentTests(unittest.TestCase):
                 }
             ],
         )
+        self.assertEqual(payload['metadata']['annotations']['labweaver.io/installation-id'], INSTALLATION)
         configuration = payload["spec"]["configuration"]
 
         self.assertEqual(defaults["kubevirt_permitted_mediated_devices"], [])
