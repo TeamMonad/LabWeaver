@@ -115,8 +115,8 @@
 
 - name: Retain the validated source and explicit producer groups
   ansible.builtin.set_fact:
-    installation_boundary_owned_source_objects: "{{ installation_boundary_owned_objects[(installation_boundary_objects | length):] }}"
-    installation_boundary_owned_explicit_objects: "{{ installation_boundary_owned_objects[:(installation_boundary_objects | length)] }}"
+    installation_boundary_owned_source_objects: "{{ installation_boundary_owned_objects[(installation_boundary_objects | length) :] }}"
+    installation_boundary_owned_explicit_objects: "{{ installation_boundary_owned_objects[: (installation_boundary_objects | length)] }}"
 
 - name: Verify Helm identity post-renderer dependencies before any namespace creation
   ansible.builtin.command:
