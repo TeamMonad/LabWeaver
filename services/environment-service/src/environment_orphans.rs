@@ -325,6 +325,11 @@ fn object_owner(
 }
 
 fn classify_instance(instance: &EnvironmentInstance) -> OrphanDecision {
+    if instance.operation.diagnostic_code.as_deref()
+        == Some("LW_ENVIRONMENT_CLEANUP_PROTOCOL_UPGRADE_REQUIRED")
+    {
+        return OrphanDecision::Unverified;
+    }
     if instance.disk_retention.as_ref().is_some_and(|disk| {
         matches!(
             disk.state,

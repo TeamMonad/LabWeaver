@@ -582,3 +582,73 @@ async fn restore_without_new_compute_never_renews_platform_retention() -> TestRe
     assert!(!usage.closed);
     Ok(())
 }
+
+#[tokio::test]
+async fn vm_retention_delayed_guest_exit_is_pending_without_error_retries() -> TestResult {
+    let mut context =
+        Context::start_runtime(contracts::authoring::RuntimeKind::VirtualMachine).await?;
+    attach_real_object_store(&mut context).await?;
+    context
+        .mock
+        .lifecycle
+        .as_ref()
+        .ok_or("fixture")?
+        .lock()
+        .await
+        .stop_reads_remaining = 5;
+    let namespace = format!("lw-env-{}", context.initial.id);
+    let mut target = context
+        .executor
+        .capture_cleanup_target(
+            context.initial.id,
+            context.initial.project_id,
+            &namespace,
+            None,
+            true,
+        )
+        .await
+        .map_err(|error| format!("{error:?}"))?
+        .ok_or("target")?;
+    target.retain_disk = true;
+    let mut fence = stop_fence(context.initial.id);
+    fence.action = ReconcileAction::Cleanup;
+    fence.deadline_at = UtcTimestamp::from_utc(
+        context.store.current_time().await?.get() + time::Duration::minutes(1),
+    )?;
+    let (_permit_database, permit) = crate::kubevirt_execution::test_permit(&mut fence).await?;
+    let request = crate::KubeVirtExecutorRequest::DeleteNamespace {
+        plan: crate::KubeVirtCleanupPlan {
+            environment_id: context.initial.id,
+            project_id: context.initial.project_id,
+            namespace: namespace.clone(),
+            virtual_machine_name: "runtime".to_owned(),
+            plan_sha256: Sha256Digest::of_bytes(b"delayed-retention"),
+        },
+        target: Some(target),
+    };
+    for _ in 0..4 {
+        assert!(matches!(
+            KubeVirtExecutorBackend::execute(&context.executor, &fence, &request, &permit).await,
+            crate::KubeVirtExecutorResponse::Pending
+        ));
+    }
+    assert!(matches!(
+        KubeVirtExecutorBackend::execute(&context.executor, &fence, &request, &permit).await,
+        crate::KubeVirtExecutorResponse::Deleted { .. }
+    ));
+    let fixture = context
+        .mock
+        .lifecycle
+        .as_ref()
+        .ok_or("fixture")?
+        .lock()
+        .await;
+    assert!(fixture.objects.contains_key(&format!(
+        "/api/v1/namespaces/{namespace}/persistentvolumeclaims/rootdisk"
+    )));
+    assert!(!fixture.objects.contains_key(&format!(
+        "/apis/kubevirt.io/v1/namespaces/{namespace}/virtualmachineinstances/runtime"
+    )));
+    assert!(fixture.delete_uids.is_empty());
+    Ok(())
+}

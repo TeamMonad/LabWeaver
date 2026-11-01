@@ -1,6 +1,8 @@
 //! Public Environment HTTP behavior against the real `PostgreSQL` store.
 #![allow(clippy::too_many_lines)]
 
+#[path = "cases/disk_retention_http.rs"]
+mod disk_retention_http;
 mod support;
 
 use std::{
@@ -493,6 +495,15 @@ async fn public_operation_and_lifecycle_routes_preserve_scope_cursor_and_status_
     .await?;
     assert_eq!(reset_status.0, StatusCode::OK);
     assert_eq!(reset_status.1["kind"], "reset");
+    disk_retention_http::recovery_http_cases(
+        &api,
+        &store,
+        &pool,
+        &identity,
+        session_id,
+        &revocation_count,
+    )
+    .await?;
 
     revocation_responder.abort();
     Ok(())
@@ -636,14 +647,15 @@ async fn spawn_revocation_responder(
                 continue;
             };
             responder_count.fetch_add(1, Ordering::SeqCst);
-            let request: Value = match serde_json::from_slice(&message.payload) {
-                Ok(value) => value,
-                Err(_) => continue,
-            };
+            let request: contracts::access::AccessRevocationRequest =
+                match serde_json::from_slice(&message.payload) {
+                    Ok(value) => value,
+                    Err(_) => continue,
+                };
             let response = json!({
                 "version": 1,
-                "environmentId": request["environmentId"],
-                "environmentRevision": request["environmentRevision"],
+                "environmentId": request.environment_id,
+                "environmentRevision": request.environment_revision,
                 "accessRevocationRevision": 9
             });
             if client

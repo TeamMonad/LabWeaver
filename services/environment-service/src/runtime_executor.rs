@@ -1042,7 +1042,7 @@ impl KubernetesContainerExecutor {
         &self,
         namespace: &str,
         claim: &str,
-    ) -> Result<(), ProviderFailure> {
+    ) -> Result<bool, ProviderFailure> {
         let list = self
             .get_api_json(&format!("/api/v1/namespaces/{namespace}/pods"))
             .await?
@@ -1068,10 +1068,10 @@ impl KubernetesContainerExecutor {
                     .and_then(Value::as_str)
                     == Some(claim)
             }) {
-                return Err(unavailable());
+                return Ok(false);
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     async fn remove_owned_namespace(
@@ -1951,8 +1951,12 @@ impl KubernetesContainerExecutor {
             return Err(rejected());
         }
         if target.retain_disk {
-            self.retire_or_purge_kubevirt_disk(fence, plan, permit, target)
-                .await?;
+            if !self
+                .retire_or_purge_kubevirt_disk(fence, plan, permit, target)
+                .await?
+            {
+                return Ok(ProviderOutcome::Pending);
+            }
             return self
                 .kubevirt_absence_evidence(fence, plan, Some(target))
                 .await
@@ -1978,7 +1982,7 @@ impl KubernetesContainerExecutor {
         plan: &KubeVirtCleanupPlan,
         permit: &crate::KubeVirtExecutionPermit,
         target: &EnvironmentCleanupTarget,
-    ) -> Result<(), ProviderFailure> {
+    ) -> Result<bool, ProviderFailure> {
         let namespace = self
             .owned_namespace(&plan.namespace, plan.environment_id, plan.project_id)
             .await?
@@ -1987,8 +1991,12 @@ impl KubernetesContainerExecutor {
             return Err(rejected());
         }
         if target.purge_disk {
-            self.ensure_disk_unmounted(&plan.namespace, "rootdisk")
-                .await?;
+            if !self
+                .ensure_disk_unmounted(&plan.namespace, "rootdisk")
+                .await?
+            {
+                return Ok(false);
+            }
             self.delete_pinned_object(
                 plan.environment_id,
                 plan.project_id,
@@ -2027,12 +2035,33 @@ impl KubernetesContainerExecutor {
             }
             self.kubevirt_lifecycle_subresource(fence, &plan.namespace, "runtime", "stop", permit)
                 .await?;
+            if let Some(vmi) = self
+                .get_json(
+                    "VirtualMachineInstance",
+                    &plan.namespace,
+                    &plan.virtual_machine_name,
+                )
+                .await?
+            {
+                verify_owned_identity(
+                    &vmi,
+                    &plan.virtual_machine_name,
+                    Some(&plan.namespace),
+                    plan.environment_id,
+                    plan.project_id,
+                )?;
+                return Ok(false);
+            }
             self.observe_kubevirt_stopped(fence, plan, identities)
                 .await?;
-            self.ensure_disk_unmounted(&plan.namespace, "rootdisk")
-                .await?;
+            if !self
+                .ensure_disk_unmounted(&plan.namespace, "rootdisk")
+                .await?
+            {
+                return Ok(false);
+            }
         }
-        Ok(())
+        Ok(true)
     }
 
     async fn kubevirt_absence_evidence(
@@ -4886,6 +4915,7 @@ mod tests {
         forbidden: bool,
         pods_remaining: bool,
         replace_disk_after_stop: bool,
+        stop_reads_remaining: u32,
         deletion: LifecycleDeletion,
         delete_uids: Vec<uuid::Uuid>,
     }
@@ -4928,6 +4958,7 @@ mod tests {
                 forbidden: false,
                 pods_remaining: false,
                 replace_disk_after_stop: false,
+                stop_reads_remaining: 0,
                 deletion: LifecycleDeletion::Finalizer,
                 delete_uids: Vec::new(),
             }
@@ -4950,7 +4981,9 @@ mod tests {
                     "virtualmachines/runtime/stop",
                     "virtualmachineinstances/runtime",
                 );
-            fixture.objects.remove(&vmi_path);
+            if fixture.stop_reads_remaining == 0 {
+                fixture.objects.remove(&vmi_path);
+            }
             if fixture.replace_disk_after_stop {
                 for (path, object) in &mut fixture.objects {
                     if path.ends_with("/persistentvolumeclaims/rootdisk") {
@@ -4977,6 +5010,14 @@ mod tests {
             return axum::Json(json!({"items":pods})).into_response();
         }
         if method == Method::GET {
+            if path.ends_with("/virtualmachineinstances/runtime")
+                && fixture.stop_reads_remaining > 0
+            {
+                fixture.stop_reads_remaining -= 1;
+                if fixture.stop_reads_remaining == 0 {
+                    fixture.objects.remove(&path);
+                }
+            }
             return fixture.objects.get(&path).cloned().map_or_else(
                 || StatusCode::NOT_FOUND.into_response(),
                 |value| axum::Json(value).into_response(),
@@ -5095,6 +5136,7 @@ mod tests {
                 forbidden: false,
                 pods_remaining: false,
                 replace_disk_after_stop: false,
+                stop_reads_remaining: 0,
                 deletion: LifecycleDeletion::Immediate,
                 delete_uids: Vec::new(),
             },

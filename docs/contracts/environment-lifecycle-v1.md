@@ -116,12 +116,14 @@ VM runtime 运行事实可先于 SSH 握手入库，此时 `instanceReady=true`�
 Resource 当前批准、容量和资金覆盖，不能复用已经释放的旧 compute hold。盘已清除、正在清除或保留期已结束
 分别以 `LW_ENVIRONMENT_DISK_NOT_RETAINED` 或 `LW_ENVIRONMENT_DISK_RETENTION_EXPIRED` 拒绝，HTTP 409。
 
+恢复前沿现有 `environment_stopped` 原因撤销访问授权；相同 key 重放不重复撤权。Delete/Purge 失败时 `/recover` 继续原清理操作及 UID checkpoint，而不是把 retiring/purging 当成可恢复盘。恢复后 Start 重新校验当前授权，并进入 Provisioning 重建计算；Container 与 KubeVirt 都继续使用原盘 UID。VM 正常关机时，仍存在的 VMI 或挂载 Pod 返回 Pending，不消耗错误重试次数；读取失败仍明确失败。
+
 Environment worker 到期后用稳定幂等键受理独立 `purge` 操作。清盘只删除原固定 UID 的目标 PVC；VM 先以
 Orphan 传播删除该盘的原 DataVolume，再按 PVC UID/resourceVersion 清除系统盘。任何挂载 Pod、替换 UID、
 未知读取或旧代次都不能授权删除。完成后保留 `purgedAt`、计算退役事实和操作历史；不删除 Resource 账本、
 Evaluation 成绩或其他磁盘。取消未完成的初次创建仍走原取消清理，不等于用户 Delete。
 
-清理协议版本为 2：UID checkpoint 同时固定保盘/清盘权限。旧协议仍在执行的清理不会被继续采用或重新绑定新 UID，保持可诊断失败；升级前应在原版本收尾旧操作，不能用删除 namespace 来绕过盘身份检查。
+清理协议版本为 2：UID checkpoint 同时固定保盘/清盘权限。迁移将正常 Ready、Stopped 及历史操作的协议 1 标记切换为 2，原身份不变。旧版本尚未确认完成的破坏性清理保留原 UID checkpoint，并隔离为可查询的 Failed／`LW_ENVIRONMENT_CLEANUP_PROTOCOL_UPGRADE_REQUIRED`；不会继续删除、恢复执行或重新绑定 UID。迁移可重放，不能用删除 namespace 或清空数据库绕过盘身份检查。
 
 普通 Delete 与欠费/租约回收后的七天保留都由平台承担，实际占用以 `environment.retained_disk_usage` 独立保存
 字节数及毫秒时间边界；保留段不发送到旧项目用量/compute hold。超过到期但物理清盘尚未完成的占用仍保留，

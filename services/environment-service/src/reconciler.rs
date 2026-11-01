@@ -659,7 +659,7 @@ pub fn next_action(
         (Operation::Create | Operation::Retry | Operation::Recover, State::Provisioning) => {
             Ok(ReconcileAction::Provision)
         }
-        (Operation::Start, State::Stopped)
+        (Operation::Start, State::Provisioning)
             if instance.disk_retention.as_ref().is_some_and(|disk| {
                 disk.state == contracts::environment::EnvironmentDiskState::Restored
             }) =>

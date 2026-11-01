@@ -1231,6 +1231,22 @@ fn provider_with_budget_and_licensing(
     resource_budget: KubeVirtResourceBudget,
     licensing: Option<KubeVirtVmVgpuLicensingConfiguration>,
 ) -> KubeVirtProvider<FixtureBackend, FixtureResolver, FixtureObservationStore> {
+    provider_with_observation_store(
+        projection,
+        backend,
+        resource_budget,
+        licensing,
+        Arc::new(FixtureObservationStore::default()),
+    )
+}
+
+fn provider_with_observation_store<S: KubeVirtObservationStore>(
+    projection: ReleasePublished,
+    backend: Arc<FixtureBackend>,
+    resource_budget: KubeVirtResourceBudget,
+    licensing: Option<KubeVirtVmVgpuLicensingConfiguration>,
+    observations: Arc<S>,
+) -> KubeVirtProvider<FixtureBackend, FixtureResolver, S> {
     KubeVirtProvider::new(
         "kubevirt-primary-v1".to_owned(),
         backend,
@@ -1239,7 +1255,7 @@ fn provider_with_budget_and_licensing(
             authority_now: timestamp("2026-07-16T08:30:00.000Z"),
             withdrawn_at: None,
         }),
-        Arc::new(FixtureObservationStore::default()),
+        observations,
         KubeVirtProviderConfiguration::new(
             revision(1),
             vec![ubuntu_base_disk("local-path".to_owned()).expect("base disk binding")],
@@ -2013,4 +2029,77 @@ fn unseeded_base_without_runtime_policy_fails_closed() {
         ),
         Err(ReleaseProjectionError::SecurityPostureInvalid)
     ));
+}
+
+#[tokio::test]
+async fn restored_kubevirt_start_reauthorizes_and_reaches_ready_with_same_disk()
+-> Result<(), Box<dyn std::error::Error>> {
+    use testcontainers::{ImageExt, runners::AsyncRunner};
+    let postgres = testcontainers_modules::postgres::Postgres::default()
+        .with_tag("17.5-alpine")
+        .start()
+        .await?;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            postgres.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    support::apply_environment_migrations(&pool).await?;
+    let projection = projection();
+    let now = timestamp("2026-07-16T08:30:00.000Z");
+    let started = support::retention::delete_restore_and_reauthorize(
+        instance_for(&projection),
+        &projection,
+        ROOT_DISK_UID,
+        now,
+    )?;
+    let backend = Arc::new(FixtureBackend::default());
+    let provider = provider_with_observation_store(
+        projection.clone(),
+        backend.clone(),
+        KubeVirtResourceBudget::new(
+            536_870_912,
+            1_000,
+            4_000,
+            262_144_000,
+            1_073_741_824,
+            10_737_418_240,
+        )?,
+        None,
+        Arc::new(environment_service::PgKubeVirtObservationStore::new(
+            pool.clone(),
+        )),
+    );
+    let action = environment_service::next_action(&started, now)?;
+    assert_eq!(action, ReconcileAction::Provision);
+    let plan = provider.plan(&started, &resolved(projection), action)?;
+    assert_eq!(
+        resource(&plan, "DataVolume").document["metadata"]["annotations"]["labweaver.io/retained-pvc-uid"],
+        ROOT_DISK_UID.to_string()
+    );
+    let observation = provider
+        .execute(action, &started)
+        .await
+        .map_err(|failure| format!("{failure:?}"))?
+        .completed()
+        .ok_or("completed")?;
+    let ready = environment_service::apply_provider_observation(
+        &started,
+        started.operation.id,
+        observation,
+    )?;
+    assert_eq!(ready.observed_state, ObservedEnvironmentState::Ready);
+    let observed_uid: uuid::Uuid = sqlx::query_scalar("SELECT root_disk_uid FROM environment.kubevirt_runtime_observations WHERE environment_id=$1").bind(ready.id.as_uuid()).fetch_one(&pool).await?;
+    assert_eq!(observed_uid, ROOT_DISK_UID);
+    assert_eq!(
+        backend
+            .operations
+            .lock()
+            .map_err(|_| "operations")?
+            .as_slice(),
+        ["apply"]
+    );
+    Ok(())
 }

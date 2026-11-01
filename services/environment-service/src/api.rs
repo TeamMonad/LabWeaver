@@ -1086,7 +1086,13 @@ async fn recover_environment(
     }
     let restoring = instance.desired_state
         == contracts::environment::DesiredEnvironmentState::Deleted
-        && instance.disk_retention.is_some();
+        && instance.disk_retention.as_ref().is_some_and(|disk| {
+            matches!(
+                disk.state,
+                contracts::environment::EnvironmentDiskState::Retained
+                    | contracts::environment::EnvironmentDiskState::Purged
+            )
+        });
     accept_lifecycle(
         &state,
         environment_id,
@@ -1096,7 +1102,7 @@ async fn recover_environment(
         } else {
             EnvironmentOperationKind::Recover
         },
-        restoring.then_some("environment_restored"),
+        restoring.then_some("environment_stopped"),
         true,
         context.trace_id(),
         None,
@@ -1602,7 +1608,8 @@ impl EnvironmentApiError {
                     crate::LifecycleError::OperationActive
                     | crate::LifecycleError::DiskNotRetained
                     | crate::LifecycleError::DiskRetentionExpired
-                    | crate::LifecycleError::DiskPurgeNotDue,
+                    | crate::LifecycleError::DiskPurgeNotDue
+                    | crate::LifecycleError::CleanupProtocolUpgradeRequired,
                 ),
             )
             | Self::Messaging(NatsMessagingError::LeaseNotActive) => StatusCode::CONFLICT,
@@ -1625,6 +1632,9 @@ impl IntoResponse for EnvironmentApiError {
                     Some("七天磁盘保留期已结束，不能恢复。")
                 }
                 crate::LifecycleError::DiskPurgeNotDue => Some("磁盘保留期尚未结束，不能清除。"),
+                crate::LifecycleError::CleanupProtocolUpgradeRequired => Some(
+                    "旧版本清理操作已安全隔离，请联系管理员核对原对象身份；不会自动重新绑定或删除磁盘。",
+                ),
                 _ => None,
             };
             if let Some(detail) = detail {
@@ -1705,6 +1715,7 @@ mod tests {
             crate::LifecycleError::DiskNotRetained,
             crate::LifecycleError::DiskRetentionExpired,
             crate::LifecycleError::DiskPurgeNotDue,
+            crate::LifecycleError::CleanupProtocolUpgradeRequired,
         ] {
             let expected = error.to_string();
             let response =

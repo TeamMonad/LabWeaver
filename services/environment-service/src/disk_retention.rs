@@ -3,7 +3,7 @@ use contracts::UtcTimestamp;
 use contracts::environment::{EnvironmentDiskState, EnvironmentInstance, ObservedEnvironmentState};
 
 /// Called only after a successful physical cleanup observation, using the owner's database clock.
-pub(crate) fn record_disk_observation(
+pub fn record_disk_observation(
     instance: &mut EnvironmentInstance,
     now: UtcTimestamp,
 ) -> Result<(), crate::LifecycleError> {

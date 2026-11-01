@@ -39,6 +39,8 @@ pub enum LifecycleError {
     DiskRetentionExpired,
     #[error("LW_ENVIRONMENT_DISK_PURGE_NOT_DUE")]
     DiskPurgeNotDue,
+    #[error("LW_ENVIRONMENT_CLEANUP_PROTOCOL_UPGRADE_REQUIRED")]
+    CleanupProtocolUpgradeRequired,
     #[error("LW_ENVIRONMENT_OPERATION_ACTIVE")]
     OperationActive,
     #[error("LW_ENVIRONMENT_OPERATION_MISMATCH")]
@@ -89,6 +91,11 @@ pub(crate) fn pin_cleanup_target(
 pub(crate) fn validate_cleanup_identity(
     current: &EnvironmentInstance,
 ) -> Result<(), LifecycleError> {
+    if current.operation.diagnostic_code.as_deref()
+        == Some("LW_ENVIRONMENT_CLEANUP_PROTOCOL_UPGRADE_REQUIRED")
+    {
+        return Err(LifecycleError::CleanupProtocolUpgradeRequired);
+    }
     if current.desired_state == DesiredEnvironmentState::Deleted
         && current.operation.cleanup_protocol_version
             != Some(contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION)
@@ -741,6 +748,14 @@ fn accepted_observed_state(
         EnvironmentOperationKind::Stop => ObservedEnvironmentState::Stopping,
         EnvironmentOperationKind::Restore => ObservedEnvironmentState::Stopped,
         EnvironmentOperationKind::Purge => ObservedEnvironmentState::Deleting,
+        EnvironmentOperationKind::Start
+            if current
+                .disk_retention
+                .as_ref()
+                .is_some_and(|disk| disk.state == EnvironmentDiskState::Restored) =>
+        {
+            ObservedEnvironmentState::Provisioning
+        }
         EnvironmentOperationKind::Reset if current_state == ObservedEnvironmentState::Failed => {
             ObservedEnvironmentState::Validating
         }
