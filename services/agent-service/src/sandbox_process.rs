@@ -2697,6 +2697,17 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::claude_code::ClaudeCodeProcess for ReceiptProcess {
+        async fn recover_authoring_terminal(
+            &self,
+            _scope: &AuthoringAttemptScope,
+            cancellation: crate::claude_code::RunCancellation,
+        ) -> Result<crate::claude_code::ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
+            Err(if cancellation.is_cancelled() {
+                ClaudeCodeProcessError::Cancelled
+            } else {
+                ClaudeCodeProcessError::TimedOut
+            })
+        }
         async fn version(&self) -> Result<String, ClaudeCodeProcessError> {
             Ok(self.version.clone())
         }
