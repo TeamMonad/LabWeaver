@@ -511,12 +511,20 @@ async fn upstream_ws(
 ) -> Response {
     requests.lock().await.push(json!({"path":uri.path(), "query":uri.query(), "cookie":headers.get(header::COOKIE).and_then(|value|value.to_str().ok()), "websocket":true}));
     let flood = uri.query() == Some("session_id=a%2Fb&token=x+y&flood=true");
-    if !flood && uri.query() != Some("session_id=a%2Fb&token=x+y") {
+    let stall = uri.query() == Some("session_id=a%2Fb&token=x+y&stall=true");
+    if !flood && !stall && uri.query() != Some("session_id=a%2Fb&token=x+y") {
         return StatusCode::BAD_REQUEST.into_response();
     }
     upgrade
         .protocols(["runtime.test.v1"])
         .on_upgrade(move |socket| async move {
+            if stall {
+                // Fault boundary: hold the application socket without reading until
+                // well beyond the authorization deadline.
+                tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                drop(socket);
+                return;
+            }
             let (mut sender, mut receiver) = socket.split();
             if flood {
                 let send = async {
@@ -1524,6 +1532,46 @@ async fn runtime_revocation_supervision_survives_backpressure_and_authority_stal
         drop(body);
         drop(ws);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_revocation_interrupts_blocked_browser_write() -> Result<(), Box<dyn Error>> {
+    let fixture = Box::pin(RuntimeFixture::new()).await?;
+    let handoff = fixture.handoff(fixture.grant).await?;
+    assert_eq!(
+        handoff.exchange(&fixture.client).send().await?.status(),
+        StatusCode::SEE_OTHER
+    );
+    let mut request = fixture.websocket_request(
+        &fixture.runtime,
+        fixture.grant,
+        &fixture.runtime_cookie(fixture.grant)?,
+        "runtime.test.v1",
+    )?;
+    *request.uri_mut() = format!("{}&stall=true", request.uri()).parse()?;
+    let (mut ws, _) = fixture.websocket(request).await?;
+    let mut writer = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        loop {
+            if let Err(error) = ws
+                .send(WsMessage::Binary(Bytes::from_static(&FLOOD_CHUNK)))
+                .await
+            {
+                return error;
+            }
+        }
+    }));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        !writer.is_finished(),
+        "application must still be withholding reads"
+    );
+    sqlx::query("UPDATE access.bff_sessions SET revoked_at=now() WHERE session_id=$1")
+        .bind(fixture.bff.session_id)
+        .execute(&fixture.state.pool)
+        .await?;
+    // A stalled upstream must not keep the browser's pending write alive.
+    tokio::time::timeout(std::time::Duration::from_secs(8), &mut writer).await??;
     Ok(())
 }
 
