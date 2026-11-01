@@ -78,11 +78,14 @@ HTTP/1 Host 与 HTTP/2 URI authority 冲突、缺失、未知主机一律拒绝�
 运行时 host 不提供 `/api/v1`、`/auth` 或 Console。门户 API 拒绝运行时 Origin，不开放 CORS。
 运行时跨 origin 请求即使来自同站的另一个 grant、浏览器自动附带目标 Cookie，仍拒绝并且不访问上游；
 Fetch Metadata 同时拒绝省略 Origin 的跨主机 no-cors 资源请求，顶层交接导航仍可完成。
-写方法要求该 grant 自己的规范化 HTTPS Origin 和 Edit 动作，不使用门户 CSRF；门户交接 POST 本身
-仍须门户 CSRF。响应带 `Cross-Origin-Resource-Policy: same-origin`、opener 隔离与
-`Origin-Agent-Cluster: ?1`，运行时文档保持 origin-keyed，不依赖 Cookie Path 或同站属性隔离脚本。
-上游不接收 BFF/capability Cookie 或 Authorization，Set-Cookie 不转发；根相对重定向保持当前 host
-及 grant 路径，外部重定向拒绝。BFF `__Host-labweaver_session` 保持 host-only，只发给门户。
+写请求要求该 grant 自己的规范化 HTTPS Origin 和 Edit 动作，不使用门户 CSRF；门户交接 POST 本身仍须门户 CSRF。响应带
+`Cross-Origin-Resource-Policy: same-origin`、opener 隔离与 `Origin-Agent-Cluster: ?1`，运行时文档保持
+origin-keyed，不依赖 Cookie Path 或同站属性隔离脚本。HTTP 响应按流转发，响应内存受配置的最大响应字节数约束，
+因此 SSE 可在上游结束前逐块到达，超限流会中止；客户端断开会取消上游请求。运行时 HTTP 客户端使用连接和读取空闲超时，不使用覆盖整个响应的短 RPC 总超时。
+WebSocket upgrade 要求 Edit（代理不提供可验证的只读子协议），并在向浏览器返回 101 之前完成上游握手；保留原始 query，仅返回上游实际选择、且浏览器确实提供的单个子协议。
+HTTP 流和 WebSocket 都通过原 capability 和同一授权入口每 5 秒复核 BFF session、capability 期限、grant、成员动作、端点及 deadline；单次完整复核有 2 秒上限。监督独立于 Body 轮询及双向发送背压，授权失败或权威读取超时即取消上游，服务端关闭上限为 7 秒，不含客户端处理网络及已缓冲数据的时间。关闭日志保留原始稳定诊断分类，不记录 Cookie 或查询参数。
+上游不接收 BFF/capability Cookie 或 Authorization，但接收当前应用的 Cookie，包括 WebSocket 握手。应用 `Set-Cookie` 转发到当前 grant host，剥除全部 `Domain` 属性（含大小写、属性名空白、Tab 和重复属性），将应用 `Path=/api` 映射到 `/connect/{grant}/api`；`__Host-` Cookie 保持 `Path=/`，SameSite 不变。省略 Path 的 Cookie 使用浏览器相对于外部请求路径的默认作用域。
+根相对重定向保持当前 host 及 grant 路径，绝对和协议相对的外部重定向都拒绝。BFF `__Host-labweaver_session` 保持 host-only，只发给门户。
 
 | 条件 | HTTP | diagnosticCode |
 | --- | ---: | --- |

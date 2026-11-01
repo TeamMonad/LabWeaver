@@ -34,7 +34,7 @@ telemetry = { path = "../../crates/telemetry" }
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
-tokio-util = "0.7.18"
+tokio-util.workspace = true
 tokio-rustls.workspace = true
 tracing.workspace = true
 url.workspace = true

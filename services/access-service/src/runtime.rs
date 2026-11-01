@@ -6,6 +6,7 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
+use axum::extract::{FromRequestParts, ws::WebSocketUpgrade};
 use axum::{
     body::Bytes,
     extract::{Form, Path, Query, Request, State},
@@ -359,6 +360,35 @@ pub(super) async fn connect(
         .headers_mut()
         .insert("referrer-policy", HeaderValue::from_static("no-referrer"));
     Ok(response)
+}
+
+pub(super) async fn connect_websocket(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let (mut parts, body) = request.into_parts();
+    let is_upgrade = parts
+        .headers
+        .get(header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"));
+    if !is_upgrade {
+        let body = axum::body::to_bytes(body, state.runtime_proxy.max_request_bytes)
+            .await
+            .map_err(|_| ApiError::bad_request("LW_ACCESS_RUNTIME_REQUEST_TOO_LARGE"))?;
+        return connect(State(state), parts.method, parts.uri, parts.headers, body).await;
+    }
+    let upgrade = WebSocketUpgrade::from_request_parts(&mut parts, &state)
+        .await
+        .map_err(|_| ApiError::bad_request("LW_ACCESS_RUNTIME_UPGRADE_REJECTED"))?;
+    proxy::forward_runtime_websocket(
+        State(state),
+        parts.method,
+        parts.uri,
+        parts.headers,
+        upgrade,
+    )
+    .await
 }
 
 /// The nonce cookie never leaves the runtime host. A stolen handoff URL is insufficient.

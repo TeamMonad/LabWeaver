@@ -1,9 +1,25 @@
 //! Real Access + Environment HTTP authorities, persisted sessions/grants, and an untrusted HTTP app.
 use super::*;
+use axum::body::Body;
 use contracts::{EndpointGrantId, environment::EnvironmentInstance};
 use environment_service::{OwnerResolver, PgEnvironmentStore, PgReleaseProjectionStore};
-use reqwest::cookie::Jar;
+use futures_util::{SinkExt, Stream, StreamExt};
+use reqwest::cookie::{CookieStore, Jar};
+use rustls::{ClientConfig, RootCertStore};
 use sqlx::Row;
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
+use tokio_tungstenite::{
+    Connector, client_async_tls_with_config,
+    tungstenite::{self, Message as WsMessage},
+};
+
+type TestWebSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+static FLOOD_CHUNK: [u8; 65_536] = [b'x'; 65_536];
 
 struct RuntimeFixture {
     state: Arc<AppState>,
@@ -16,6 +32,7 @@ struct RuntimeFixture {
     request_log: Arc<Mutex<Vec<Value>>>,
     bff: BffSession,
     upstream: Arc<Mutex<Vec<Value>>>,
+    jar: Arc<Jar>,
     certificate_pem: String,
     private_key_pem: String,
     tasks: Tasks,
@@ -167,13 +184,11 @@ impl RuntimeFixture {
             state.oidc_http.clone(),
         )
         .await?;
-        let address_id = Uuid::now_v7();
-        let bytes = address_id.as_bytes();
-        let app_ip = std::net::Ipv4Addr::new(127, bytes[13], bytes[14], bytes[15]);
-        let upstream_listener = TcpListener::bind((app_ip, 8080)).await?;
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await?;
         let upstream_address = upstream_listener.local_addr()?;
         let upstream = Arc::new(Mutex::new(Vec::new()));
         let app_router = Router::new()
+            .route("/ws", get(upstream_ws))
             .fallback(any(untrusted_app))
             .with_state(Arc::clone(&upstream));
         tasks.0.push(tokio::spawn(async move {
@@ -198,18 +213,15 @@ impl RuntimeFixture {
             std::time::Duration::from_millis(5),
             TransportSecurityMode::Strict,
         )?;
-        mutable.runtime_proxy.client = reqwest::Client::builder()
+        let mut runtime_config = mutable.deployment.environment_gateway.clone();
+        runtime_config.timeout_milliseconds = 30_000;
+        mutable.runtime_proxy.client = proxy::RuntimeGatewayProxy::client_builder(&runtime_config)
             .no_proxy()
-            .resolve(
-                &format!("runtime.lw-env-{environment}.svc.cluster.local"),
-                upstream_address,
-            )
-            .resolve(
-                &format!("runtime.lw-env-{}.svc.cluster.local", second.id),
-                upstream_address,
-            )
-            .redirect(reqwest::redirect::Policy::none())
             .build()?;
+        mutable.runtime_proxy.max_response_bytes = usize::MAX;
+        mutable.runtime_proxy.http_base = Some(Url::parse(&format!("http://{upstream_address}"))?);
+        mutable.runtime_proxy.websocket_base =
+            Some(Url::parse(&format!("ws://{upstream_address}"))?);
         let request_log = Arc::new(Mutex::new(Vec::new()));
         let router = browser_router(Arc::clone(&state)).layer(
             axum::middleware::from_fn_with_state(Arc::clone(&request_log), record_request_uri),
@@ -227,7 +239,7 @@ impl RuntimeFixture {
         );
         let client = reqwest::Client::builder()
             .no_proxy()
-            .cookie_provider(jar)
+            .cookie_provider(Arc::clone(&jar))
             .add_root_certificate(reqwest::Certificate::from_pem(ca.as_bytes())?)
             .resolve("portal.localhost", address)
             .resolve(
@@ -255,11 +267,106 @@ impl RuntimeFixture {
             request_log,
             bff,
             upstream,
+            jar,
             certificate_pem: ca,
             private_key_pem,
             tasks,
             _database: database,
         })
+    }
+
+    fn websocket_request(
+        &self,
+        origin: &str,
+        grant: EndpointGrantId,
+        cookie: &str,
+        protocols: &str,
+    ) -> Result<tungstenite::handshake::client::Request, Box<dyn Error>> {
+        if origin != self.runtime && origin != self.runtime_b {
+            return Err("unknown runtime fixture origin".into());
+        }
+        let mut request = format!("{origin}/connect/{grant}/ws?session_id=a%2Fb&token=x+y")
+            .replace("https://", "wss://")
+            .into_client_request()?;
+        request
+            .headers_mut()
+            .insert(header::ORIGIN, origin.parse()?);
+        request
+            .headers_mut()
+            .insert(header::COOKIE, cookie.parse()?);
+        request
+            .headers_mut()
+            .insert(header::SEC_WEBSOCKET_PROTOCOL, protocols.parse()?);
+        Ok(request)
+    }
+
+    async fn websocket(
+        &self,
+        request: tungstenite::handshake::client::Request,
+    ) -> Result<(TestWebSocket, tungstenite::handshake::client::Response), Box<dyn Error>> {
+        let mut roots = RootCertStore::empty();
+        for certificate in
+            rustls_pemfile::certs(&mut std::io::Cursor::new(self.certificate_pem.as_bytes()))
+        {
+            roots.add(certificate?)?;
+        }
+        let tls = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        // Both positive and negative cases use the same socket, SNI and trusted root.
+        let port = Url::parse(&self.portal)?
+            .port()
+            .ok_or("missing Access fixture port")?;
+        let socket = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).await?;
+        Ok(client_async_tls_with_config(
+            request,
+            socket,
+            None,
+            Some(Connector::Rustls(Arc::new(tls))),
+        )
+        .await?)
+    }
+
+    async fn assert_websocket_denied(
+        &self,
+        request: tungstenite::handshake::client::Request,
+        status: StatusCode,
+        diagnostic: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let before = self
+            .upstream
+            .lock()
+            .await
+            .iter()
+            .filter(|entry| entry["websocket"] == true)
+            .count();
+        let result = self.websocket(request).await;
+        let error = result.err().ok_or("unauthorized websocket connected")?;
+        let Some(tungstenite::Error::Http(response)) = error.downcast_ref::<tungstenite::Error>()
+        else {
+            return Err(
+                format!("expected HTTP denial, not TLS/DNS/transport failure: {error}").into(),
+            );
+        };
+        assert_eq!(response.status(), status);
+        let problem: contracts::ProblemDetails = serde_json::from_slice(
+            response
+                .body()
+                .as_ref()
+                .ok_or("missing websocket denial body")?,
+        )?;
+        assert_eq!(problem.diagnostic_code.as_str(), diagnostic);
+        assert_eq!(
+            self.upstream
+                .lock()
+                .await
+                .iter()
+                .filter(|entry| entry["websocket"] == true)
+                .count(),
+            before,
+            "denied request reached upstream"
+        );
+        Ok(())
     }
 
     async fn handoff(&self, grant: EndpointGrantId) -> Result<IssuedHandoff, Box<dyn Error>> {
@@ -325,6 +432,23 @@ impl RuntimeFixture {
             binding: binding.to_owned(),
         })
     }
+
+    fn runtime_cookie(&self, grant: EndpointGrantId) -> Result<String, Box<dyn Error>> {
+        let origin = if grant == self.grant {
+            &self.runtime
+        } else if grant == self.grant_b {
+            &self.runtime_b
+        } else {
+            return Err("unknown runtime grant".into());
+        };
+        let url = Url::parse(&format!("{origin}/connect/{grant}/"))?;
+        Ok(self
+            .jar
+            .cookies(&url)
+            .ok_or("missing runtime capability cookie")?
+            .to_str()?
+            .to_owned())
+    }
 }
 
 async fn record_request_uri(
@@ -379,6 +503,79 @@ async fn seed_runtime(
     Ok(())
 }
 
+async fn upstream_ws(
+    State(requests): State<Arc<Mutex<Vec<Value>>>>,
+    uri: Uri,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    requests.lock().await.push(json!({"path":uri.path(), "query":uri.query(), "cookie":headers.get(header::COOKIE).and_then(|value|value.to_str().ok()), "websocket":true}));
+    let flood = uri.query() == Some("session_id=a%2Fb&token=x+y&flood=true");
+    let stall = uri.query() == Some("session_id=a%2Fb&token=x+y&stall=true");
+    if !flood && !stall && uri.query() != Some("session_id=a%2Fb&token=x+y") {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    upgrade
+        .protocols(["runtime.test.v1"])
+        .on_upgrade(move |socket| async move {
+            if stall {
+                // Fault boundary: hold the application socket without reading until
+                // well beyond the authorization deadline.
+                tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                drop(socket);
+                return;
+            }
+            let (mut sender, mut receiver) = socket.split();
+            if flood {
+                let send = async {
+                    loop {
+                        if sender
+                            .send(axum::extract::ws::Message::Binary(Bytes::from_static(
+                                &FLOOD_CHUNK,
+                            )))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                };
+                let receive = async { while let Some(Ok(_)) = receiver.next().await {} };
+                tokio::select! { () = send => {}, () = receive => {} }
+            } else {
+                while let Some(Ok(message)) = receiver.next().await {
+                    if matches!(message, axum::extract::ws::Message::Close(_)) {
+                        break;
+                    }
+                    if sender.send(message).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            requests.lock().await.push(json!({"wsClosed":true}));
+        })
+        .into_response()
+}
+
+struct FloodProbe(Arc<Mutex<Vec<Value>>>);
+
+impl Stream for FloodProbe {
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(Some(Ok(Bytes::from_static(&FLOOD_CHUNK))))
+    }
+}
+
+impl Drop for FloodProbe {
+    fn drop(&mut self) {
+        let requests = Arc::clone(&self.0);
+        tokio::spawn(async move {
+            requests.lock().await.push(json!({"floodCancelled":true}));
+        });
+    }
+}
+
 async fn untrusted_app(
     State(requests): State<Arc<Mutex<Vec<Value>>>>,
     method: Method,
@@ -387,6 +584,81 @@ async fn untrusted_app(
     body: Bytes,
 ) -> Response {
     requests.lock().await.push(json!({"method":method.as_str(),"path":uri.path(),"cookie":headers.get(header::COOKIE).and_then(|h|h.to_str().ok()),"authorization":headers.get(header::AUTHORIZATION).and_then(|h|h.to_str().ok())}));
+    if uri.path() == "/sse" {
+        let first = futures_util::stream::once(async {
+            Ok::<_, std::io::Error>(Bytes::from_static(b"data: first\n\n"))
+        });
+        let never = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
+        return Response::builder()
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .body(Body::from_stream(first.chain(never)))
+            .unwrap_or_else(|_| Response::new(Body::empty()));
+    }
+    if uri.path() == "/download" {
+        let first = futures_util::stream::once(async {
+            Ok::<_, std::io::Error>(Bytes::from_static(b"first-chunk"))
+        });
+        let never = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
+        return Response::builder()
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from_stream(first.chain(never)))
+            .unwrap_or_else(|_| Response::new(Body::empty()));
+    }
+    if uri.path() == "/cancel" {
+        return Response::builder()
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from_stream(CancelProbe {
+                requests: Arc::clone(&requests),
+                first: true,
+            }))
+            .unwrap_or_else(|_| Response::new(Body::empty()));
+    }
+    if uri.path() == "/flood" {
+        return Body::from_stream(FloodProbe(Arc::clone(&requests))).into_response();
+    }
+    if uri.path() == "/cookie" {
+        return Response::builder()
+            .header(
+                header::SET_COOKIE,
+                "app=1; Domain \t= .runtime.localhost; Path=/; Secure; SameSite=Lax",
+            )
+            .body(Body::from(Bytes::from_static(b"cookie")))
+            .unwrap_or_else(|_| Response::new(Body::empty()));
+    }
+    if uri.path() == "/dangerous" {
+        return Response::builder()
+            .status(StatusCode::FOUND)
+            .header(header::LOCATION, "https://evil.example/steal")
+            .body(Body::empty())
+            .unwrap_or_else(|_| Response::new(Body::empty()));
+    }
+    if uri.path() == "/dangerous-relative" {
+        return (
+            StatusCode::FOUND,
+            [(header::LOCATION, "//evil.example/steal")],
+        )
+            .into_response();
+    }
+    if uri.path() == "/cookie-api" {
+        return (
+            [(
+                header::SET_COOKIE,
+                "api_session=abc; Path=/api; Secure; SameSite=None",
+            )],
+            "cookie",
+        )
+            .into_response();
+    }
+    if uri.path() == "/cookie-host" {
+        return (
+            [(
+                header::SET_COOKIE,
+                "__Host-app=abc; Path=/; Secure; SameSite=Strict",
+            )],
+            "cookie",
+        )
+            .into_response();
+    }
     if uri.path() == "/redirect" {
         return (
             StatusCode::FOUND,
@@ -398,6 +670,32 @@ async fn untrusted_app(
         return body.into_response();
     }
     ([(header::CONTENT_TYPE,"text/html")],"<!doctype html><title>Untrusted runtime</title><script>window.runtimeScriptRan = true</script>").into_response()
+}
+
+struct CancelProbe {
+    requests: Arc<Mutex<Vec<Value>>>,
+    first: bool,
+}
+
+impl Stream for CancelProbe {
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.first {
+            self.first = false;
+            Poll::Ready(Some(Ok(Bytes::from_static(b"first"))))
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+impl Drop for CancelProbe {
+    fn drop(&mut self) {
+        if let Ok(mut requests) = self.requests.try_lock() {
+            requests.push(json!({"cancelled": true}));
+        }
+    }
 }
 
 #[tokio::test]
@@ -791,6 +1089,489 @@ async fn runtime_handoff_isolated_bound_one_time_and_live_revocation() -> Result
             !target.contains(&handoff.token) && !target.contains(&handoff.binding)
         })
     }));
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn runtime_proxy_protocols_are_streamed_and_fenced() -> Result<(), Box<dyn Error>> {
+    let fixture = Box::pin(RuntimeFixture::new()).await?;
+    let handoff_a = fixture.handoff(fixture.grant).await?;
+    assert_eq!(
+        handoff_a.exchange(&fixture.client).send().await?.status(),
+        StatusCode::SEE_OTHER
+    );
+    let handoff_b = fixture.handoff(fixture.grant_b).await?;
+    assert_eq!(
+        handoff_b.exchange(&fixture.client).send().await?.status(),
+        StatusCode::SEE_OTHER
+    );
+    let cookie_a = fixture.runtime_cookie(fixture.grant)?;
+    let target = |origin: &str, grant: EndpointGrantId, path: &str| {
+        format!("{origin}/connect/{grant}{path}")
+    };
+
+    let plain = fixture
+        .client
+        .get(target(&fixture.runtime, fixture.grant, "/"))
+        .send()
+        .await?;
+    assert_eq!(plain.status(), StatusCode::OK);
+    let sse = fixture
+        .client
+        .get(target(&fixture.runtime, fixture.grant, "/sse"))
+        .send()
+        .await?;
+    let mut sse_stream = sse.bytes_stream();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), sse_stream.next())
+        .await?
+        .ok_or("SSE ended before first event")??;
+    assert_eq!(first, Bytes::from_static(b"data: first\n\n"));
+    let download = fixture
+        .client
+        .get(target(&fixture.runtime, fixture.grant, "/download"))
+        .send()
+        .await?;
+    let first_download = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        download.bytes_stream().next(),
+    )
+    .await?
+    .ok_or("download ended before first chunk")??;
+    assert_eq!(first_download, Bytes::from_static(b"first-chunk"));
+
+    let cookie_response = fixture
+        .client
+        .get(target(&fixture.runtime, fixture.grant, "/cookie"))
+        .send()
+        .await?;
+    let set_cookie = cookie_response
+        .headers()
+        .get(header::SET_COOKIE)
+        .ok_or("runtime app cookie was not forwarded")?
+        .to_str()?;
+    assert!(!set_cookie.to_ascii_lowercase().contains("domain="));
+    for path in ["/dangerous", "/dangerous-relative"] {
+        let dangerous = fixture
+            .client
+            .get(target(&fixture.runtime, fixture.grant, path))
+            .send()
+            .await?;
+        assert_problem_response(
+            dangerous,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LW_ACCESS_RUNTIME_REDIRECT_REJECTED",
+        )
+        .await?;
+    }
+    for path in ["/cookie-api", "/cookie-host", "/api/refresh"] {
+        assert_eq!(
+            fixture
+                .client
+                .get(target(&fixture.runtime, fixture.grant, path))
+                .send()
+                .await?
+                .status(),
+            StatusCode::OK
+        );
+    }
+    let refresh = fixture
+        .upstream
+        .lock()
+        .await
+        .iter()
+        .find(|entry| entry["path"] == "/api/refresh")
+        .cloned()
+        .ok_or("missing application refresh")?;
+    let app_cookies = refresh["cookie"]
+        .as_str()
+        .ok_or("application cookies not forwarded")?;
+    assert!(app_cookies.contains("app=1"));
+    assert!(app_cookies.contains("api_session=abc"));
+    assert!(app_cookies.contains("__Host-app=abc"));
+    assert!(!app_cookies.contains("labweaver"));
+    assert!(
+        fixture
+            .jar
+            .cookies(&Url::parse(&fixture.portal)?)
+            .is_some_and(|cookies| !cookies.to_str().unwrap_or("").contains("app="))
+    );
+    let cross_http = fixture
+        .client
+        .get(target(&fixture.runtime_b, fixture.grant_b, "/"))
+        .header(header::COOKIE, &cookie_a)
+        .send()
+        .await?;
+    assert_eq!(cross_http.status(), StatusCode::FORBIDDEN);
+
+    let ws_request = fixture.websocket_request(
+        &fixture.runtime,
+        fixture.grant,
+        &fixture.runtime_cookie(fixture.grant)?,
+        "unsupported.v0, runtime.test.v1",
+    )?;
+    let (mut ws, response) = fixture.websocket(ws_request).await?;
+    assert_eq!(
+        response
+            .headers()
+            .get(header::SEC_WEBSOCKET_PROTOCOL)
+            .ok_or("missing selected protocol")?,
+        "runtime.test.v1"
+    );
+    ws.send(WsMessage::Text("echo".into())).await?;
+    assert_eq!(
+        ws.next().await.ok_or("WS closed")??,
+        WsMessage::Text("echo".into())
+    );
+    let ws_upstream = fixture
+        .upstream
+        .lock()
+        .await
+        .iter()
+        .find(|entry| entry["websocket"] == true)
+        .cloned()
+        .ok_or("missing upstream WS")?;
+    assert_eq!(ws_upstream["query"], "session_id=a%2Fb&token=x+y");
+    assert!(
+        ws_upstream["cookie"]
+            .as_str()
+            .is_some_and(|value| value.contains("app=1") && !value.contains("labweaver"))
+    );
+
+    let cross_ws = fixture.websocket_request(
+        &fixture.runtime_b,
+        fixture.grant_b,
+        &cookie_a,
+        "runtime.test.v1",
+    )?;
+    fixture
+        .assert_websocket_denied(
+            cross_ws,
+            StatusCode::FORBIDDEN,
+            "LW_ACCESS_RUNTIME_CAPABILITY_REJECTED",
+        )
+        .await?;
+    let cancel = fixture
+        .client
+        .get(target(&fixture.runtime, fixture.grant, "/cancel"))
+        .send()
+        .await?;
+    let mut cancel_stream = cancel.bytes_stream();
+    assert_eq!(
+        cancel_stream.next().await.ok_or("cancel probe ended")??,
+        Bytes::from_static(b"first")
+    );
+    drop(cancel_stream);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if fixture
+                .upstream
+                .lock()
+                .await
+                .iter()
+                .any(|entry| entry["cancelled"] == true)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+
+    sqlx::query("UPDATE access.access_grants g SET state='revoked',revision=revision+1,revoked_at=now(),reason_code='fixture_revoke',updated_at=now() FROM access.endpoint_grants eg WHERE eg.grant_id=g.grant_id AND eg.endpoint_grant_id=$1")
+        .bind(fixture.grant.as_uuid())
+        .execute(&fixture.state.pool)
+        .await?;
+    let ws_closed = tokio::time::timeout(std::time::Duration::from_secs(7), ws.next()).await?;
+    assert!(ws_closed.is_none_or(|result| result.is_err()));
+    let sse_closed =
+        tokio::time::timeout(std::time::Duration::from_secs(7), sse_stream.next()).await?;
+    assert!(sse_closed.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_long_connections_recheck_capability_and_session() -> Result<(), Box<dyn Error>> {
+    for change in ["capability", "session", "logout"] {
+        let fixture = Box::pin(RuntimeFixture::new()).await?;
+        let handoff = fixture.handoff(fixture.grant).await?;
+        assert_eq!(
+            handoff.exchange(&fixture.client).send().await?.status(),
+            StatusCode::SEE_OTHER
+        );
+        let request = fixture.websocket_request(
+            &fixture.runtime,
+            fixture.grant,
+            &fixture.runtime_cookie(fixture.grant)?,
+            "runtime.test.v1",
+        )?;
+        let (mut ws, _) = fixture.websocket(request).await?;
+        ws.send(WsMessage::Text("ready".into())).await?;
+        assert_eq!(
+            ws.next().await.ok_or("WS closed before revocation")??,
+            WsMessage::Text("ready".into())
+        );
+        let sse = fixture
+            .client
+            .get(format!("{}/connect/{}/sse", fixture.runtime, fixture.grant))
+            .send()
+            .await?;
+        let mut sse = sse.bytes_stream();
+        assert_eq!(
+            sse.next().await.ok_or("SSE closed before revocation")??,
+            Bytes::from_static(b"data: first\n\n")
+        );
+        match change {
+            "capability" => {
+                sqlx::query("UPDATE access.runtime_capabilities SET issued_at=now()-interval '10 minutes',handoff_expires_at=now()-interval '9 minutes 30 seconds',expires_at=now()-interval '5 minutes' WHERE consumed_at IS NOT NULL").execute(&fixture.state.pool).await?;
+            }
+            "session" => {
+                sqlx::query("UPDATE access.bff_sessions SET revoked_at=now() WHERE session_id=$1")
+                    .bind(fixture.bff.session_id)
+                    .execute(&fixture.state.pool)
+                    .await?;
+            }
+            "logout" => {
+                let response = fixture
+                    .client
+                    .post(format!("{}/auth/logout", fixture.portal))
+                    .header(header::ORIGIN, &fixture.portal)
+                    .header("X-CSRF-Token", fixture.bff.csrf_token.expose())
+                    .send()
+                    .await?;
+                assert_eq!(response.status(), StatusCode::OK);
+            }
+            _ => unreachable!(),
+        }
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(8), ws.next()).await?;
+        assert!(
+            closed.is_none_or(|message| message.is_err()),
+            "WS survived {change}"
+        );
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(8), sse.next()).await?;
+        assert!(closed.is_none(), "SSE survived {change}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_websocket_cross_grant_denial_is_http_not_tls() -> Result<(), Box<dyn Error>> {
+    let fixture = Box::pin(RuntimeFixture::new()).await?;
+    let handoff = fixture.handoff(fixture.grant).await?;
+    assert_eq!(
+        handoff.exchange(&fixture.client).send().await?.status(),
+        StatusCode::SEE_OTHER
+    );
+    let cookie = fixture.runtime_cookie(fixture.grant)?;
+    let allowed =
+        fixture.websocket_request(&fixture.runtime, fixture.grant, &cookie, "runtime.test.v1")?;
+    let (mut ws, _) = fixture.websocket(allowed).await?;
+    ws.send(WsMessage::Text("allowed".into())).await?;
+    assert_eq!(
+        ws.next().await.ok_or("positive WS failed")??,
+        WsMessage::Text("allowed".into())
+    );
+    let denied = fixture.websocket_request(
+        &fixture.runtime_b,
+        fixture.grant_b,
+        &cookie,
+        "runtime.test.v1",
+    )?;
+    fixture
+        .assert_websocket_denied(
+            denied,
+            StatusCode::FORBIDDEN,
+            "LW_ACCESS_RUNTIME_CAPABILITY_REJECTED",
+        )
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_websocket_rejects_unsupported_protocol_before_upgrade()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Box::pin(RuntimeFixture::new()).await?;
+    let handoff = fixture.handoff(fixture.grant).await?;
+    assert_eq!(
+        handoff.exchange(&fixture.client).send().await?.status(),
+        StatusCode::SEE_OTHER
+    );
+    let request = fixture.websocket_request(
+        &fixture.runtime,
+        fixture.grant,
+        &fixture.runtime_cookie(fixture.grant)?,
+        "unsupported.v1, unsupported.v2",
+    )?;
+    let error = fixture
+        .websocket(request)
+        .await
+        .err()
+        .ok_or("unsupported protocol upgraded")?;
+    let Some(tungstenite::Error::Http(response)) = error.downcast_ref::<tungstenite::Error>()
+    else {
+        return Err(
+            format!("unsupported protocol failed after downstream upgrade: {error}").into(),
+        );
+    };
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_websocket_requires_and_rechecks_edit() -> Result<(), Box<dyn Error>> {
+    let fixture = Box::pin(RuntimeFixture::new()).await?;
+    let handoff = fixture.handoff(fixture.grant).await?;
+    assert_eq!(
+        handoff.exchange(&fixture.client).send().await?.status(),
+        StatusCode::SEE_OTHER
+    );
+    sqlx::query("UPDATE control.project_memberships SET object_role='viewer'")
+        .execute(&fixture.state.pool)
+        .await?;
+    let request = fixture.websocket_request(
+        &fixture.runtime,
+        fixture.grant,
+        &fixture.runtime_cookie(fixture.grant)?,
+        "runtime.test.v1",
+    )?;
+    fixture
+        .assert_websocket_denied(request, StatusCode::FORBIDDEN, "LW_AUTH_SCOPE_DENIED")
+        .await?;
+    sqlx::query("UPDATE control.project_memberships SET object_role='editor'")
+        .execute(&fixture.state.pool)
+        .await?;
+    let request = fixture.websocket_request(
+        &fixture.runtime,
+        fixture.grant,
+        &fixture.runtime_cookie(fixture.grant)?,
+        "runtime.test.v1",
+    )?;
+    let (mut ws, _) = fixture.websocket(request).await?;
+    ws.send(WsMessage::Text("write allowed".into())).await?;
+    assert_eq!(
+        ws.next().await.ok_or("WS closed before downgrade")??,
+        WsMessage::Text("write allowed".into())
+    );
+    sqlx::query("UPDATE control.project_memberships SET object_role='viewer'")
+        .execute(&fixture.state.pool)
+        .await?;
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(8), ws.next()).await?;
+    assert!(
+        closed.is_none_or(|message| message.is_err()),
+        "WS survived editor to viewer downgrade"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_revocation_supervision_survives_backpressure_and_authority_stall()
+-> Result<(), Box<dyn Error>> {
+    for failure in ["revoked", "authority_stall"] {
+        let fixture = Box::pin(RuntimeFixture::new()).await?;
+        let handoff = fixture.handoff(fixture.grant).await?;
+        assert_eq!(
+            handoff.exchange(&fixture.client).send().await?.status(),
+            StatusCode::SEE_OTHER
+        );
+        let cookie = fixture.runtime_cookie(fixture.grant)?;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::HOST,
+            Url::parse(&fixture.runtime)?.authority().parse()?,
+        );
+        headers.insert(header::COOKIE, cookie.parse()?);
+        // Never poll this body: supervision must not depend on downstream demand.
+        let body = proxy::forward_runtime(
+            State(Arc::clone(&fixture.state)),
+            Method::GET,
+            format!("/connect/{}/flood", fixture.grant).parse()?,
+            headers,
+            Bytes::new(),
+        )
+        .await
+        .map_err(|error| std::io::Error::other(error.diagnostic))?;
+        assert_eq!(body.status(), StatusCode::OK);
+        let mut request = fixture.websocket_request(
+            &fixture.runtime,
+            fixture.grant,
+            &cookie,
+            "runtime.test.v1",
+        )?;
+        *request.uri_mut() = format!("{}&flood=true", request.uri()).parse()?;
+        let (ws, _) = fixture.websocket(request).await?;
+        // Leave the browser unread until both forwarding directions encounter backpressure.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let mut lock = fixture.state.pool.begin().await?;
+        if failure == "authority_stall" {
+            sqlx::query("LOCK TABLE access.runtime_capabilities IN ACCESS EXCLUSIVE MODE")
+                .execute(&mut *lock)
+                .await?;
+        } else {
+            sqlx::query("UPDATE access.bff_sessions SET revoked_at=now() WHERE session_id=$1")
+                .bind(fixture.bff.session_id)
+                .execute(&fixture.state.pool)
+                .await?;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            loop {
+                let entries = fixture.upstream.lock().await;
+                let http_closed = entries.iter().any(|entry| entry["floodCancelled"] == true);
+                let ws_closed = entries.iter().any(|entry| entry["wsClosed"] == true);
+                drop(entries);
+                if http_closed && ws_closed {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .map_err(|error| {
+            format!("{failure}: upstream remained open under backpressure: {error}")
+        })?;
+        lock.rollback().await?;
+        drop(body);
+        drop(ws);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_revocation_interrupts_blocked_browser_write() -> Result<(), Box<dyn Error>> {
+    let fixture = Box::pin(RuntimeFixture::new()).await?;
+    let handoff = fixture.handoff(fixture.grant).await?;
+    assert_eq!(
+        handoff.exchange(&fixture.client).send().await?.status(),
+        StatusCode::SEE_OTHER
+    );
+    let mut request = fixture.websocket_request(
+        &fixture.runtime,
+        fixture.grant,
+        &fixture.runtime_cookie(fixture.grant)?,
+        "runtime.test.v1",
+    )?;
+    *request.uri_mut() = format!("{}&stall=true", request.uri()).parse()?;
+    let (mut ws, _) = fixture.websocket(request).await?;
+    let mut writer = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        loop {
+            if let Err(error) = ws
+                .send(WsMessage::Binary(Bytes::from_static(&FLOOD_CHUNK)))
+                .await
+            {
+                return error;
+            }
+        }
+    }));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        !writer.is_finished(),
+        "application must still be withholding reads"
+    );
+    sqlx::query("UPDATE access.bff_sessions SET revoked_at=now() WHERE session_id=$1")
+        .bind(fixture.bff.session_id)
+        .execute(&fixture.state.pool)
+        .await?;
+    // A stalled upstream must not keep the browser's pending write alive.
+    tokio::time::timeout(std::time::Duration::from_secs(8), &mut writer).await??;
     Ok(())
 }
 
