@@ -799,7 +799,7 @@ impl KubernetesContainerExecutor {
             {
                 Some(target) => Ok(ProviderOutcome::CleanupTarget(target)),
                 None => self
-                    .write_cleanup_evidence(fence, plan)
+                    .write_cleanup_evidence(fence, plan, None)
                     .await
                     .map(ProviderOutcome::Completed),
             };
@@ -813,14 +813,14 @@ impl KubernetesContainerExecutor {
         if target.retain_disk {
             self.delete_work_objects(fence, plan, target).await?;
             return self
-                .write_cleanup_evidence(fence, plan)
+                .write_cleanup_evidence(fence, plan, Some(target))
                 .await
                 .map(ProviderOutcome::Completed);
         }
         if plan.namespace_uid.is_some() {
             self.delete_work_objects(fence, plan, target).await?;
             return self
-                .write_cleanup_evidence(fence, plan)
+                .write_cleanup_evidence(fence, plan, Some(target))
                 .await
                 .map(ProviderOutcome::Completed);
         }
@@ -833,7 +833,7 @@ impl KubernetesContainerExecutor {
             None,
         )
         .await?;
-        self.write_cleanup_evidence(fence, plan)
+        self.write_cleanup_evidence(fence, plan, Some(target))
             .await
             .map(ProviderOutcome::Completed)
     }
@@ -1166,6 +1166,7 @@ impl KubernetesContainerExecutor {
         &self,
         fence: &ContainerBackendFence,
         plan: &ContainerResourcePlan,
+        target: Option<&EnvironmentCleanupTarget>,
     ) -> Result<ArtifactRef, ProviderFailure> {
         let now = timestamp()?;
         let document = json!({
@@ -1176,9 +1177,11 @@ impl KubernetesContainerExecutor {
             "operationGeneration":fence.operation_generation,
             "requestId":fence.request_id,
             "planSha256":plan.plan_sha256,
-            "namespaceAbsent":plan.namespace_uid.is_none(),
-            "namespaceRetained":plan.namespace_uid.is_some(),
-            "workObjectsAbsent":true,
+            "namespaceAbsent":plan.namespace_uid.is_none() && target.is_none_or(|target| !target.retain_disk),
+            "namespaceRetained":plan.namespace_uid.is_some() || target.is_some_and(|target| target.retain_disk),
+            "workObjectsAbsent":target.is_none_or(|target| !target.retain_disk || target.purge_disk),
+            "computeRetired":true,
+            "storagePurged":target.is_none_or(|target| !target.retain_disk || target.purge_disk),
             "observedAt":now,
         });
         self.store_cleanup_document(plan.environment_id, fence.request_id, now, document)
@@ -1191,6 +1194,28 @@ impl KubernetesContainerExecutor {
         permit: &crate::KubeVirtExecutionPermit,
     ) -> Result<(), ProviderFailure> {
         validate_kubevirt_plan(plan)?;
+        if let Some(expected) = plan
+            .resources
+            .iter()
+            .find(|resource| resource.kind == "DataVolume")
+            .and_then(|resource| {
+                resource
+                    .document
+                    .pointer("/metadata/annotations/labweaver.io~1retained-pvc-uid")
+            })
+        {
+            let pvc = self
+                .get_json(
+                    "PersistentVolumeClaim",
+                    &plan.namespace,
+                    &plan.data_volume_name,
+                )
+                .await?
+                .ok_or_else(rejected)?;
+            if pvc.pointer("/metadata/uid") != Some(expected) {
+                return Err(rejected());
+            }
+        }
         let vm_vgpu_licensing = vm_vgpu_licensing_configuration(plan)?;
         let namespace_resource = plan
             .resources
@@ -1360,6 +1385,34 @@ impl KubernetesContainerExecutor {
         permit: &crate::KubeVirtExecutionPermit,
     ) -> Result<(), ProviderFailure> {
         validate_kubevirt_resource(plan, resource)?;
+        let mut document = resource.document.clone();
+        if let Some(expected) = document.pointer("/metadata/uid") {
+            let current = self
+                .get_json(&resource.kind, &plan.namespace, &resource.name)
+                .await?
+                .ok_or_else(rejected)?;
+            let project_id = document
+                .pointer("/metadata/labels/labweaver.io~1project-id")
+                .and_then(Value::as_str)
+                .ok_or_else(rejected)?
+                .parse()
+                .map_err(|_| rejected())?;
+            verify_owned_identity(
+                &current,
+                &resource.name,
+                Some(&plan.namespace),
+                plan.environment_id,
+                project_id,
+            )?;
+            if current.pointer("/metadata/uid") != Some(expected) {
+                return Err(rejected());
+            }
+            document["metadata"]["resourceVersion"] = current
+                .pointer("/metadata/resourceVersion")
+                .filter(|value| value.as_str().is_some_and(|value| !value.is_empty()))
+                .ok_or_else(invalid_observation)?
+                .clone();
+        }
         let url = self.kubevirt_resource_url(resource)?;
         let resource_id = format!(
             "{}/{}/{}",
@@ -1377,7 +1430,7 @@ impl KubernetesContainerExecutor {
                     .request(Method::PATCH, url)
                     .query(&[("fieldManager", FIELD_MANAGER), ("force", "false")])
                     .header("content-type", "application/apply-patch+yaml")
-                    .body(serde_json::to_vec(&resource.document).map_err(|_| rejected())?),
+                    .body(serde_json::to_vec(&document).map_err(|_| rejected())?),
             )
             .send()
             .await
@@ -1889,7 +1942,7 @@ impl KubernetesContainerExecutor {
                 return Ok(ProviderOutcome::CleanupTarget(target));
             }
             return self
-                .kubevirt_absence_evidence(fence, plan)
+                .kubevirt_absence_evidence(fence, plan, None)
                 .await
                 .map(ProviderOutcome::Completed);
         };
@@ -1901,7 +1954,7 @@ impl KubernetesContainerExecutor {
             self.retire_or_purge_kubevirt_disk(fence, plan, permit, target)
                 .await?;
             return self
-                .kubevirt_absence_evidence(fence, plan)
+                .kubevirt_absence_evidence(fence, plan, Some(target))
                 .await
                 .map(ProviderOutcome::Completed);
         }
@@ -1914,7 +1967,7 @@ impl KubernetesContainerExecutor {
             Some(permit),
         )
         .await?;
-        self.kubevirt_absence_evidence(fence, plan)
+        self.kubevirt_absence_evidence(fence, plan, Some(target))
             .await
             .map(ProviderOutcome::Completed)
     }
@@ -1986,6 +2039,7 @@ impl KubernetesContainerExecutor {
         &self,
         fence: &KubeVirtBackendFence,
         plan: &KubeVirtCleanupPlan,
+        target: Option<&EnvironmentCleanupTarget>,
     ) -> Result<ArtifactRef, ProviderFailure> {
         let now = timestamp()?;
         let document = json!({
@@ -1997,7 +2051,10 @@ impl KubernetesContainerExecutor {
             "environmentGeneration":fence.environment_generation,
             "requestId":fence.request_id,
             "planSha256":plan.plan_sha256,
-            "namespaceAbsent":true,
+            "namespaceAbsent":target.is_none_or(|target| !target.retain_disk),
+            "namespaceRetained":target.is_some_and(|target| target.retain_disk),
+            "computeRetired":true,
+            "storagePurged":target.is_none_or(|target| !target.retain_disk || target.purge_disk),
             "observedAt":now,
         });
         self.store_cleanup_document(plan.environment_id, fence.request_id, now, document)

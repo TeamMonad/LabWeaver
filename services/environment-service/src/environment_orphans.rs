@@ -325,6 +325,15 @@ fn object_owner(
 }
 
 fn classify_instance(instance: &EnvironmentInstance) -> OrphanDecision {
+    if instance.disk_retention.as_ref().is_some_and(|disk| {
+        matches!(
+            disk.state,
+            contracts::environment::EnvironmentDiskState::Retained
+                | contracts::environment::EnvironmentDiskState::Restored
+        )
+    }) {
+        return OrphanDecision::Referenced;
+    }
     if instance.desired_state != DesiredEnvironmentState::Deleted {
         return OrphanDecision::Referenced;
     }

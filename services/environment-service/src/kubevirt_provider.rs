@@ -2858,6 +2858,30 @@ where
                 }),
             ));
         }
+        if let Some(target) = &instance.operation.cleanup_target
+            && instance.disk_retention.as_ref().is_some_and(|disk| {
+                disk.state == contracts::environment::EnvironmentDiskState::Restored
+            })
+        {
+            let pvc = target
+                .objects
+                .iter()
+                .find(|object| object.resource == "persistentvolumeclaims")
+                .ok_or(ReleaseProjectionError::IdentityMismatch)?;
+            let data_volume = documents
+                .iter_mut()
+                .find(|resource| resource.kind == "DataVolume")
+                .ok_or(ReleaseProjectionError::IdentityMismatch)?;
+            data_volume.document["metadata"]["annotations"]["labweaver.io/retained-pvc-uid"] =
+                json!(pvc.uid);
+            if let Some(original) = target
+                .objects
+                .iter()
+                .find(|object| object.resource == "datavolumes")
+            {
+                data_volume.document["metadata"]["uid"] = json!(original.uid);
+            }
+        }
         let plan_sha256 = canonical_hash(&json!({
             "environmentId": instance.id,
             "releaseId": projection.release.id,

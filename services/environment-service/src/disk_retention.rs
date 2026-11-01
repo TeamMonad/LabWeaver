@@ -10,6 +10,24 @@ pub(crate) fn record_disk_observation(
     if instance.observed_state != ObservedEnvironmentState::Deleted {
         return Ok(());
     }
+    if instance
+        .disk_retention
+        .as_ref()
+        .is_some_and(|disk| disk.state == EnvironmentDiskState::Retiring)
+        && instance
+            .operation
+            .cleanup_target
+            .as_ref()
+            .is_none_or(|target| {
+                !target
+                    .objects
+                    .iter()
+                    .any(|object| object.resource == "persistentvolumeclaims")
+            })
+    {
+        // Explicit provider absence is not a seven-day allocation or a made-up storage meter.
+        instance.disk_retention = None;
+    }
     if let Some(disk) = &mut instance.disk_retention {
         match disk.state {
             EnvironmentDiskState::Retiring => {

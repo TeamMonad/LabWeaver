@@ -1921,7 +1921,12 @@ impl EnvironmentInstance {
         }
         if self.resource_reservation_released
             && (self.class != EnvironmentClass::Experiment
-                || self.observed_state != ObservedEnvironmentState::Deleted)
+                || !(self.observed_state == ObservedEnvironmentState::Deleted
+                    || self.observed_state == ObservedEnvironmentState::Stopped
+                        && self
+                            .disk_retention
+                            .as_ref()
+                            .is_some_and(|disk| disk.state == EnvironmentDiskState::Restored)))
         {
             return Err(EnvironmentError::InvalidAggregate);
         }

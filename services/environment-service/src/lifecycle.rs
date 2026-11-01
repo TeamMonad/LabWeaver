@@ -33,6 +33,12 @@ pub enum LifecycleError {
     ProviderStepOverflow,
     #[error("LW_ENVIRONMENT_COMMAND_INVALID")]
     CommandInvalid,
+    #[error("LW_ENVIRONMENT_DISK_NOT_RETAINED")]
+    DiskNotRetained,
+    #[error("LW_ENVIRONMENT_DISK_RETENTION_EXPIRED")]
+    DiskRetentionExpired,
+    #[error("LW_ENVIRONMENT_DISK_PURGE_NOT_DUE")]
+    DiskPurgeNotDue,
     #[error("LW_ENVIRONMENT_OPERATION_ACTIVE")]
     OperationActive,
     #[error("LW_ENVIRONMENT_OPERATION_MISMATCH")]
@@ -125,14 +131,17 @@ pub fn plan_command_authorized(
         let retention = current
             .disk_retention
             .as_ref()
-            .ok_or(LifecycleError::CommandInvalid)?;
-        if retention.state != EnvironmentDiskState::Retained
-            || (command.kind == EnvironmentOperationKind::Restore
-                && authority_now >= retention.expires_at)
-            || (command.kind == EnvironmentOperationKind::Purge
-                && authority_now < retention.expires_at)
+            .ok_or(LifecycleError::DiskNotRetained)?;
+        if retention.state != EnvironmentDiskState::Retained {
+            return Err(LifecycleError::DiskNotRetained);
+        }
+        if command.kind == EnvironmentOperationKind::Restore
+            && authority_now >= retention.expires_at
         {
-            return Err(LifecycleError::CommandInvalid);
+            return Err(LifecycleError::DiskRetentionExpired);
+        }
+        if command.kind == EnvironmentOperationKind::Purge && authority_now < retention.expires_at {
+            return Err(LifecycleError::DiskPurgeNotDue);
         }
     }
     if current.id != command.environment_id || current.revision != command.expected_revision {
@@ -326,7 +335,11 @@ pub fn plan_command_authorized(
                 EnvironmentOperationKind::Delete | EnvironmentOperationKind::Expire
             )) {
             current.operation.cleanup_target.clone().map(|mut target| {
-                target.purge_disk = command.kind == EnvironmentOperationKind::Purge;
+                target.purge_disk = command.kind == EnvironmentOperationKind::Purge
+                    || current
+                        .disk_retention
+                        .as_ref()
+                        .is_some_and(|disk| disk.state == EnvironmentDiskState::Purging);
                 target
             })
         } else {

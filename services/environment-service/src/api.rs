@@ -1600,6 +1600,11 @@ impl EnvironmentApiError {
                 | EnvironmentStoreError::IdempotencyInProgress
                 | EnvironmentStoreError::Lifecycle(crate::LifecycleError::OperationActive),
             )
+            | Self::Store(EnvironmentStoreError::Lifecycle(
+                crate::LifecycleError::DiskNotRetained
+                | crate::LifecycleError::DiskRetentionExpired
+                | crate::LifecycleError::DiskPurgeNotDue,
+            ))
             | Self::Messaging(NatsMessagingError::LeaseNotActive) => StatusCode::CONFLICT,
             _ => StatusCode::SERVICE_UNAVAILABLE,
         }
@@ -1610,6 +1615,27 @@ impl IntoResponse for EnvironmentApiError {
     fn into_response(self) -> Response {
         if let Self::Store(EnvironmentStoreError::TemplateUpgrade(error)) = &self {
             return template_upgrade_problem(error);
+        }
+        if let Self::Store(EnvironmentStoreError::Lifecycle(error)) = &self {
+            let detail = match error {
+                crate::LifecycleError::DiskNotRetained => {
+                    Some("磁盘不在可恢复的保留状态；已经清除的磁盘不能恢复。")
+                }
+                crate::LifecycleError::DiskRetentionExpired => {
+                    Some("七天磁盘保留期已结束，不能恢复。")
+                }
+                crate::LifecycleError::DiskPurgeNotDue => Some("磁盘保留期尚未结束，不能清除。"),
+                _ => None,
+            };
+            if let Some(detail) = detail {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(
+                        serde_json::json!({"diagnosticCode": error.to_string(), "detail": detail}),
+                    ),
+                )
+                    .into_response();
+            }
         }
         if let Self::RuntimeAdmission(crate::RuntimeAdmissionError::StorageHealth(error)) = &self {
             return (
