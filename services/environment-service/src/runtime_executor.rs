@@ -329,7 +329,7 @@ impl KubernetesContainerExecutor {
         validate_resource(plan, resource)?;
         let mut guarded_document = resource.document.clone();
         let mut create_url = None;
-        if plan.namespace_uid.is_some() || resource.kind == "PersistentVolumeClaim" {
+        if plan.namespace_uid.is_some() || resource.document.pointer("/metadata/uid").is_some() {
             self.verify_container_namespace(plan).await?;
             if let Some(current) = self
                 .get_json(&resource.kind, &plan.namespace, &resource.name)

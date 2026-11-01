@@ -162,10 +162,6 @@ pub fn environment_api_router(state: EnvironmentApiState) -> Router {
             post(recover_environment),
         )
         .route(
-            "/api/v1/environments/{environment_id}/restore",
-            post(restore_environment),
-        )
-        .route(
             "/api/v1/environments/{environment_id}",
             axum::routing::delete(delete_environment),
         )
@@ -1010,12 +1006,6 @@ lifecycle_handler!(
     Some("environment_deleted"),
     false
 );
-lifecycle_handler!(
-    restore_environment,
-    EnvironmentOperationKind::Restore,
-    Some("environment_restored"),
-    true
-);
 
 async fn reset_environment(
     State(state): State<EnvironmentApiState>,
@@ -1073,12 +1063,40 @@ async fn recover_environment(
     headers: HeaderMap,
 ) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
     require_access_bff(caller)?;
+    require_session(&headers)?;
+    let actor_id = actor(&headers)?;
+    let key = idempotency_key(&headers)?;
+    let expected_revision = if_match(&headers)?;
+    let instance = load_owned(&state, environment_id, actor_id).await?;
+    // An old restore receipt remains replayable after a later generation has started.
+    if let Some(receipt) = state
+        .store
+        .lookup_api_lifecycle_replay(
+            key.as_str(),
+            environment_id,
+            EnvironmentOperationKind::Restore,
+            expected_revision,
+            actor_id,
+            true,
+            None,
+        )
+        .await?
+    {
+        return Ok((StatusCode::ACCEPTED, Json(receipt)));
+    }
+    let restoring = instance.desired_state
+        == contracts::environment::DesiredEnvironmentState::Deleted
+        && instance.disk_retention.is_some();
     accept_lifecycle(
         &state,
         environment_id,
         &headers,
-        EnvironmentOperationKind::Recover,
-        None,
+        if restoring {
+            EnvironmentOperationKind::Restore
+        } else {
+            EnvironmentOperationKind::Recover
+        },
+        restoring.then_some("environment_restored"),
         true,
         context.trace_id(),
         None,

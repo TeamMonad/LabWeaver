@@ -59,13 +59,19 @@ async fn retained() -> TestResult<Context> {
         accepted
     );
     context.pin().await?;
-    assert!(matches!(
-        context
-            .worker(context.executor.clone())?
-            .run_once("retire", context.store.current_time().await?)
-            .await?,
-        crate::ReconcileWorkerOutcome::Advanced { terminal: true, .. }
-    ));
+    let outcome = context
+        .worker(context.executor.clone())?
+        .run_once("retire", context.store.current_time().await?)
+        .await?;
+    assert!(
+        matches!(
+            outcome,
+            crate::ReconcileWorkerOutcome::Advanced { terminal: true, .. }
+        ),
+        "retirement outcome: {outcome:?}; aggregate: {:?}; Kubernetes: {:?}",
+        context.store.load(current.id).await?,
+        context.mock.events.lock().await
+    );
     let retained = context.store.load(current.id).await?;
     assert_eq!(
         retained.disk_retention.as_ref().ok_or("retention")?.state,
