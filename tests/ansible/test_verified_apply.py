@@ -107,7 +107,7 @@ class VerifiedApplyBundleTests(unittest.TestCase):
         (work / "client-secrets.json").write_text(json.dumps(clients))
         (work / "database-passwords.json").write_text(json.dumps({name + "-service": name + "-password" for name in ("access", "agent", "control", "environment", "evaluation", "resource")}))
         for name in ("ssh_host_ed25519_key", "target_key", "target_key.pub", "target_key-cert.pub"):
-            (work / name).write_bytes(name.encode())
+            (work / name).write_bytes(("synthetic-ssh-material-" + fixtures.hashlib.sha256(name.encode()).hexdigest()).encode())
         defaults = yaml.safe_load(fixtures.bundle.WORKLOADS_FILE.read_bytes())
         images = {name: "registry.local/" + name + "@sha256:" + "a" * 64 for name in defaults["images"]}
         images["evaluation_runner"] = "registry.local/runner@sha256:" + "a" * 64
