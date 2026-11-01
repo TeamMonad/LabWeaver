@@ -480,7 +480,6 @@ impl Reconciler {
     ) -> Result<ProviderOutcome<ProviderObservation>, ReconcileError> {
         let action = next_action(instance, now)?;
         if action == ReconcileAction::Cleanup
-            && instance.operation.cleanup_target.is_none()
             && instance.operation.cleanup_protocol_version
                 != Some(contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION)
         {

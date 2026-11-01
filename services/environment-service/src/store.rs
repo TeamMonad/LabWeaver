@@ -51,9 +51,9 @@ pub(crate) async fn cleanup_target_matches(
     let Ok(generation) = i64::try_from(generation) else {
         return Ok(false);
     };
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM environment.environment_instances WHERE environment_id=$1 AND generation=$2 AND contract->'operation'->>'id'=$3 AND contract->'operation'->'cleanupTarget'=$4 AND desired_state='deleted' AND observed_state='deleting')")
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM environment.environment_instances WHERE environment_id=$1 AND generation=$2 AND contract->'operation'->>'id'=$3 AND contract->'operation'->'cleanupTarget'=$4 AND contract->'operation'->>'cleanupProtocolVersion'=$5 AND desired_state='deleted' AND observed_state='deleting')")
         .bind(environment_id.as_uuid()).bind(generation).bind(operation_id.to_string())
-        .bind(sqlx::types::Json(target)).fetch_one(&mut **transaction).await
+        .bind(sqlx::types::Json(target)).bind(contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION.to_string()).fetch_one(&mut **transaction).await
 }
 
 /// One operation and aggregate reserved by a reconciler worker lease.

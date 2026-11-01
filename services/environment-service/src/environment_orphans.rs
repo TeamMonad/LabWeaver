@@ -352,7 +352,7 @@ fn classify_instance(instance: &EnvironmentInstance) -> OrphanDecision {
         && instance.endpoints.is_empty()
         && instance.operation.access_revocation_revision.is_some()
         && instance.operation.cleanup_target.is_some()
-        && !instance.operation.preserve_mutable_disk
+        && (!instance.operation.preserve_mutable_disk || instance.disk_retention.is_some())
     {
         OrphanDecision::Recovering
     } else {

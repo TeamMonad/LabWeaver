@@ -121,9 +121,11 @@ Orphan 传播删除该盘的原 DataVolume，再按 PVC UID/resourceVersion 清�
 未知读取或旧代次都不能授权删除。完成后保留 `purgedAt`、计算退役事实和操作历史；不删除 Resource 账本、
 Evaluation 成绩或其他磁盘。取消未完成的初次创建仍走原取消清理，不等于用户 Delete。
 
+清理协议版本为 2：UID checkpoint 同时固定保盘/清盘权限。旧协议仍在执行的清理不会被继续采用或重新绑定新 UID，保持可诊断失败；升级前应在原版本收尾旧操作，不能用删除 namespace 来绕过盘身份检查。
+
 普通 Delete 与欠费/租约回收后的七天保留都由平台承担，实际占用以 `environment.retained_disk_usage` 独立保存
 字节数及毫秒时间边界；保留段不发送到旧项目用量/compute hold。超过到期但物理清盘尚未完成的占用仍保留，
-不能伪造成零。恢复或实际清盘关闭该段。全写通道只读阻断与导出不在此切片，不能从停止计算推定这些能力已完成。
+不能伪造成零。恢复到 Stopped 不延长七天窗口，也不关闭实际存储记录；只有取得新资金授权并观测到新代 Ready（`reactivatedAt`）或实际清盘才关闭平台保留段。未重新运行的恢复盘到原期限仍回到清盘流程，不能通过反复恢复/删除延长平台付费窗口。全写通道只读阻断与导出不在此切片，不能从停止计算推定这些能力已完成。
 
 ### Resource #210 消费边界
 
@@ -139,7 +141,7 @@ Resource 消费者必须完成以下事项；本切片不修改 Resource：
 3. 将 `retainedStorageUsage` 按 `(environmentId, startedAt)` 的累计 watermark 去重入账，只处理新增时间段；
    跨费率拆分仍用 Resource 唯一计价逻辑，保存不可变平台成本，不增加项目 Credits spent 或 ResourceBudget.spent，
    不扣旧计算 hold、不新增第二个钱包或计算预占。
-4. `storagePurged=true` 才释放该盘存储容量并关闭保留区间；恢复也关闭平台保留段，但新计算必须取得当前有效资金授权。
+4. `storagePurged=true` 才释放该盘存储容量并关闭保留区间；恢复到 Stopped 不释放盘、不重开窗口。新计算须有当前有效资金授权，首次 Ready/`reactivatedAt` 才结束原平台保留段，转回正常运行计量。
 5. 钱包、budget、平台成本及维度释放在 Resource 原事务中一致更新，覆盖重复消息、丢响应、重启和延迟清盘。
 
 

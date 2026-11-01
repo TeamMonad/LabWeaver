@@ -11,4 +11,6 @@ CREATE TABLE retained_disk_usage (
 );
 CREATE INDEX environment_retained_disk_expiry_idx
     ON environment_instances ((contract->'diskRetention'->>'expiresAt'))
-    WHERE observed_state='deleted' AND contract->'diskRetention'->>'state'='retained';
+    WHERE (observed_state='deleted' AND contract->'diskRetention'->>'state'='retained')
+       OR (observed_state='stopped' AND contract->'diskRetention'->>'state'='restored'
+           AND (contract->'diskRetention'->>'reactivatedAt') IS NULL);

@@ -1696,4 +1696,30 @@ mod tests {
         assert_eq!(deadline.to_string(), "2026-07-19T00:15:00.000Z");
         Ok(())
     }
+
+    #[tokio::test]
+    async fn retention_diagnostics_preserve_conflict_codes_and_readable_details()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use axum::response::IntoResponse;
+        for error in [
+            crate::LifecycleError::DiskNotRetained,
+            crate::LifecycleError::DiskRetentionExpired,
+            crate::LifecycleError::DiskPurgeNotDue,
+        ] {
+            let expected = error.to_string();
+            let response =
+                super::EnvironmentApiError::Store(crate::EnvironmentStoreError::Lifecycle(error))
+                    .into_response();
+            assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+            let bytes = axum::body::to_bytes(response.into_body(), 8192).await?;
+            let body: serde_json::Value = serde_json::from_slice(&bytes)?;
+            assert_eq!(body["diagnosticCode"], expected);
+            assert!(
+                body["detail"]
+                    .as_str()
+                    .is_some_and(|detail| !detail.is_empty())
+            );
+        }
+        Ok(())
+    }
 }

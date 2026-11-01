@@ -63,7 +63,9 @@ fn command(
 }
 
 async fn retained() -> TestResult<Context> {
-    let mut context = Context::start().await?;
+    let mut context =
+        Context::start_runtime_with_funding(contracts::authoring::RuntimeKind::Container, 1, true)
+            .await?;
     attach_real_object_store(&mut context).await?;
     {
         let mut fixture = context
@@ -115,6 +117,28 @@ async fn retained() -> TestResult<Context> {
     );
     let retained = context.store.load(current.id).await?;
     assert_eq!(
+        context
+            .store
+            .accept_command("retention-delete", &delete)
+            .await?,
+        accepted
+    );
+    let status = context.store.load_cleanup_status(current.id).await?;
+    assert!(status.compute_retired);
+    assert!(!status.storage_purged);
+    assert!(
+        !status.cleanup_complete,
+        "Deleted compute is not complete storage cleanup"
+    );
+    let usage = status
+        .retained_storage_usage
+        .ok_or("platform storage usage")?;
+    assert_eq!(
+        usage.storage_bytes,
+        current.approved_resources.storage_bytes
+    );
+    assert!(!usage.closed);
+    assert_eq!(
         retained.disk_retention.as_ref().ok_or("retention")?.state,
         EnvironmentDiskState::Retained
     );
@@ -147,6 +171,12 @@ async fn delete_retained_restore_new_generation_and_idempotent_replays() -> Test
     let context = Box::pin(retained()).await?;
     let before = context.store.load(context.initial.id).await?;
     let window = before.disk_retention.clone().ok_or("retention")?;
+    let mut duplicate_observation = before.clone();
+    crate::disk_retention::record_disk_observation(
+        &mut duplicate_observation,
+        UtcTimestamp::from_utc(window.started_at.get() + time::Duration::days(1))?,
+    )?;
+    assert_eq!(duplicate_observation.disk_retention, Some(window.clone()));
     context
         .worker(context.executor.clone())?
         .run_once("repeat", context.store.current_time().await?)
@@ -234,6 +264,24 @@ async fn expiry_purges_only_target_disk_and_repeated_purge_is_idempotent() -> Te
     let disk = purged.disk_retention.as_ref().ok_or("purge fact")?;
     assert_eq!(disk.state, EnvironmentDiskState::Purged);
     assert!(disk.purged_at.is_some());
+    let status = context.store.load_cleanup_status(before.id).await?;
+    assert!(status.compute_retired && status.storage_purged && status.cleanup_complete);
+    assert!(
+        status
+            .retained_storage_usage
+            .ok_or("closed platform usage")?
+            .closed
+    );
+    let project_deliveries: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM environment.resource_usage_deliveries WHERE environment_id=$1",
+    )
+    .bind(before.id.as_uuid())
+    .fetch_one(&context.pool)
+    .await?;
+    assert_eq!(
+        project_deliveries, 0,
+        "retention must not reuse the project's old compute meter"
+    );
     assert_eq!(
         context.store.accept_command("purge-disk", &purge).await?,
         receipt
@@ -470,5 +518,54 @@ async fn repeated_retirement_cannot_delete_restored_generation() -> TestResult {
     assert!(fixture.objects.contains_key(&path));
     assert!(!fixture.delete_uids.contains(&uuid::Uuid::from_u128(777)));
     assert!(!fixture.delete_uids.contains(&uuid::Uuid::from_u128(44)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn restore_without_new_compute_never_renews_platform_retention() -> TestResult {
+    let context = Box::pin(retained()).await?;
+    let before = context.store.load(context.initial.id).await?;
+    let window = before.disk_retention.clone().ok_or("window")?;
+    let restore = command(
+        &before,
+        EnvironmentOperationKind::Restore,
+        context.store.current_time().await?,
+    )?;
+    context
+        .store
+        .accept_command("restore-no-compute", &restore)
+        .await?;
+    let restored = context.store.load(before.id).await?;
+    let deleted = command(
+        &restored,
+        EnvironmentOperationKind::Delete,
+        context.store.current_time().await?,
+    )?;
+    context
+        .store
+        .accept_command("delete-restored-stopped", &deleted)
+        .await?;
+    Box::pin(context.pin()).await?;
+    context
+        .worker(context.executor.clone())?
+        .run_once("retire-again", context.store.current_time().await?)
+        .await?;
+    let retained_again = context.store.load(before.id).await?;
+    let disk = retained_again
+        .disk_retention
+        .as_ref()
+        .ok_or("same retention")?;
+    assert_eq!(disk.state, EnvironmentDiskState::Retained);
+    assert_eq!(disk.started_at, window.started_at);
+    assert_eq!(disk.expires_at, window.expires_at);
+    assert_eq!(disk.compute_retired_at, window.compute_retired_at);
+    let usage = context
+        .store
+        .load_cleanup_status(before.id)
+        .await?
+        .retained_storage_usage
+        .ok_or("usage")?;
+    assert_eq!(usage.started_at, window.started_at);
+    assert!(!usage.closed);
     Ok(())
 }

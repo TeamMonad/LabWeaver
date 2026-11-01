@@ -199,6 +199,17 @@
             }
           ]
         },
+        "reactivatedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A restored, stopped disk does not restart its retention clock or authorize compute."
+        },
         "restoredGeneration": {
           "format": "uint64",
           "minimum": 0,

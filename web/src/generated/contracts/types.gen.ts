@@ -2633,6 +2633,10 @@ export type EnvironmentDiskRetention = {
     computeRetiredAt?: EnvironmentDetailSchemaUtcTimestamp | null;
     expiresAt: EnvironmentDetailSchemaUtcTimestamp;
     purgedAt?: EnvironmentDetailSchemaUtcTimestamp | null;
+    /**
+     * A restored, stopped disk does not restart its retention clock or authorize compute.
+     */
+    reactivatedAt?: EnvironmentDetailSchemaUtcTimestamp | null;
     restoredGeneration?: number | null;
     retiredGeneration: number;
     startedAt: EnvironmentDetailSchemaUtcTimestamp;
@@ -3137,6 +3141,10 @@ export type EnvironmentInstanceSchemaEnvironmentDiskRetention = {
     computeRetiredAt?: EnvironmentInstanceSchemaUtcTimestamp | null;
     expiresAt: EnvironmentInstanceSchemaUtcTimestamp;
     purgedAt?: EnvironmentInstanceSchemaUtcTimestamp | null;
+    /**
+     * A restored, stopped disk does not restart its retention clock or authorize compute.
+     */
+    reactivatedAt?: EnvironmentInstanceSchemaUtcTimestamp | null;
     restoredGeneration?: number | null;
     retiredGeneration: number;
     startedAt: EnvironmentInstanceSchemaUtcTimestamp;

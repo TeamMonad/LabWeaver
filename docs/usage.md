@@ -195,6 +195,7 @@ ResourceQuota 或 LimitRange，也没有携带计算对象的“稀疏计划”�
 恢复使用现有 SDK `recoverEnvironment` / `POST /api/v1/environments/{environmentId}/recover`，要求所有者权限、
 `Idempotency-Key` 和当前 `If-Match`。保留期内恢复为新代次的已停止实例，不自动启动，也不恢复进程内存或容器临时系统层。
 同一次操作重试沿用原 key；启动前仍须有当前有效的资源批准及资金授权，不能从已释放的旧计算预占取得运行权。
+恢复到已停止状态不会重新赠送七天，也不会取得计算或新的存储付款授权；真正重新运行前，盘仍按原到期时间保留和清理，实际占用继续记录。请在原期限内完成当前资源授权并启动，不要用反复删除/恢复延长保留。
 保留期结束返回 `LW_ENVIRONMENT_DISK_RETENTION_EXPIRED`，已清除或不可恢复返回 `LW_ENVIRONMENT_DISK_NOT_RETAINED`；
 两者均为 HTTP 409，不会创建空白盘来假装恢复成功。后台按同一原盘 UID 清盘，恢复和清盘的并发只有一项能通过版本检查。
 Resource 的按维度容量释放及平台成本消费属于 #210 的独立消费者；在它接入前，不把此 API 的计算退役状态当作钱包或存储容量已结算。

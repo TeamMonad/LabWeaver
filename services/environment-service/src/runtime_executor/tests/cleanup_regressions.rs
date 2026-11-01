@@ -79,6 +79,14 @@ impl Context {
         runtime: contracts::authoring::RuntimeKind,
         max_attempts: u32,
     ) -> TestResult<Self> {
+        Self::start_runtime_with_funding(runtime, max_attempts, false).await
+    }
+
+    async fn start_runtime_with_funding(
+        runtime: contracts::authoring::RuntimeKind,
+        max_attempts: u32,
+        funded: bool,
+    ) -> TestResult<Self> {
         let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(4)
@@ -96,6 +104,9 @@ impl Context {
         initial.runtime_kind = runtime;
         if runtime == contracts::authoring::RuntimeKind::VirtualMachine {
             initial.provider_binding = "kubevirt-primary-v1".to_owned();
+        }
+        if funded {
+            initial = crate::test_support::funded_instance(initial);
         }
         store.create("cleanup-checkpoint-create", &initial).await?;
         store

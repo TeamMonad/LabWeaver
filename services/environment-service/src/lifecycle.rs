@@ -90,7 +90,6 @@ pub(crate) fn validate_cleanup_identity(
     current: &EnvironmentInstance,
 ) -> Result<(), LifecycleError> {
     if current.desired_state == DesiredEnvironmentState::Deleted
-        && current.operation.cleanup_target.is_none()
         && current.operation.cleanup_protocol_version
             != Some(contracts::environment::ENVIRONMENT_CLEANUP_PROTOCOL_VERSION)
         && (current.observed_state == ObservedEnvironmentState::Deleting
@@ -352,7 +351,12 @@ pub fn plan_command_authorized(
             None
         },
         diagnostic_code: None,
-        preserve_mutable_disk: command.preserve_mutable_disk || preserving_upgrade_cancel,
+        preserve_mutable_disk: command.preserve_mutable_disk
+            || preserving_upgrade_cancel
+            || matches!(
+                command.kind,
+                EnvironmentOperationKind::Delete | EnvironmentOperationKind::Expire
+            ),
         access_revocation_revision: command.access_revocation_revision,
         retry_from_phase,
         reset_target: command.reset_target.clone(),

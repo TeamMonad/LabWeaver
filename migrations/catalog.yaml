@@ -136,7 +136,7 @@ domains:
         sha256: 572a02c172d6b4602fb8e5307bbe07ce06074db731f8c8addee938abc206e989
       - id: 10
         file: environment/0010_disk_retention.sql
-        sha256: 3f2cc4636361a9c17059b5f8ce7ad4b3026c3d8d11bad5253aac04f5925b8c95
+        sha256: 53ba580138e4251e896c2c69d7dad30f3c3f025685c6d2fa390c3a406c026e0a
   - name: agent
     migrations:
       - id: 1

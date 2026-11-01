@@ -1365,8 +1365,8 @@ impl EnvironmentCleanupTarget {
     }
 }
 
-/// Version whose destructive calls always require an owner-persisted UID checkpoint first.
-pub const ENVIRONMENT_CLEANUP_PROTOCOL_VERSION: u8 = 1;
+/// Version requiring owner-persisted object UIDs and explicit retain/purge disk authority.
+pub const ENVIRONMENT_CLEANUP_PROTOCOL_VERSION: u8 = 2;
 
 /// Idempotent accepted environment operation.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
