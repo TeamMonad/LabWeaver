@@ -4,6 +4,12 @@
 # kubelet at that runtime and retire the previous one.
 # The `RuntimeClass` half runs on the control plane (see the playbook).
 
+- name: Load the locked gVisor and containerd releases
+  ansible.builtin.set_fact:
+    sandbox_runtime_lock: >-
+      {{ lookup('ansible.builtin.file', labweaver_versions_lock_file | default(playbook_dir ~ '/../../versions.lock.yml'))
+         | from_yaml }}
+
 - name: Require verified sandbox installation identity
   ansible.builtin.assert:
     that:
@@ -26,12 +32,6 @@
       - sandbox_runtime_existing_runtimeclass.resources | length == 0 or
         sandbox_runtime_existing_runtimeclass.resources[0].metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id
     fail_msg: SANDBOX_RUNTIME_OBJECT_OWNERSHIP_CONFLICT
-
-- name: Load the locked gVisor and containerd releases
-  ansible.builtin.set_fact:
-    sandbox_runtime_lock: >-
-      {{ lookup('ansible.builtin.file', labweaver_versions_lock_file | default(playbook_dir ~ '/../../versions.lock.yml'))
-         | from_yaml }}
 
 - name: Require the sandbox runtime inputs
   ansible.builtin.assert:

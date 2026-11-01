@@ -361,6 +361,33 @@ class DiscoveredWipeOwnershipTests(unittest.TestCase):
             WIPE.wipe(api, INSTALLATION, [namespace], 1)
         self.assertEqual(api.attempts, [])
 
+    def test_builtin_default_identity_and_ca_are_bounded_not_name_only_exemptions(self):
+        namespace = obj('Namespace', 'labweaver-system')
+        default = obj('ServiceAccount', 'default', installation=None)
+        cluster_ca = obj('ConfigMap', 'kube-root-ca.crt', 'kube-system', installation=None)
+        cluster_ca['data'] = {'ca.crt': 'reviewed-cluster-public-ca'}
+        local_ca = obj('ConfigMap', 'kube-root-ca.crt', installation=None)
+        local_ca['data'] = copy.deepcopy(cluster_ca['data'])
+        api = KubernetesAPI([namespace, default, cluster_ca, local_ca])
+        self.assertEqual(WIPE.wipe(api, INSTALLATION, [namespace], 1)['deleted'], [path_for(namespace)])
+        for kind in ('default-foreign', 'default-credentials', 'ca-foreign', 'ca-content', 'ca-read-error'):
+            with self.subTest(kind=kind):
+                account, bundle = copy.deepcopy(default), copy.deepcopy(local_ca)
+                if kind == 'default-foreign':
+                    account['metadata']['annotations']['labweaver.io/installation-id'] = 'foreign'
+                elif kind == 'default-credentials':
+                    account['imagePullSecrets'] = [{'name': 'foreign-credential'}]
+                elif kind == 'ca-foreign':
+                    bundle['metadata']['annotations']['labweaver.io/installation-id'] = 'foreign'
+                elif kind == 'ca-content':
+                    bundle['data']['ca.crt'] = 'another-cluster'
+                api = KubernetesAPI([namespace, account, cluster_ca, bundle])
+                if kind == 'ca-read-error':
+                    api.failure_path = path_for(cluster_ca)
+                with self.assertRaises(WIPE.WipeError):
+                    WIPE.wipe(api, INSTALLATION, [namespace], 1)
+                self.assertEqual(api.attempts, [])
+
     def test_check_mode_inspects_all_targets_without_deleting(self):
         namespace, cluster = obj("Namespace", "labweaver-system"), helm_object("ClusterRole")
         api = KubernetesAPI([namespace, cluster, release_storage([cluster])])
@@ -398,7 +425,22 @@ class DiscoveredWipeOwnershipTests(unittest.TestCase):
         requests = []
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_DELETE(self):
-                requests.append((self.path, json.loads(self.rfile.read(int(self.headers['Content-Length'])))))
+                if self.headers.get('Content-Length') is not None:
+                    body = self.rfile.read(int(self.headers['Content-Length']))
+                else:
+                    if self.headers.get('Transfer-Encoding') != 'chunked':
+                        raise ValueError('expected HTTP request body')
+                    body = bytearray()
+                    while True:
+                        length = int(self.rfile.readline().split(b';', 1)[0], 16)
+                        if length == 0:
+                            while self.rfile.readline() != b'\r\n':
+                                pass
+                            break
+                        body.extend(self.rfile.read(length))
+                        if self.rfile.read(2) != b'\r\n':
+                            raise ValueError('invalid HTTP chunk terminator')
+                requests.append((self.path, json.loads(body)))
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()

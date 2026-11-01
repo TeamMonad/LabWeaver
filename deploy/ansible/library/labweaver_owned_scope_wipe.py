@@ -238,13 +238,25 @@ def inspect(client: Kubernetes, installation: str, reviewed: dict) -> dict:
             else:
                 targets[path] = obj
 
+    # The namespace-local default Kubernetes identity is an explicitly bounded
+    # platform target. A same-name account with foreign metadata or additional
+    # credential/runtime settings is not covered by that authorization.
+    default_accounts = {
+        uid for uid, obj in objects.items()
+        if obj['kind'] == 'ServiceAccount' and obj['metadata']['name'] == 'default'
+        and obj['metadata'].get('namespace') in namespaces
+        and not obj['metadata'].get('annotations') and not obj['metadata'].get('labels')
+        and not obj.get('secrets') and not obj.get('imagePullSecrets')
+        and obj.get('automountServiceAccountToken') is None
+    }
+
     def owned(uid: str, visiting: frozenset = frozenset()) -> bool:
         if uid in visiting or uid not in objects:
             return False
         obj = objects[uid]
         metadata = obj["metadata"]
         annotations = metadata.get("annotations", {})
-        if uid in storage or annotations.get("labweaver.io/installation-id") == installation:
+        if uid in storage or uid in default_accounts or annotations.get("labweaver.io/installation-id") == installation:
             return True
         if (locations[uid], annotations.get("meta.helm.sh/release-name"), annotations.get("meta.helm.sh/release-namespace")) in release_roots and metadata.get("labels", {}).get("app.kubernetes.io/managed-by") == "Helm":
             return True
@@ -253,18 +265,18 @@ def inspect(client: Kubernetes, installation: str, reviewed: dict) -> dict:
     root_ca = None
     for uid, obj in objects.items():
         metadata = obj["metadata"]
-        # These are the Kubernetes-created, namespace-local default identity and
-        # public trust bundle, not chart/business objects. The trust bundle is
-        # checked against the actual cluster bundle, never accepted by name only.
-        if obj["kind"] == "ServiceAccount" and metadata["name"] == "default" and metadata.get("namespace") in namespaces:
+        if owned(uid):
             continue
-        if obj["kind"] == "ConfigMap" and metadata["name"] == "kube-root-ca.crt" and metadata.get("namespace") in namespaces:
+        # Verify the Kubernetes-injected public trust bundle against the actual
+        # cluster CA. Extra payload/foreign ownership metadata is never exempt.
+        if (obj['kind'] == 'ConfigMap' and metadata['name'] == 'kube-root-ca.crt' and
+            metadata.get('namespace') in namespaces and not metadata.get('labels') and
+            set(metadata.get('annotations', {})) <= {'kubernetes.io/description'}):
             if root_ca is None:
-                root_ca = client.request("/api/v1/namespaces/kube-system/configmaps/kube-root-ca.crt")
-            if root_ca is not None and obj.get("data") == root_ca.get("data") and set(obj.get("data", {})) == {"ca.crt"} and not obj.get("binaryData"):
+                root_ca = client.request('/api/v1/namespaces/kube-system/configmaps/kube-root-ca.crt')
+            if root_ca is not None and obj.get('data') == root_ca.get('data') and set(obj.get('data', {})) == {'ca.crt'} and not obj.get('binaryData'):
                 continue
-        if not owned(uid):
-            raise WipeError("PLATFORM_WIPE_OBJECT_OWNERSHIP_CONFLICT")
+        raise WipeError('PLATFORM_WIPE_OBJECT_OWNERSHIP_CONFLICT')
 
     volumes = client.listing("/api/v1/persistentvolumes")
     for volume in volumes:

@@ -143,12 +143,12 @@ class InfrastructureCleanupOwnershipTests(unittest.TestCase):
                 for route in variables["public_ingress_routes"]:
                     self.assertIn(("HTTPRoute", route["namespace"], route["name"]), targets)
                 for item in inventory:
+                    if item['kind'] == 'Gateway':
+                        self.assert_gateway_consumer_accepts(item)
                     if item["kind"] in ("Gateway", "HTTPRoute", "Certificate", "ClusterIssuer"):
                         self.assertEqual(item["metadata"]["annotations"]["labweaver.io/installation-id"], INSTALLATION)
                     if item["kind"] == "Certificate":
                         self.assertEqual(item["spec"]["secretTemplate"]["annotations"]["labweaver.io/installation-id"], INSTALLATION)
-                    if item['kind'] == 'Gateway':
-                        self.assert_gateway_consumer_accepts(item)
                 if mode == "acme":
                     self.assertIn(("Secret", "cert-manager", variables["public_ingress_acme_issuer"] + "-account-key"), targets)
                     self.assertIn(("Secret", "cert-manager", variables["public_ingress_cloudflare_secret_name"]), targets)
@@ -160,8 +160,8 @@ class InfrastructureCleanupOwnershipTests(unittest.TestCase):
                 {"labweaver_installation_id": INSTALLATION, "labweaver_namespaces": ["labweaver-demo"], "gateway_vip": "10.0.0.2"})
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             gateway = next(item for item in json.loads(capture.read_text()) if item["kind"] == "Gateway")
-            self.assertEqual(gateway["metadata"]["annotations"]["labweaver.io/installation-id"], INSTALLATION)
             self.assert_gateway_consumer_accepts(gateway)
+            self.assertEqual(gateway["metadata"]["annotations"]["labweaver.io/installation-id"], INSTALLATION)
 
     def test_acme_account_key_has_a_real_producer_and_never_replaces_existing_secret(self):
         source = role_tasks('public_ingress')
