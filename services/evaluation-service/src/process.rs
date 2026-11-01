@@ -857,12 +857,18 @@ mod tests {
 #[cfg(test)]
 mod nats_source_tests {
     #[test]
-    fn evaluation_server_file_is_exclusive_and_read_at_startup() -> Result<(), Box<dyn std::error::Error>> {
+    fn evaluation_server_file_is_exclusive_and_read_at_startup()
+    -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let file = directory.path().join("endpoint");
         std::fs::write(&file, "tls://actual-nats:4222\n")?;
-        let mut value: serde_yaml::Value = serde_yaml::from_str(include_str!("../../../deploy/config/evaluation-service.yaml.example"))?;
-        value["nats"].as_mapping_mut().ok_or("NATS missing")?.remove("server");
+        let mut value: serde_yaml::Value = serde_yaml::from_str(include_str!(
+            "../../../deploy/config/evaluation-service.yaml.example"
+        ))?;
+        value["nats"]
+            .as_mapping_mut()
+            .ok_or("NATS missing")?
+            .remove("server");
         value["nats"]["serverFile"] = file.to_string_lossy().as_ref().into();
         let parsed: super::EvaluationConfiguration = serde_yaml::from_value(value.clone())?;
         assert_eq!(parsed.nats.server, "tls://actual-nats:4222");
@@ -870,7 +876,10 @@ mod nats_source_tests {
         both["nats"]["server"] = "tls://duplicated:4222".into();
         assert!(serde_yaml::from_value::<super::EvaluationConfiguration>(both).is_err());
         let mut neither = value.clone();
-        neither["nats"].as_mapping_mut().ok_or("NATS missing")?.remove("serverFile");
+        neither["nats"]
+            .as_mapping_mut()
+            .ok_or("NATS missing")?
+            .remove("serverFile");
         assert!(serde_yaml::from_value::<super::EvaluationConfiguration>(neither).is_err());
         std::fs::write(&file, " \n")?;
         assert!(serde_yaml::from_value::<super::EvaluationConfiguration>(value.clone()).is_err());

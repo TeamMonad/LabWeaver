@@ -1680,19 +1680,31 @@ seed_images:
 
 #[cfg(test)]
 mod nats_source_tests {
-    fn source_cases<T: serde::de::DeserializeOwned>(example: &str, server: impl Fn(T) -> String) -> Result<(), Box<dyn std::error::Error>> {
+    fn source_cases<T: serde::de::DeserializeOwned>(
+        example: &str,
+        server: impl Fn(T) -> String,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let file = directory.path().join("endpoint");
         std::fs::write(&file, "tls://actual-nats:4222\n")?;
         let mut value: serde_yaml::Value = serde_yaml::from_str(example)?;
-        value["nats"].as_mapping_mut().ok_or("NATS missing")?.remove("server");
+        value["nats"]
+            .as_mapping_mut()
+            .ok_or("NATS missing")?
+            .remove("server");
         value["nats"]["serverFile"] = file.to_string_lossy().as_ref().into();
-        assert_eq!(server(serde_yaml::from_value::<T>(value.clone())?), "tls://actual-nats:4222");
+        assert_eq!(
+            server(serde_yaml::from_value::<T>(value.clone())?),
+            "tls://actual-nats:4222"
+        );
         let mut both = value.clone();
         both["nats"]["server"] = "tls://duplicated:4222".into();
         assert!(serde_yaml::from_value::<T>(both).is_err());
         let mut neither = value.clone();
-        neither["nats"].as_mapping_mut().ok_or("NATS missing")?.remove("serverFile");
+        neither["nats"]
+            .as_mapping_mut()
+            .ok_or("NATS missing")?
+            .remove("serverFile");
         assert!(serde_yaml::from_value::<T>(neither).is_err());
         std::fs::write(&file, " \n")?;
         assert!(serde_yaml::from_value::<T>(value.clone()).is_err());
@@ -1702,12 +1714,20 @@ mod nats_source_tests {
     }
 
     #[test]
-    fn agent_server_file_is_exclusive_and_read_at_startup() -> Result<(), Box<dyn std::error::Error>> {
-        source_cases::<super::DeploymentFile>(include_str!("../../../deploy/config/agent-control-plane.yaml.example"), |v| v.nats.server)
+    fn agent_server_file_is_exclusive_and_read_at_startup() -> Result<(), Box<dyn std::error::Error>>
+    {
+        source_cases::<super::DeploymentFile>(
+            include_str!("../../../deploy/config/agent-control-plane.yaml.example"),
+            |v| v.nats.server,
+        )
     }
 
     #[test]
-    fn build_executor_server_file_is_exclusive_and_read_at_startup() -> Result<(), Box<dyn std::error::Error>> {
-        source_cases::<super::BuildExecutorDeploymentFile>(include_str!("../../../deploy/config/build-executor.yaml.example"), |v| v.nats.server)
+    fn build_executor_server_file_is_exclusive_and_read_at_startup()
+    -> Result<(), Box<dyn std::error::Error>> {
+        source_cases::<super::BuildExecutorDeploymentFile>(
+            include_str!("../../../deploy/config/build-executor.yaml.example"),
+            |v| v.nats.server,
+        )
     }
 }
