@@ -580,36 +580,42 @@ fn resource_response_error(status: StatusCode, body: &[u8]) -> ResourceClientErr
         if code == "LW_RESOURCE_TASK_LEASE_EXPIRED" {
             return ResourceClientError::LeaseExpired;
         }
+        if matches!(
+            status,
+            StatusCode::CONFLICT | StatusCode::PRECONDITION_FAILED
+        ) && let Some(code) = resource_reconciliation_diagnostic(code)
+        {
+            return ResourceClientError::Conflict(code);
+        }
         if let Some(code) = resource_admission_diagnostic(code) {
             return ResourceClientError::Admission(code);
         }
     }
     match status {
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => ResourceClientError::Denied,
-        StatusCode::CONFLICT | StatusCode::PRECONDITION_FAILED => ResourceClientError::Conflict,
+        StatusCode::CONFLICT | StatusCode::PRECONDITION_FAILED => {
+            ResourceClientError::Conflict("LW_TASK_RESOURCE_HTTP_CONFLICT")
+        }
         StatusCode::PAYLOAD_TOO_LARGE => ResourceClientError::RequestTooLarge,
         StatusCode::TOO_MANY_REQUESTS => ResourceClientError::Unavailable,
         status if status.is_server_error() => ResourceClientError::Unavailable,
         _ => ResourceClientError::Rejected,
     }
 }
-/// Returns only stable admission diagnostics known to the Resource API; response bodies are never
-/// propagated beyond this allowlist.
+/// Returns only definitive admission/validation rejections known to the Resource API.
+/// Idempotency, state, revision, credit replay and settlement conflicts are deliberately excluded:
+/// the lifecycle must read back authoritative state before deciding whether the operation failed.
 #[must_use]
 pub fn resource_admission_diagnostic(code: &str) -> Option<&'static str> {
     match code {
         "LW_RESOURCE_RATE_UNCONFIGURED" => Some("LW_RESOURCE_RATE_UNCONFIGURED"),
         "LW_RESOURCE_RATE_CURRENCY_CONFLICT" => Some("LW_RESOURCE_RATE_CURRENCY_CONFLICT"),
-        "LW_RESOURCE_RATE_SETTLED_CONFLICT" => Some("LW_RESOURCE_RATE_SETTLED_CONFLICT"),
         "LW_RESOURCE_REQUEST_INVALID" => Some("LW_RESOURCE_REQUEST_INVALID"),
         "LW_RESOURCE_SCOPE_CONFLICT" => Some("LW_RESOURCE_SCOPE_CONFLICT"),
         "LW_RESOURCE_ESTIMATE_CHANGED" => Some("LW_RESOURCE_ESTIMATE_CHANGED"),
         "LW_CREDITS_INSUFFICIENT" => Some("LW_CREDITS_INSUFFICIENT"),
         "LW_CREDITS_SCOPE_DENIED" => Some("LW_CREDITS_SCOPE_DENIED"),
         "LW_AUTH_SCOPE_DENIED" => Some("LW_AUTH_SCOPE_DENIED"),
-        "LW_CREDITS_CONFLICT" => Some("LW_CREDITS_CONFLICT"),
-        "LW_IDEMPOTENCY_CONFLICT" => Some("LW_IDEMPOTENCY_CONFLICT"),
-        "LW_RESOURCE_REQUEST_STATE_CONFLICT" => Some("LW_RESOURCE_REQUEST_STATE_CONFLICT"),
         "LW_RESOURCE_APPROVAL_EXPIRED" => Some("LW_RESOURCE_APPROVAL_EXPIRED"),
         "LW_RESOURCE_CAPACITY_EXHAUSTED" => Some("LW_RESOURCE_CAPACITY_EXHAUSTED"),
         "LW_RESOURCE_GPU_CAPACITY_EXHAUSTED" => Some("LW_RESOURCE_GPU_CAPACITY_EXHAUSTED"),
@@ -617,10 +623,24 @@ pub fn resource_admission_diagnostic(code: &str) -> Option<&'static str> {
         "LW_RESOURCE_GPU_CATALOG_AMBIGUOUS" => Some("LW_RESOURCE_GPU_CATALOG_AMBIGUOUS"),
         "LW_RESOURCE_POLICY_INVALID" => Some("LW_RESOURCE_POLICY_INVALID"),
         "LW_RESOURCE_GATEWAY_DENIED" => Some("LW_RESOURCE_GATEWAY_DENIED"),
-        "LW_RESOURCE_REVISION_CONFLICT" => Some("LW_RESOURCE_REVISION_CONFLICT"),
         "LW_RESOURCE_ALLOCATION_MISMATCH" => Some("LW_RESOURCE_ALLOCATION_MISMATCH"),
         "LW_RESOURCE_CREATE_STATE_INVALID" => Some("LW_RESOURCE_CREATE_STATE_INVALID"),
         "LW_CREDITS_INVALID" => Some("LW_CREDITS_INVALID"),
+        _ => None,
+    }
+}
+
+fn resource_reconciliation_diagnostic(code: &str) -> Option<&'static str> {
+    match code {
+        "LW_IDEMPOTENCY_CONFLICT" => Some("LW_IDEMPOTENCY_CONFLICT"),
+        "LW_IDEMPOTENCY_IN_PROGRESS" => Some("LW_IDEMPOTENCY_IN_PROGRESS"),
+        "LW_RESOURCE_REQUEST_STATE_CONFLICT" => Some("LW_RESOURCE_REQUEST_STATE_CONFLICT"),
+        "LW_RESOURCE_REVISION_CONFLICT" => Some("LW_RESOURCE_REVISION_CONFLICT"),
+        "LW_RESOURCE_CAPACITY_CLAIM_STATE_CONFLICT" => {
+            Some("LW_RESOURCE_CAPACITY_CLAIM_STATE_CONFLICT")
+        }
+        "LW_CREDITS_CONFLICT" => Some("LW_CREDITS_CONFLICT"),
+        "LW_RESOURCE_RATE_SETTLED_CONFLICT" => Some("LW_RESOURCE_RATE_SETTLED_CONFLICT"),
         _ => None,
     }
 }
@@ -933,7 +953,7 @@ impl TaskResourceLifecycle {
         .map_err(|_| TaskResourceError::CreateUncertain)?;
         match result {
             Ok(created) => Ok(created),
-            Err(ResourceClientError::Conflict) => {
+            Err(ResourceClientError::Conflict(_)) => {
                 let current = match self
                     .client
                     .get_task_resource_request(self.task_run_id)
@@ -1000,7 +1020,7 @@ impl TaskResourceLifecycle {
                     // Dropping it can let a later commit race the release fence.
                     let status = match self.client.claim_task_resource(self.task_run_id).await {
                         Ok(status) => status,
-                        Err(ResourceClientError::Conflict) => {
+                        Err(error @ ResourceClientError::Conflict(_)) => {
                             let current = self
                                 .client
                                 .get_task_resource_request(self.task_run_id)
@@ -1008,7 +1028,7 @@ impl TaskResourceLifecycle {
                             if current.state.is_terminal() {
                                 return Err(task_terminal_error(&current));
                             }
-                            return Err(ResourceClientError::Conflict.into());
+                            return Err(error.into());
                         }
                         Err(error) => return Err(error.into()),
                     };
@@ -1050,6 +1070,7 @@ impl TaskResourceLifecycle {
             Err(error) => return Err(error.into()),
         };
         let idempotency_key = format!("{}-cancel", self.request_key);
+        let mut last_conflict = ResourceClientError::Conflict("LW_TASK_RESOURCE_HTTP_CONFLICT");
         for _ in 0..4 {
             match request.state {
                 ResourceRequestState::Reviewing => {
@@ -1068,7 +1089,8 @@ impl TaskResourceLifecycle {
                             }
                             return Ok(());
                         }
-                        Err(ResourceClientError::Conflict) => {
+                        Err(error @ ResourceClientError::Conflict(_)) => {
+                            last_conflict = error;
                             request = self
                                 .client
                                 .get_task_resource_request(self.task_run_id)
@@ -1083,7 +1105,8 @@ impl TaskResourceLifecycle {
                     } else {
                         match self.client.claim_task_resource(self.task_run_id).await {
                             Ok(status) => status,
-                            Err(ResourceClientError::Conflict) => {
+                            Err(error @ ResourceClientError::Conflict(_)) => {
+                                last_conflict = error;
                                 request = self
                                     .client
                                     .get_task_resource_request(self.task_run_id)
@@ -1105,7 +1128,7 @@ impl TaskResourceLifecycle {
                 | ResourceRequestState::Cancelled => return Ok(()),
             }
         }
-        Err(TaskResourceError::Client(ResourceClientError::Conflict))
+        Err(TaskResourceError::Client(last_conflict))
     }
 
     /// Activates and hands off the exact claim after validating the namespace
@@ -1146,7 +1169,7 @@ impl TaskResourceLifecycle {
         {
             Ok(status) => Ok(status),
             Err(ResourceClientError::LeaseExpired) => Err(TaskResourceError::ResourceLeaseExpired),
-            Err(ResourceClientError::Conflict) => {
+            Err(error @ ResourceClientError::Conflict(_)) => {
                 let current = self
                     .client
                     .get_task_resource_request(self.task_run_id)
@@ -1154,7 +1177,7 @@ impl TaskResourceLifecycle {
                 if current.state.is_terminal() {
                     return Err(task_terminal_error(&current));
                 }
-                Err(ResourceClientError::Conflict.into())
+                Err(error.into())
             }
             Err(error) => Err(error.into()),
         }
@@ -1285,8 +1308,9 @@ pub enum ResourceClientError {
     Admission(&'static str),
     #[error("LW_TASK_RESOURCE_HTTP_DENIED")]
     Denied,
-    #[error("LW_TASK_RESOURCE_HTTP_CONFLICT")]
-    Conflict,
+    /// A state/replay fence requires authoritative readback; retain its safe code if unresolved.
+    #[error("{0}")]
+    Conflict(&'static str),
     #[error("LW_RESOURCE_TASK_LEASE_EXPIRED")]
     LeaseExpired,
     #[error("LW_TASK_RESOURCE_HTTP_REJECTED")]
@@ -1306,10 +1330,8 @@ mod diagnostic_tests {
         for (status, code) in [
             (StatusCode::CONFLICT, "LW_RESOURCE_RATE_UNCONFIGURED"),
             (StatusCode::CONFLICT, "LW_RESOURCE_RATE_CURRENCY_CONFLICT"),
-            (StatusCode::CONFLICT, "LW_RESOURCE_RATE_SETTLED_CONFLICT"),
             (StatusCode::CONFLICT, "LW_RESOURCE_SCOPE_CONFLICT"),
             (StatusCode::CONFLICT, "LW_RESOURCE_ESTIMATE_CHANGED"),
-            (StatusCode::CONFLICT, "LW_RESOURCE_REQUEST_STATE_CONFLICT"),
             (StatusCode::CONFLICT, "LW_RESOURCE_APPROVAL_EXPIRED"),
             (StatusCode::CONFLICT, "LW_RESOURCE_CAPACITY_EXHAUSTED"),
             (StatusCode::CONFLICT, "LW_RESOURCE_GPU_CAPACITY_EXHAUSTED"),
@@ -1321,12 +1343,6 @@ mod diagnostic_tests {
             (StatusCode::FORBIDDEN, "LW_CREDITS_SCOPE_DENIED"),
             (StatusCode::FORBIDDEN, "LW_AUTH_SCOPE_DENIED"),
             (StatusCode::FORBIDDEN, "LW_RESOURCE_GATEWAY_DENIED"),
-            (StatusCode::CONFLICT, "LW_CREDITS_CONFLICT"),
-            (StatusCode::CONFLICT, "LW_IDEMPOTENCY_CONFLICT"),
-            (
-                StatusCode::PRECONDITION_FAILED,
-                "LW_RESOURCE_REVISION_CONFLICT",
-            ),
             (StatusCode::CONFLICT, "LW_RESOURCE_ALLOCATION_MISMATCH"),
             (StatusCode::CONFLICT, "LW_RESOURCE_CREATE_STATE_INVALID"),
             (StatusCode::BAD_REQUEST, "LW_CREDITS_INVALID"),
@@ -1350,8 +1366,43 @@ mod diagnostic_tests {
         }
         assert!(matches!(
             resource_response_error(StatusCode::CONFLICT, b"not-json secret"),
-            ResourceClientError::Conflict
+            ResourceClientError::Conflict("LW_TASK_RESOURCE_HTTP_CONFLICT")
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn state_and_replay_conflicts_require_readback_without_losing_their_codes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for code in [
+            "LW_IDEMPOTENCY_CONFLICT",
+            "LW_IDEMPOTENCY_IN_PROGRESS",
+            "LW_RESOURCE_REQUEST_STATE_CONFLICT",
+            "LW_RESOURCE_REVISION_CONFLICT",
+            "LW_RESOURCE_CAPACITY_CLAIM_STATE_CONFLICT",
+            "LW_CREDITS_CONFLICT",
+            "LW_RESOURCE_RATE_SETTLED_CONFLICT",
+        ] {
+            for status in [StatusCode::CONFLICT, StatusCode::PRECONDITION_FAILED] {
+                let body = serde_json::to_vec(&contracts::ProblemDetails {
+                    problem_type: "urn:labweaver:problem:test".to_owned(),
+                    title: "conflict".to_owned(),
+                    status: status.as_u16(),
+                    detail: "secret-provider-url-and-key".to_owned(),
+                    instance: "urn:labweaver:request:test".to_owned(),
+                    diagnostic_code: contracts::DiagnosticCode::parse(code)?,
+                    request_id: "test".to_owned(),
+                    trace_id: None,
+                    retryable: false,
+                    violations: Vec::new(),
+                })?;
+                let error = resource_response_error(status, &body);
+                assert!(matches!(error, ResourceClientError::Conflict(actual) if actual == code));
+                assert_eq!(error.to_string(), code);
+                assert!(!format!("{error:?}").contains("secret-provider"));
+                assert_eq!(super::resource_admission_diagnostic(code), None);
+            }
+        }
         Ok(())
     }
 }

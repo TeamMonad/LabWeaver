@@ -1202,7 +1202,7 @@ const fn executor_failure(error: &BuildExecutorFenceError) -> BuildProviderFailu
         },
         BuildExecutorFenceError::Billing(
             task_execution::resource::ResourceClientError::Denied
-            | task_execution::resource::ResourceClientError::Conflict
+            | task_execution::resource::ResourceClientError::Conflict(_)
             | task_execution::resource::ResourceClientError::Rejected
             | task_execution::resource::ResourceClientError::RequestMissing,
         ) => BuildProviderFailure {

@@ -521,7 +521,10 @@ impl std::fmt::Display for TaskResourceFailure {
                 ResourceClientError::TaskResourceMissing => "LW_EVALUATION_RESOURCE_TASK_MISSING",
                 ResourceClientError::Denied => "LW_EVALUATION_RESOURCE_DENIED",
                 ResourceClientError::LeaseExpired => "LW_RESOURCE_TASK_LEASE_EXPIRED",
-                ResourceClientError::Conflict => "LW_EVALUATION_RESOURCE_CONFLICT",
+                ResourceClientError::Conflict("LW_TASK_RESOURCE_HTTP_CONFLICT") => {
+                    "LW_EVALUATION_RESOURCE_CONFLICT"
+                }
+                ResourceClientError::Conflict(code) => code,
                 ResourceClientError::Rejected => "LW_EVALUATION_RESOURCE_REJECTED",
                 ResourceClientError::Unavailable => "LW_EVALUATION_RESOURCE_UNAVAILABLE",
                 ResourceClientError::Admission(code) => code,
@@ -555,6 +558,31 @@ mod tests {
                 super::ResourceClientError::Admission(code),
             ));
             assert_eq!(error.to_string(), code);
+        }
+    }
+
+    #[test]
+    fn unresolved_resource_conflict_preserves_its_code_and_legacy_fallback() {
+        for (code, expected) in [
+            ("LW_IDEMPOTENCY_CONFLICT", "LW_IDEMPOTENCY_CONFLICT"),
+            (
+                "LW_RESOURCE_REQUEST_STATE_CONFLICT",
+                "LW_RESOURCE_REQUEST_STATE_CONFLICT",
+            ),
+            (
+                "LW_RESOURCE_REVISION_CONFLICT",
+                "LW_RESOURCE_REVISION_CONFLICT",
+            ),
+            ("LW_CREDITS_CONFLICT", "LW_CREDITS_CONFLICT"),
+            (
+                "LW_TASK_RESOURCE_HTTP_CONFLICT",
+                "LW_EVALUATION_RESOURCE_CONFLICT",
+            ),
+        ] {
+            let error = ExecutionError::from(super::TaskResourceError::Client(
+                super::ResourceClientError::Conflict(code),
+            ));
+            assert_eq!(error.to_string(), expected);
         }
     }
 
