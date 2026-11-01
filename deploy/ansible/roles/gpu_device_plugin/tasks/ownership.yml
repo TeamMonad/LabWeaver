@@ -105,4 +105,3 @@
       - labweaver.io/gpu-plugin-managed=true
   register: gpu_device_plugin_managed_nodes
   when: gpu_device_plugin_enabled | bool
-
