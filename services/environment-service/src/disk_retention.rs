@@ -7,6 +7,13 @@ pub(crate) fn record_disk_observation(
     instance: &mut EnvironmentInstance,
     now: UtcTimestamp,
 ) -> Result<(), crate::LifecycleError> {
+    if instance.observed_state == ObservedEnvironmentState::Ready
+        && let Some(disk) = &mut instance.disk_retention
+        && disk.state == EnvironmentDiskState::Restored
+        && disk.reactivated_at.is_none()
+    {
+        disk.reactivated_at = Some(now);
+    }
     if instance.observed_state != ObservedEnvironmentState::Deleted {
         return Ok(());
     }
@@ -31,10 +38,12 @@ pub(crate) fn record_disk_observation(
     if let Some(disk) = &mut instance.disk_retention {
         match disk.state {
             EnvironmentDiskState::Retiring => {
-                disk.started_at = now;
-                disk.expires_at = UtcTimestamp::from_utc(now.get() + time::Duration::days(7))
-                    .map_err(|_| crate::LifecycleError::CommandInvalid)?;
-                disk.compute_retired_at = Some(now);
+                if disk.compute_retired_at.is_none() {
+                    disk.started_at = now;
+                    disk.expires_at = UtcTimestamp::from_utc(now.get() + time::Duration::days(7))
+                        .map_err(|_| crate::LifecycleError::CommandInvalid)?;
+                    disk.compute_retired_at = Some(now);
+                }
                 disk.state = EnvironmentDiskState::Retained;
             }
             EnvironmentDiskState::Purging => {
@@ -59,11 +68,8 @@ pub(crate) async fn record_storage_usage(
     if disk.compute_retired_at.is_none() {
         return Ok(());
     }
-    let until = disk.purged_at.unwrap_or(now);
-    let closed = matches!(
-        disk.state,
-        EnvironmentDiskState::Restored | EnvironmentDiskState::Purged
-    );
+    let until = disk.purged_at.or(disk.reactivated_at).unwrap_or(now);
+    let closed = disk.state == EnvironmentDiskState::Purged || disk.reactivated_at.is_some();
     sqlx::query("INSERT INTO environment.retained_disk_usage (environment_id,started_at,measured_until,storage_bytes,closed_at) VALUES ($1,$2,$3,$4::text::numeric,CASE WHEN $5 THEN $3 ELSE NULL END) ON CONFLICT (environment_id,started_at) DO UPDATE SET measured_until=GREATEST(retained_disk_usage.measured_until,EXCLUDED.measured_until),closed_at=EXCLUDED.closed_at WHERE retained_disk_usage.closed_at IS NULL")
         .bind(instance.id.as_uuid()).bind(disk.started_at.get()).bind(until.get())
         .bind(instance.approved_resources.storage_bytes.to_string()).bind(closed)

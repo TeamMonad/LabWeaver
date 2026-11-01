@@ -1,6 +1,46 @@
 //! Real owner/store/worker journeys, simulating only Kubernetes HTTP.
 use super::*;
 use contracts::environment::{EnvironmentDiskState, ObservedEnvironmentState};
+use testcontainers::core::{IntoContainerPort, WaitFor};
+
+async fn attach_real_object_store(context: &mut Context) -> TestResult {
+    let descriptor = std::env::var("LABWEAVER_TEST_MINIO_IMAGE")?;
+    let (name, tag) = descriptor
+        .rsplit_once(':')
+        .ok_or("MinIO fixture requires local name:tag")?;
+    let minio = testcontainers::GenericImage::new(name, tag)
+        .with_exposed_port(9000.tcp())
+        .with_wait_for(WaitFor::message_on_stderr("API:"))
+        .with_env_var("MINIO_ROOT_USER", "labweaver-test")
+        .with_env_var("MINIO_ROOT_PASSWORD", "labweaver-test-secret")
+        .with_cmd(["server", "/data"])
+        .start()
+        .await?;
+    let objects = S3ImmutableObjectStore::new_for_test(
+        artifact_store::S3StoreConfig {
+            binding: "retention-test".to_owned(),
+            endpoint: format!("http://127.0.0.1:{}", minio.get_host_port_ipv4(9000).await?)
+                .parse()?,
+            bucket: "retention-test".to_owned(),
+            region: "labweaver-test-1".to_owned(),
+            object_prefix: "cleanup".to_owned(),
+            upload_ttl_seconds: 60,
+            max_object_bytes: 65536,
+            force_path_style: true,
+            ca_bundle_file: None,
+        },
+        artifact_store::S3Credential {
+            access_key_id: "labweaver-test".to_owned(),
+            secret_access_key: "labweaver-test-secret".to_owned(),
+            session_token: None,
+        },
+    )
+    .await?;
+    objects.ensure_bucket_for_test().await?;
+    context.executor.objects = Arc::new(objects);
+    context._minio = Some(minio);
+    Ok(())
+}
 
 fn command(
     instance: &EnvironmentInstance,
@@ -23,7 +63,8 @@ fn command(
 }
 
 async fn retained() -> TestResult<Context> {
-    let context = Context::start().await?;
+    let mut context = Context::start().await?;
+    attach_real_object_store(&mut context).await?;
     {
         let mut fixture = context
             .mock
@@ -58,7 +99,7 @@ async fn retained() -> TestResult<Context> {
             .await?,
         accepted
     );
-    context.pin().await?;
+    Box::pin(context.pin()).await?;
     let outcome = context
         .worker(context.executor.clone())?
         .run_once("retire", context.store.current_time().await?)
@@ -103,7 +144,7 @@ async fn retained() -> TestResult<Context> {
 
 #[tokio::test]
 async fn delete_retained_restore_new_generation_and_idempotent_replays() -> TestResult {
-    let context = retained().await?;
+    let context = Box::pin(retained()).await?;
     let before = context.store.load(context.initial.id).await?;
     let window = before.disk_retention.clone().ok_or("retention")?;
     context
@@ -161,7 +202,7 @@ async fn expire(context: &Context) -> TestResult<EnvironmentInstance> {
 
 #[tokio::test]
 async fn expiry_purges_only_target_disk_and_repeated_purge_is_idempotent() -> TestResult {
-    let context = retained().await?;
+    let context = Box::pin(retained()).await?;
     let before = expire(&context).await?;
     let purge = command(
         &before,
@@ -237,7 +278,7 @@ async fn expiry_purges_only_target_disk_and_repeated_purge_is_idempotent() -> Te
 
 #[tokio::test]
 async fn restore_after_purge_and_restore_at_expiry_are_rejected() -> TestResult {
-    let context = retained().await?;
+    let context = Box::pin(retained()).await?;
     let before = expire(&context).await?;
     let restore = command(
         &before,
@@ -277,7 +318,7 @@ async fn restore_after_purge_and_restore_at_expiry_are_rejected() -> TestResult 
 
 #[tokio::test]
 async fn old_cleanup_cannot_delete_replacement_disk() -> TestResult {
-    let context = retained().await?;
+    let context = Box::pin(retained()).await?;
     let before = expire(&context).await?;
     let namespace = format!("lw-env-{}", before.id);
     {
@@ -378,7 +419,7 @@ async fn old_generation_write_is_uid_fenced_and_current_write_uses_resource_vers
 
 #[tokio::test]
 async fn repeated_retirement_cannot_delete_restored_generation() -> TestResult {
-    let context = retained().await?;
+    let context = Box::pin(retained()).await?;
     let before = context.store.load(context.initial.id).await?;
     let restore = command(
         &before,

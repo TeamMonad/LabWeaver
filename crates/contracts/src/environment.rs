@@ -1032,6 +1032,8 @@ pub struct EnvironmentDiskRetention {
     pub retired_generation: u64,
     pub compute_retired_at: Option<UtcTimestamp>,
     pub restored_generation: Option<u64>,
+    /// A restored, stopped disk does not restart its retention clock or authorize compute.
+    pub reactivated_at: Option<UtcTimestamp>,
     pub purged_at: Option<UtcTimestamp>,
 }
 
@@ -1048,6 +1050,9 @@ impl EnvironmentDiskRetention {
             || self
                 .restored_generation
                 .is_some_and(|generation| generation <= self.retired_generation)
+            || self.reactivated_at.is_some_and(|at| {
+                self.state != EnvironmentDiskState::Restored || at < self.started_at
+            })
             || (self.state != EnvironmentDiskState::Retiring && self.compute_retired_at.is_none())
         {
             return Err(EnvironmentError::InvalidAggregate);

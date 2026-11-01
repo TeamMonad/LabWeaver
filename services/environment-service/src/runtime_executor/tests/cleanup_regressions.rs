@@ -57,6 +57,7 @@ impl crate::ContainerProviderBackend for DirectKubernetes {
 
 struct Context {
     _postgres: ContainerAsync<Postgres>,
+    _minio: Option<ContainerAsync<testcontainers::GenericImage>>,
     pool: sqlx::PgPool,
     store: crate::PgEnvironmentStore,
     mock: MockKubernetes,
@@ -124,6 +125,7 @@ impl Context {
         let (files, executor) = test_kubevirt_executor(&mock).await?;
         Ok(Self {
             _postgres: postgres,
+            _minio: None,
             pool,
             store,
             mock,

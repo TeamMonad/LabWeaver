@@ -1598,13 +1598,13 @@ impl EnvironmentApiError {
                 EnvironmentStoreError::AllocationPending
                 | EnvironmentStoreError::IdempotencyConflict
                 | EnvironmentStoreError::IdempotencyInProgress
-                | EnvironmentStoreError::Lifecycle(crate::LifecycleError::OperationActive),
+                | EnvironmentStoreError::Lifecycle(
+                    crate::LifecycleError::OperationActive
+                    | crate::LifecycleError::DiskNotRetained
+                    | crate::LifecycleError::DiskRetentionExpired
+                    | crate::LifecycleError::DiskPurgeNotDue,
+                ),
             )
-            | Self::Store(EnvironmentStoreError::Lifecycle(
-                crate::LifecycleError::DiskNotRetained
-                | crate::LifecycleError::DiskRetentionExpired
-                | crate::LifecycleError::DiskPurgeNotDue,
-            ))
             | Self::Messaging(NatsMessagingError::LeaseNotActive) => StatusCode::CONFLICT,
             _ => StatusCode::SERVICE_UNAVAILABLE,
         }

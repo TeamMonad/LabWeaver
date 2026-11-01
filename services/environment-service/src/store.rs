@@ -146,14 +146,18 @@ pub struct PgEnvironmentStore {
 impl PgEnvironmentStore {
     /// Enqueues expiry against the same revisioned owner; concurrent schedulers share one key.
     pub(crate) async fn enqueue_expired_disk_purges(&self) -> Result<(), EnvironmentStoreError> {
-        let rows: Vec<Value> = sqlx::query_scalar("SELECT contract FROM environment.environment_instances WHERE observed_state='deleted' AND contract->'diskRetention'->>'state'='retained' AND (contract->'diskRetention'->>'expiresAt')::timestamptz <= clock_timestamp() ORDER BY updated_at LIMIT 16")
+        let rows: Vec<Value> = sqlx::query_scalar("SELECT contract FROM environment.environment_instances WHERE ((observed_state='deleted' AND contract->'diskRetention'->>'state'='retained') OR (observed_state='stopped' AND contract->'diskRetention'->>'state'='restored' AND (contract->'diskRetention'->>'reactivatedAt') IS NULL)) AND (contract->'diskRetention'->>'expiresAt')::timestamptz <= clock_timestamp() ORDER BY updated_at LIMIT 16")
             .fetch_all(&self.pool).await?;
         for row in rows {
             let instance = decode_contract(row)?;
             let now = self.current_time().await?;
             let command = LifecycleCommand {
                 environment_id: instance.id,
-                kind: EnvironmentOperationKind::Purge,
+                kind: if instance.observed_state == ObservedEnvironmentState::Stopped {
+                    EnvironmentOperationKind::Delete
+                } else {
+                    EnvironmentOperationKind::Purge
+                },
                 expected_revision: instance.revision,
                 actor_id: instance.owner_id,
                 trace_id: format!("purge-{}", instance.generation),

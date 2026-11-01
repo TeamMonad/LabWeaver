@@ -255,11 +255,9 @@ pub fn plan_command_authorized(
     }
     match command.kind {
         EnvironmentOperationKind::Delete | EnvironmentOperationKind::Expire => {
-            if planned
-                .disk_retention
-                .as_ref()
-                .is_none_or(|disk| disk.state == EnvironmentDiskState::Restored)
-            {
+            if planned.disk_retention.as_ref().is_none_or(|disk| {
+                disk.state == EnvironmentDiskState::Restored && disk.reactivated_at.is_some()
+            }) {
                 planned.disk_retention = Some(EnvironmentDiskRetention {
                     state: EnvironmentDiskState::Retiring,
                     started_at: authority_now,
@@ -270,8 +268,16 @@ pub fn plan_command_authorized(
                     retired_generation: planned.generation,
                     compute_retired_at: None,
                     restored_generation: None,
+                    reactivated_at: None,
                     purged_at: None,
                 });
+            }
+            if let Some(disk) = &mut planned.disk_retention
+                && disk.state == EnvironmentDiskState::Restored
+                && disk.reactivated_at.is_none()
+            {
+                disk.state = EnvironmentDiskState::Retiring;
+                disk.restored_generation = None;
             }
         }
         EnvironmentOperationKind::Restore => {
@@ -743,7 +749,17 @@ fn accepted_observed_state(
         EnvironmentOperationKind::Cancel | EnvironmentOperationKind::Delete => {
             ObservedEnvironmentState::Deleting
         }
-        EnvironmentOperationKind::Expire => ObservedEnvironmentState::Expiring,
+        EnvironmentOperationKind::Expire => {
+            if current_state == ObservedEnvironmentState::Stopped
+                && current.disk_retention.as_ref().is_some_and(|disk| {
+                    disk.state == EnvironmentDiskState::Restored && disk.reactivated_at.is_none()
+                })
+            {
+                ObservedEnvironmentState::Deleting
+            } else {
+                ObservedEnvironmentState::Expiring
+            }
+        }
         EnvironmentOperationKind::Cleanup
             if current_state != ObservedEnvironmentState::Deleting =>
         {
