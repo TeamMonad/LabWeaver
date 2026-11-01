@@ -376,6 +376,31 @@ async fn run_reflector<K>(
 #[error("LW_RESOURCE_GPU_OBSERVATION_STALE: initial-events bookmark missing: {0}")]
 struct InitialWatchSyncError(#[source] kube::Error);
 
+async fn list_resource_version<K: Clone + std::fmt::Debug + DeserializeOwned>(
+    api: &Api<K>,
+    max_items: usize,
+    page_size: u32,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let mut params = ListParams::default().limit(page_size);
+    let mut listed = 0_usize;
+    let resource_version = loop {
+        let page = api.list(&params).await?;
+        listed += page.items.len();
+        if listed > max_items {
+            return Err("observation item bound exceeded".into());
+        }
+        if let Some(token) = page.metadata.continue_.filter(|token| !token.is_empty()) {
+            params = params.continue_token(&token);
+        } else {
+            break page
+                .metadata
+                .resource_version
+                .ok_or("list has no resourceVersion")?;
+        }
+    };
+    Ok(resource_version)
+}
+
 async fn reflect_session<K>(
     api: &Api<K>,
     target: &tokio::sync::RwLock<Vec<Value>>,
@@ -394,23 +419,7 @@ where
         + 'static,
     K::DynamicType: Default + Eq + std::hash::Hash + Clone,
 {
-    let mut params = ListParams::default().limit(page_size);
-    let mut listed = 0_usize;
-    let resource_version = loop {
-        let page = api.list(&params).await?;
-        listed += page.items.len();
-        if listed > max_items {
-            return Err("observation item bound exceeded".into());
-        }
-        if let Some(token) = page.metadata.continue_.filter(|token| !token.is_empty()) {
-            params = params.continue_token(&token);
-        } else {
-            break page
-                .metadata
-                .resource_version
-                .ok_or("list has no resourceVersion")?;
-        }
-    };
+    let resource_version = list_resource_version(api, max_items, page_size).await?;
     // A completed list is NOT a synchronization barrier. Request the Kubernetes
     // streaming-initial-events barrier at least as new as the paginated list RV.
     // Fail closed on servers that cannot supply this explicit sync acknowledgement.

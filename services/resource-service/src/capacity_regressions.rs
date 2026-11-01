@@ -1,10 +1,10 @@
 // Included in capacity::tests so these exercise the production cache and admission path.
 
-fn test_observer(cache: KubernetesObservationCache) -> KubernetesGpuCapacityObserver {
+fn test_observer(client: KubeClient) -> KubernetesGpuCapacityObserver {
     KubernetesGpuCapacityObserver {
         provider_binding: "test-provider".into(),
         observation_ttl: Duration::from_secs(30),
-        cache,
+        cache: KubernetesObservationCache::new(client, 10, 10, "test-provider".into()),
     }
 }
 
@@ -127,12 +127,7 @@ async fn wait_for_units(
 async fn incremental_apply_delete_updates_nodes_and_external_pods_without_relist()
 -> Result<(), Box<dyn std::error::Error>> {
     let (state, client, server) = start_fake_api(HEALTH_CHANGE).await?;
-    let observer = test_observer(KubernetesObservationCache::new(
-        client,
-        10,
-        10,
-        "test-provider".into(),
-    ));
+    let observer = test_observer(client);
     wait_for_fresh(&observer.cache).await?;
     let entry = entry()?;
     let pod = json!({"apiVersion":"v1", "kind":"Pod", "metadata":{"name":"outside", "namespace":"other", "uid":"external-pod", "resourceVersion":"4"},
@@ -166,12 +161,7 @@ async fn incremental_apply_delete_updates_nodes_and_external_pods_without_relist
 async fn empty_successful_watch_eof_is_stale_and_rate_bounded()
 -> Result<(), Box<dyn std::error::Error>> {
     let (state, client, server) = start_fake_api(EMPTY_WATCH).await?;
-    let observer = test_observer(KubernetesObservationCache::new(
-        client,
-        10,
-        10,
-        "test-provider".into(),
-    ));
+    let observer = test_observer(client);
     tokio::time::sleep(Duration::from_millis(450)).await;
     let requests = state.node_watches.load(Ordering::SeqCst);
     assert!(
@@ -279,12 +269,7 @@ async fn sync_barrier_blocks_postgres_admission_before_initial_bookmark()
         )
         .await?;
     let (state, client, server) = start_fake_api(SYNC_PENDING).await?;
-    let observer = test_observer(KubernetesObservationCache::new(
-        client,
-        10,
-        10,
-        "test-provider".into(),
-    ));
+    let observer = test_observer(client);
     store.register_gpu_observer("test-provider".into(), observer.clone())?;
     tokio::time::timeout(Duration::from_secs(2), async {
         while state.active_watches.load(Ordering::SeqCst) != 2 {
@@ -330,12 +315,7 @@ async fn source_deadline_epoch_disconnect_and_restart_fence_postgres_admission()
         .create_gpu_catalog_entry("epoch-catalog", &entry)
         .await?;
     let (state, client, server) = start_fake_api(WATCH_ERROR).await?;
-    let observer = test_observer(KubernetesObservationCache::new(
-        client,
-        10,
-        10,
-        "test-provider".into(),
-    ));
+    let observer = test_observer(client);
     store.register_gpu_observer("test-provider".into(), observer.clone())?;
     wait_for_fresh(&observer.cache).await?;
     let first = persist_snapshot(&store, &observer, &entry).await?;
@@ -496,12 +476,7 @@ async fn suspended_restore_requires_live_revision_and_reconnected_observer()
     let (_container, store) = admission_store().await?;
     let entry = entry()?;
     let (state, client, server) = start_fake_api(WATCH_ERROR).await?;
-    let observer = test_observer(KubernetesObservationCache::new(
-        client,
-        10,
-        10,
-        "test-provider".into(),
-    ));
+    let observer = test_observer(client);
     store.register_gpu_observer("test-provider".into(), observer.clone())?;
     let mut activation = suspended_gpu(&store, &observer, &entry).await?;
     state
@@ -575,12 +550,7 @@ async fn suspended_restore_after_restart_requires_new_generation()
     let (_container, store) = admission_store().await?;
     let entry = entry()?;
     let (_, client, server) = start_fake_api(HEALTH_CHANGE).await?;
-    let observer = test_observer(KubernetesObservationCache::new(
-        client,
-        10,
-        10,
-        "test-provider".into(),
-    ));
+    let observer = test_observer(client);
     store.register_gpu_observer("test-provider".into(), observer.clone())?;
     let activation = suspended_gpu(&store, &observer, &entry).await?;
     observer.shutdown();
@@ -596,12 +566,7 @@ async fn suspended_restore_after_restart_requires_new_generation()
         "restore cannot reuse a previous process generation"
     );
     let (_, client, restarted_server) = start_fake_api(HEALTH_CHANGE).await?;
-    let restarted_observer = test_observer(KubernetesObservationCache::new(
-        client,
-        10,
-        10,
-        "test-provider".into(),
-    ));
+    let restarted_observer = test_observer(client);
     restarted.register_gpu_observer("test-provider".into(), restarted_observer.clone())?;
     wait_for_fresh(&restarted_observer.cache).await?;
     assert!(
@@ -678,36 +643,14 @@ async fn replica_generations_coexist_at_equal_millisecond_and_share_reservations
         .await?;
     let (api_a, client_a, server_a) = start_fake_api(PAGINATED).await?;
     let (api_b, client_b, server_b) = start_fake_api(PAGINATED).await?;
-    let observer_a = test_observer(KubernetesObservationCache::new(
-        client_a,
-        10,
-        10,
-        "test-provider".into(),
-    ));
-    let observer_b = test_observer(KubernetesObservationCache::new(
-        client_b,
-        10,
-        10,
-        "test-provider".into(),
-    ));
+    let observer_a = test_observer(client_a);
+    let observer_b = test_observer(client_b);
     store_a.register_gpu_observer("test-provider".into(), observer_a.clone())?;
     store_b.register_gpu_observer("test-provider".into(), observer_b.clone())?;
     wait_for_fresh(&observer_a.cache).await?;
     wait_for_fresh(&observer_b.cache).await?;
-    // Force equal SOURCE clock milliseconds, retaining independently observed real API snapshots.
-    let equal = store_a.current_time().await?;
-    for observer in [&observer_a, &observer_b] {
-        *observer.cache.node_freshness.observed_at.write().await = Some(equal.get());
-        *observer.cache.pod_freshness.observed_at.write().await = Some(equal.get());
-    }
-    persist_snapshot(&store_a, &observer_a, &entry).await?;
-    persist_snapshot(&store_b, &observer_b, &entry).await?;
-    let generations: i64 = sqlx::query_scalar("SELECT count(DISTINCT observer_generation) FROM resource.gpu_capacity_observations WHERE entry_id=$1 AND observed_at=$2")
-        .bind(entry.id.as_uuid()).bind(equal.get()).fetch_one(&store_a.pool()).await?;
-    assert_eq!(
-        generations, 2,
-        "equal-millisecond replicas must not overwrite one another"
-    );
+    assert_equal_millisecond_generations(&store_a, &store_b, &observer_a, &observer_b, &entry)
+        .await?;
     tokio::time::sleep(Duration::from_millis(5)).await;
     refresh_both_streams(&api_b, &observer_b).await?;
     persist_snapshot(&store_b, &observer_b, &entry).await?;
@@ -759,12 +702,7 @@ async fn replica_generations_coexist_at_equal_millisecond_and_share_reservations
         )
         .await?;
     let (_, client_c, server_c) = start_fake_api(PAGINATED).await?;
-    let observer_c = test_observer(KubernetesObservationCache::new(
-        client_c,
-        10,
-        10,
-        "test-provider".into(),
-    ));
+    let observer_c = test_observer(client_c);
     restarted.register_gpu_observer("test-provider".into(), observer_c.clone())?;
     wait_for_fresh(&observer_c.cache).await?;
     persist_snapshot(&restarted, &observer_c, &entry).await?;
@@ -809,9 +747,9 @@ async fn missing_initial_bookmark_reports_specific_stale_reason_on_eof_and_timeo
             reflect_session(&pod_api, &pods, &pod_freshness, 10, 10)
         );
         for (kind, result) in [("Node", node_result), ("Pod", pod_result)] {
-            let error = result.expect_err(
+            let error = result.err().ok_or(
                 "watch without an initial-events bookmark must report the missing barrier",
-            );
+            )?;
             assert!(
                 error
                     .to_string()
@@ -831,5 +769,29 @@ async fn missing_initial_bookmark_reports_specific_stale_reason_on_eof_and_timeo
         assert!(pod_freshness.check(Duration::from_secs(30)).await.is_err());
         server.abort();
     }
+    Ok(())
+}
+
+async fn assert_equal_millisecond_generations(
+    store_a: &crate::store::PgResourceStore,
+    store_b: &crate::store::PgResourceStore,
+    observer_a: &KubernetesGpuCapacityObserver,
+    observer_b: &KubernetesGpuCapacityObserver,
+    entry: &GpuCatalogEntry,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Retain independent API snapshots, but give both source clocks the exact same millisecond.
+    let equal = store_a.current_time().await?;
+    for observer in [observer_a, observer_b] {
+        *observer.cache.node_freshness.observed_at.write().await = Some(equal.get());
+        *observer.cache.pod_freshness.observed_at.write().await = Some(equal.get());
+    }
+    persist_snapshot(store_a, observer_a, entry).await?;
+    persist_snapshot(store_b, observer_b, entry).await?;
+    let generations: i64 = sqlx::query_scalar("SELECT count(DISTINCT observer_generation) FROM resource.gpu_capacity_observations WHERE entry_id=$1 AND observed_at=$2")
+        .bind(entry.id.as_uuid()).bind(equal.get()).fetch_one(&store_a.pool()).await?;
+    assert_eq!(
+        generations, 2,
+        "equal-millisecond replicas must not overwrite one another"
+    );
     Ok(())
 }
