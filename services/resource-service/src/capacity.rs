@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -23,7 +23,7 @@ use contracts::resource::{GpuAllocationMode, GpuCatalogEntry, ResourceLeaseState
 use contracts::{GpuCatalogEntryId, Revision};
 use futures_util::StreamExt;
 use k8s_openapi::api::core::v1::{Node, Pod};
-use kube::api::Api;
+use kube::api::{Api, ListParams, WatchEvent, WatchParams};
 use kube::runtime::{reflector, watcher};
 use kube::{Client as KubeClient, Config as KubeConfig};
 use reqwest::{Certificate, Client, StatusCode};
@@ -91,10 +91,11 @@ impl ResourceCapacityConfiguration {
         let mut gpu_observers = BTreeMap::new();
         for configuration in self.gpu_observers {
             let binding = configuration.provider_binding.clone();
-            if gpu_observers
-                .insert(binding, KubernetesGpuCapacityObserver::new(configuration)?)
-                .is_some()
-            {
+            let observer = KubernetesGpuCapacityObserver::new(configuration)?;
+            store
+                .register_gpu_observer(binding.clone(), observer.clone())
+                .map_err(|_| CapacityProviderError::Configuration)?;
+            if gpu_observers.insert(binding, observer).is_some() {
                 return Err(CapacityProviderError::Configuration);
             }
         }
@@ -201,6 +202,8 @@ struct ObservationFreshness {
     fresh: Arc<AtomicBool>,
     last_fresh: Arc<tokio::sync::RwLock<Option<Instant>>>,
     reason: Arc<tokio::sync::RwLock<&'static str>>,
+    observed_at: Arc<tokio::sync::RwLock<Option<time::OffsetDateTime>>>,
+    revision: Arc<AtomicU64>,
 }
 
 impl ObservationFreshness {
@@ -209,15 +212,22 @@ impl ObservationFreshness {
             fresh: Arc::new(AtomicBool::new(false)),
             last_fresh: Arc::new(tokio::sync::RwLock::new(None)),
             reason: Arc::new(tokio::sync::RwLock::new("initial relist pending")),
+            observed_at: Arc::new(tokio::sync::RwLock::new(None)),
+            revision: Arc::new(AtomicU64::new(0)),
         }
     }
 
     async fn mark_stale(&self, reason: &'static str) {
+        self.revision.fetch_add(1, Ordering::AcqRel);
         self.fresh.store(false, Ordering::Release);
         *self.reason.write().await = reason;
     }
 
     async fn mark_fresh(&self) {
+        let now = time::OffsetDateTime::now_utc();
+        *self.observed_at.write().await =
+            Some(now - time::Duration::nanoseconds(i64::from(now.nanosecond() % 1_000_000)));
+        self.revision.fetch_add(1, Ordering::AcqRel);
         *self.last_fresh.write().await = Some(Instant::now());
         self.fresh.store(true, Ordering::Release);
         *self.reason.write().await = "fresh";
@@ -247,6 +257,8 @@ struct KubernetesObservationCache {
     node_freshness: ObservationFreshness,
     pod_freshness: ObservationFreshness,
     stop: watch::Sender<bool>,
+    generation: uuid::Uuid,
+    tasks: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 impl KubernetesObservationCache {
@@ -256,7 +268,7 @@ impl KubernetesObservationCache {
         let pods = Arc::new(tokio::sync::RwLock::new(Vec::new()));
         let node_freshness = ObservationFreshness::new();
         let pod_freshness = ObservationFreshness::new();
-        tokio::spawn(run_reflector(
+        let node_task = tokio::spawn(run_reflector(
             Api::<Node>::all(client.clone()),
             nodes.clone(),
             node_freshness.clone(),
@@ -264,7 +276,7 @@ impl KubernetesObservationCache {
             stop.subscribe(),
             "node watch disconnected",
         ));
-        tokio::spawn(run_reflector(
+        let pod_task = tokio::spawn(run_reflector(
             Api::<Pod>::all(client),
             pods.clone(),
             pod_freshness.clone(),
@@ -278,11 +290,19 @@ impl KubernetesObservationCache {
             node_freshness,
             pod_freshness,
             stop,
+            generation: uuid::Uuid::now_v7(),
+            tasks: Arc::new(tokio::sync::Mutex::new(vec![node_task, pod_task])),
         }
     }
 
     fn shutdown(&self) {
         let _ = self.stop.send(true);
+    }
+
+    async fn join(&self) {
+        for task in self.tasks.lock().await.drain(..) {
+            let _ = task.await;
+        }
     }
 }
 
@@ -309,58 +329,141 @@ async fn run_reflector<K>(
         if *stop.borrow() {
             return;
         }
-        let (reader, writer) = reflector::store::<K>();
-        let stream = watcher(api.clone(), watcher::Config::default().page_size(page_size));
-        let mut reflected = Box::pin(reflector(writer, stream));
-        let mut reconnect = false;
-        while !reconnect {
-            tokio::select! {
-                changed = stop.changed() => {
-                    if changed.is_err() || *stop.borrow() { return; }
-                }
-                event = reflected.next() => {
-                    match event {
-                        Some(Ok(watcher::Event::Init)) => freshness.mark_stale("relist in progress").await,
-                        Some(Ok(watcher::Event::InitDone)) if reader.len() <= max_items => {
-                            let snapshot = reader.state().into_iter()
-                                .map(|object| serde_json::to_value(object.as_ref()))
-                                .collect::<Result<Vec<_>, _>>();
-                            match snapshot {
-                                Ok(snapshot) => {
-                                    *target.write().await = snapshot;
-                                    freshness.mark_fresh().await;
-                                }
-                                Err(_) => freshness.mark_stale("relist object serialization failed").await,
-                            }
-                        }
-                        Some(Ok(watcher::Event::InitDone)) => {
-                            freshness.mark_stale("observation item bound exceeded").await;
-                        }
-                        Some(Ok(_)) => {}
-                        Some(Err(error)) => {
-                            tracing::warn!(event = "resource.gpu_capacity.watch_failed", error = %error);
-                            freshness.mark_stale(disconnect_reason).await;
-                            reconnect = true;
-                        }
-                        None => {
-                            freshness.mark_stale(disconnect_reason).await;
-                            reconnect = true;
-                        }
-                    }
+        freshness.mark_stale("relist in progress").await;
+        // Keep cancellation outside the complete list/watch session, including HTTP setup.
+        tokio::select! {
+            _ = stop.changed() => {
+                freshness.mark_stale("observer stopped").await;
+                return;
+            },
+            result = reflect_session(&api, &target, &freshness, max_items, page_size) => {
+                if let Err(error) = result {
+                    tracing::warn!(event = "resource.gpu_capacity.watch_failed", error = %error);
                 }
             }
         }
+        freshness.mark_stale(disconnect_reason).await;
+        // Api::watch exposes EOF, unlike watcher(), which internally reconnects without
+        // yielding. Apply the same cancellable bound to HTTP errors AND successful empty EOF.
         tokio::select! {
-            changed = stop.changed() => {
-                if changed.is_err() || *stop.borrow() { return; }
-            }
-            () = tokio::time::sleep(Duration::from_millis(50)) => {}
+            _ = stop.changed() => return,
+            () = tokio::time::sleep(Duration::from_millis(100)) => {}
         }
     }
 }
 
+async fn reflect_session<K>(
+    api: &Api<K>,
+    target: &tokio::sync::RwLock<Vec<Value>>,
+    freshness: &ObservationFreshness,
+    max_items: usize,
+    page_size: u32,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    K: kube::Resource
+        + Clone
+        + std::fmt::Debug
+        + DeserializeOwned
+        + Serialize
+        + Send
+        + Sync
+        + 'static,
+    K::DynamicType: Default + Eq + std::hash::Hash + Clone,
+{
+    let (reader, mut writer) = reflector::store::<K>();
+    writer.apply_watcher_event(&watcher::Event::Init);
+    let mut params = ListParams::default().limit(page_size);
+    let mut listed = 0_usize;
+    let resource_version = loop {
+        let page = api.list(&params).await?;
+        listed += page.items.len();
+        if listed > max_items {
+            return Err("observation item bound exceeded".into());
+        }
+        for object in page.items {
+            writer.apply_watcher_event(&watcher::Event::InitApply(object));
+        }
+        // The reflector's init buffer is not visible through reader.len(). Bound the
+        // paginated list separately, before storing further pages.
+        if let Some(token) = page.metadata.continue_.filter(|token| !token.is_empty()) {
+            params = params.continue_token(&token);
+        } else {
+            break page
+                .metadata
+                .resource_version
+                .ok_or("list has no resourceVersion")?;
+        }
+    };
+    writer.apply_watcher_event(&watcher::Event::InitDone);
+    if reader.len() > max_items {
+        return Err("observation item bound exceeded".into());
+    }
+    // A completed list is NOT a synchronization barrier. Request the Kubernetes
+    // streaming-initial-events barrier at least as new as the paginated list RV.
+    // Fail closed on servers that cannot supply this explicit sync acknowledgement.
+    let params = WatchParams {
+        send_initial_events: true,
+        ..WatchParams::default().timeout(10)
+    };
+    let stream = api.watch(&params, &resource_version).await?;
+    let mut stream = Box::pin(stream);
+    let mut synced = false;
+    writer.apply_watcher_event(&watcher::Event::Init);
+    let mut initial_count = 0_usize;
+    while let Some(event) = stream.next().await {
+        if synced {
+            freshness.mark_stale("watch update in progress").await;
+        }
+        match event? {
+            WatchEvent::Added(object) | WatchEvent::Modified(object) => {
+                if kube::ResourceExt::resource_version(&object).is_none() {
+                    return Err("watch object has no resourceVersion".into());
+                }
+                if synced {
+                    writer.apply_watcher_event(&watcher::Event::Apply(object));
+                } else {
+                    initial_count += 1;
+                    if initial_count > max_items {
+                        return Err("observation item bound exceeded".into());
+                    }
+                    writer.apply_watcher_event(&watcher::Event::InitApply(object));
+                }
+            }
+            WatchEvent::Deleted(object) => {
+                writer.apply_watcher_event(&watcher::Event::Delete(object))
+            }
+            WatchEvent::Bookmark(bookmark) => {
+                if !synced
+                    && bookmark
+                        .metadata
+                        .annotations
+                        .get("k8s.io/initial-events-end")
+                        .is_some_and(|value| value == "true")
+                {
+                    writer.apply_watcher_event(&watcher::Event::InitDone);
+                    synced = true;
+                }
+            }
+            WatchEvent::Error(error) => return Err(format!("watch error: {}", error.code).into()),
+        }
+        if synced {
+            if reader.len() > max_items {
+                return Err("observation item bound exceeded".into());
+            }
+            let snapshot = reader
+                .state()
+                .iter()
+                .map(|object| serde_json::to_value(object.as_ref()))
+                .collect::<Result<Vec<_>, _>>()?;
+            *target.write().await = snapshot;
+            freshness.mark_fresh().await;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
-struct KubernetesGpuCapacityObserver {
+pub(crate) struct KubernetesGpuCapacityObserver {
     provider_binding: String,
     observation_ttl: Duration,
     cache: KubernetesObservationCache,
@@ -384,7 +487,14 @@ impl KubernetesGpuCapacityObserver {
             .parse()
             .map_err(|_| CapacityProviderError::Configuration)?;
         let mut config = KubeConfig::new(uri);
-        config.root_cert = Some(vec![ca]);
+        let roots = rustls_pemfile::certs(&mut std::io::Cursor::new(ca))
+            .map(|certificate| certificate.map(|certificate| certificate.as_ref().to_vec()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| CapacityProviderError::Configuration)?;
+        if roots.is_empty() {
+            return Err(CapacityProviderError::Configuration);
+        }
+        config.root_cert = Some(roots);
         config.auth_info.token_file = Some(
             configuration
                 .bearer_token_file
@@ -412,21 +522,55 @@ impl KubernetesGpuCapacityObserver {
         self.cache.shutdown();
     }
 
-    async fn observe(
-        &self,
-        entries: &[contracts::resource::GpuCatalogEntry],
-        active_reservations: &[ActiveGpuReservation],
-    ) -> Result<BTreeMap<GpuCatalogEntryId, u32>, CapacityProviderError> {
-        if entries.is_empty() {
-            return Err(CapacityProviderError::ObservationReadback);
+    pub(crate) async fn source(&self) -> Result<(String, UtcTimestamp), CapacityProviderError> {
+        if *self.cache.stop.borrow() {
+            return Err(CapacityProviderError::ObservationStale("observer stopped"));
         }
         self.cache
             .node_freshness
             .check(self.observation_ttl)
             .await?;
         self.cache.pod_freshness.check(self.observation_ttl).await?;
-        let nodes = self.cache.nodes.read().await.clone();
-        let pods = self.cache.pods.read().await.clone();
+        let node_revision = self.cache.node_freshness.revision.load(Ordering::Acquire);
+        let pod_revision = self.cache.pod_freshness.revision.load(Ordering::Acquire);
+        let node_time = *self.cache.node_freshness.observed_at.read().await;
+        let pod_time = *self.cache.pod_freshness.observed_at.read().await;
+        let observed_at = node_time
+            .zip(pod_time)
+            .map(|(node, pod)| node.min(pod))
+            .ok_or(CapacityProviderError::ObservationStale(
+                "initial relist pending",
+            ))?;
+        self.cache
+            .node_freshness
+            .check(self.observation_ttl)
+            .await?;
+        self.cache.pod_freshness.check(self.observation_ttl).await?;
+        if self.cache.node_freshness.revision.load(Ordering::Acquire) != node_revision
+            || self.cache.pod_freshness.revision.load(Ordering::Acquire) != pod_revision
+        {
+            return Err(CapacityProviderError::ObservationStale(
+                "snapshot changed during read",
+            ));
+        }
+        Ok((
+            format!("{}:{node_revision}:{pod_revision}", self.cache.generation),
+            UtcTimestamp::from_utc(observed_at)
+                .map_err(|_| CapacityProviderError::ObservationReadback)?,
+        ))
+    }
+
+    async fn observe(
+        &self,
+        entries: &[contracts::resource::GpuCatalogEntry],
+        active_reservations: &[ActiveGpuReservation],
+    ) -> Result<GpuCapacitySnapshot, CapacityProviderError> {
+        if entries.is_empty() {
+            return Err(CapacityProviderError::ObservationReadback);
+        }
+        let (source_binding, observed_at) = self.source().await?;
+        let nodes = self.cache.nodes.read().await;
+        let pods = self.cache.pods.read().await;
         let mut observed = BTreeMap::new();
         let bindings = entries
             .iter()
@@ -439,7 +583,7 @@ impl KubernetesGpuCapacityObserver {
             .collect::<Result<BTreeSet<_>, _>>()?;
         for allocation_binding in bindings {
             let mut eligible_nodes = BTreeMap::new();
-            for node in &nodes {
+            for node in nodes.iter() {
                 if let Some(snapshot) = eligible_node(node, allocation_binding)?
                     && eligible_nodes
                         .insert(snapshot.name, snapshot.allocatable_units)
@@ -449,7 +593,7 @@ impl KubernetesGpuCapacityObserver {
                 }
             }
             let mut outside_occupancy = 0_u32;
-            for pod in &pods {
+            for pod in pods.iter() {
                 let Some(node_name) = pod_node_name(pod)? else {
                     continue;
                 };
@@ -473,8 +617,23 @@ impl KubernetesGpuCapacityObserver {
                 observed.insert(entry.id, available);
             }
         }
-        Ok(observed)
+        if self.source().await?.0 != source_binding {
+            return Err(CapacityProviderError::ObservationStale(
+                "snapshot changed during read",
+            ));
+        }
+        Ok(GpuCapacitySnapshot {
+            units: observed,
+            source_binding,
+            observed_at,
+        })
     }
+}
+
+struct GpuCapacitySnapshot {
+    units: BTreeMap<GpuCatalogEntryId, u32>,
+    source_binding: String,
+    observed_at: UtcTimestamp,
 }
 
 fn read_bearer_token(path: &Path) -> Result<String, CapacityProviderError> {
@@ -1290,15 +1449,15 @@ impl CapacityReconcileWorker {
                 .map_err(|_| crate::store::ResourceStoreError::CapacityReadbackInvalid)?;
             match observer.observe(&entries, &active_reservations).await {
                 Ok(observations) => {
-                    // Start the observation TTL after the provider read has completed. A slow
-                    // API request must not make a fresh snapshot stale before it can be used.
-                    let observed_at = self.store.current_time().await?;
+                    // Cache reads never renew the provider's source observation deadline.
+                    let observed_at = observations.observed_at;
                     let valid_until = UtcTimestamp::from_utc(
                         observed_at.get() + time::Duration::seconds(ttl_seconds),
                     )
                     .map_err(|_| crate::store::ResourceStoreError::CapacityReadbackInvalid)?;
                     for entry in entries {
                         let available_units = observations
+                            .units
                             .get(&entry.id)
                             .copied()
                             .ok_or(crate::store::ResourceStoreError::GpuObservationInvalid)?;
@@ -1306,7 +1465,7 @@ impl CapacityReconcileWorker {
                             .record_gpu_capacity_observation(
                                 entry.id,
                                 available_units,
-                                &format!("{}:node-status", entry.provider_binding),
+                                &observations.source_binding,
                                 observed_at,
                                 valid_until,
                             )
@@ -1668,9 +1827,12 @@ impl CapacityReconcileWorker {
         Ok(())
     }
 
-    fn shutdown_observers(&self) {
+    async fn shutdown_observers(&self) {
         for observer in self.gpu_observers.values() {
             observer.shutdown();
+        }
+        for observer in self.gpu_observers.values() {
+            observer.cache.join().await;
         }
     }
 
@@ -1682,14 +1844,14 @@ impl CapacityReconcileWorker {
         let mut interval = tokio::time::interval(self.poll_interval);
         loop {
             if *shutdown.borrow() {
-                self.shutdown_observers();
+                self.shutdown_observers().await;
                 return Ok(());
             }
             tokio::select! {
                 biased;
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
-                        self.shutdown_observers();
+                        self.shutdown_observers().await;
                         return Ok(());
                     }
                 }
@@ -1709,7 +1871,7 @@ impl CapacityReconcileWorker {
                             );
                         }
                         Err(error) => {
-                            self.shutdown_observers();
+                            self.shutdown_observers().await;
                             return Err(error);
                         }
                     }
@@ -1807,6 +1969,9 @@ mod tests {
     const GONE_RELIST: u8 = 2;
     const DISCONNECT: u8 = 3;
     const HEALTH_CHANGE: u8 = 4;
+    const SYNC_PENDING: u8 = 5;
+    const EMPTY_WATCH: u8 = 6;
+    const WATCH_ERROR: u8 = 7;
 
     #[derive(Clone)]
     struct FakeApi {
@@ -1816,6 +1981,9 @@ mod tests {
         node_watches: Arc<AtomicUsize>,
         gate: Arc<Notify>,
         relist_gate: Arc<Notify>,
+        node_events: tokio::sync::broadcast::Sender<Value>,
+        pod_events: tokio::sync::broadcast::Sender<Value>,
+        active_watches: Arc<AtomicUsize>,
     }
 
     #[allow(clippy::needless_pass_by_value)]
@@ -1829,26 +1997,59 @@ mod tests {
         response
     }
 
-    fn watch_response(state: FakeApi, event: Option<Value>, close: bool) -> Response<Body> {
-        let bytes = event
-            .map(|event| Bytes::from(format!("{{\"type\":\"MODIFIED\",\"object\":{event}}}\n")));
-        let body = if close {
-            Body::from_stream(stream::once(async move {
-                Ok::<Bytes, Infallible>(bytes.unwrap_or_default())
-            }))
+    struct ActiveWatch(Arc<AtomicUsize>);
+
+    impl Drop for ActiveWatch {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    fn watch_response(state: FakeApi, is_node: bool, close: bool) -> Response<Body> {
+        if close {
+            return Response::new(Body::empty());
+        }
+        let objects = if !is_node {
+            Vec::new()
+        } else if state.mode == PAGINATED {
+            vec![
+                node("gpu-a", true, false, &json!("1")),
+                node("gpu-b", true, false, &json!("1")),
+            ]
+        } else if state.mode == GONE_RELIST {
+            vec![node("gpu-b", true, false, &json!("1"))]
         } else {
-            Body::from_stream(stream::unfold(
-                (bytes, state),
-                |(bytes, state)| async move {
-                    if let Some(bytes) = bytes {
-                        Some((Ok::<Bytes, Infallible>(bytes), (None, state)))
-                    } else {
-                        state.gate.notified().await;
-                        None
-                    }
-                },
-            ))
+            vec![node("gpu-a", true, false, &json!("1"))]
         };
+        let mut initial = objects
+            .into_iter()
+            .map(|object| json!({"type":"ADDED", "object":object}))
+            .collect::<std::collections::VecDeque<_>>();
+        initial.push_back(json!({"type":"BOOKMARK", "object":{"apiVersion":"v1", "kind":"PartialObjectMetadata", "metadata":{"resourceVersion":"2", "annotations":{"k8s.io/initial-events-end":"true"}}}}));
+        let events = if is_node {
+            state.node_events.subscribe()
+        } else {
+            state.pod_events.subscribe()
+        };
+        state.active_watches.fetch_add(1, Ordering::SeqCst);
+        let guard = ActiveWatch(state.active_watches.clone());
+        let body = Body::from_stream(stream::unfold(
+            (initial, events, guard, state),
+            |(mut initial, mut events, guard, state)| async move {
+                let event = if let Some(event) = initial.pop_front() {
+                    if state.mode == SYNC_PENDING && event["type"] == "BOOKMARK" {
+                        state.gate.notified().await;
+                    }
+                    event
+                } else {
+                    events.recv().await.ok()?
+                };
+                Some((
+                    Ok::<Bytes, Infallible>(Bytes::from(format!("{event}\n"))),
+                    (initial, events, guard, state),
+                ))
+            },
+        ));
         let mut response = Response::new(body);
         response.headers_mut().insert(
             axum::http::header::CONTENT_TYPE,
@@ -1864,7 +2065,7 @@ mod tests {
         let is_node = path.ends_with("/nodes");
         if watching {
             if !is_node {
-                return watch_response(state, None, false);
+                return watch_response(state, false, false);
             }
             let watch_number = state.node_watches.fetch_add(1, Ordering::SeqCst) + 1;
             if state.mode == GONE_RELIST && watch_number == 1 {
@@ -1880,15 +2081,13 @@ mod tests {
                     json!({"status":"Failure"}),
                 );
             }
-            if state.mode == HEALTH_CHANGE && watch_number == 1 {
-                return watch_response(state, Some(node("gpu-a", false, false, &json!("0"))), true);
-            }
-            return watch_response(state, None, false);
+            let close = state.mode == EMPTY_WATCH;
+            return watch_response(state, true, close);
         }
         let is_continued = query.split('&').any(|part| part.starts_with("continue="));
         let items = if is_node {
             let root_list = state.node_lists.fetch_add(1, Ordering::SeqCst) + 1;
-            if state.mode == DISCONNECT && root_list > 1 {
+            if matches!(state.mode, DISCONNECT | WATCH_ERROR) && root_list > 1 {
                 state.relist_gate.notified().await;
             }
             #[allow(clippy::match_same_arms)]
@@ -1897,8 +2096,6 @@ mod tests {
                 PAGINATED => vec![node("gpu-b", true, false, &json!("1"))],
                 GONE_RELIST if root_list == 1 => vec![node("gpu-a", true, false, &json!("1"))],
                 GONE_RELIST => vec![node("gpu-b", true, false, &json!("1"))],
-                HEALTH_CHANGE if root_list == 1 => vec![node("gpu-a", true, false, &json!("1"))],
-                HEALTH_CHANGE => vec![node("gpu-a", false, false, &json!("0"))],
                 _ => vec![node("gpu-a", true, false, &json!("1"))],
             }
         } else {
@@ -1930,6 +2127,9 @@ mod tests {
             node_watches: Arc::new(AtomicUsize::new(0)),
             gate: Arc::new(Notify::new()),
             relist_gate: Arc::new(Notify::new()),
+            node_events: tokio::sync::broadcast::channel(32).0,
+            pod_events: tokio::sync::broadcast::channel(32).0,
+            active_watches: Arc::new(AtomicUsize::new(0)),
         };
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
@@ -1984,7 +2184,8 @@ mod tests {
 
     fn node(name: &str, ready: bool, unschedulable: bool, units: &Value) -> Value {
         json!({
-            "metadata": {"name": name},
+            "apiVersion":"v1", "kind":"Node",
+            "metadata": {"name": name, "resourceVersion":"3", "uid":format!("uid-{name}")},
             "spec": {"unschedulable": unschedulable},
             "status": {
                 "conditions": [{"type": "Ready", "status": if ready { "True" } else { "False" }}],
@@ -2286,7 +2487,20 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let (state, client, server) = start_fake_api(DISCONNECT).await?;
         let cache = KubernetesObservationCache::new(client, 10, 10);
-        wait_for_fresh(&cache).await?;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while state.node_watches.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert!(
+            cache
+                .node_freshness
+                .check(Duration::from_secs(30))
+                .await
+                .is_err(),
+            "list alone must not become fresh"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
         state.gate.notify_waiters();
         state.gate.notify_one();
@@ -2372,23 +2586,44 @@ mod tests {
         let (state, client, server) = start_fake_api(HEALTH_CHANGE).await?;
         let cache = KubernetesObservationCache::new(client, 10, 10);
         wait_for_fresh(&cache).await?;
+        state
+            .node_events
+            .send(json!({"type":"MODIFIED", "object":node("gpu-a", false, false, &json!("0"))}))?;
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
-                if state.node_lists.load(Ordering::SeqCst) >= 2 {
-                    return;
+                if cache
+                    .nodes
+                    .read()
+                    .await
+                    .first()
+                    .is_some_and(|node| node["status"]["allocatable"]["nvidia.com/gpu"] == "0")
+                {
+                    break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await?;
-        wait_for_fresh(&cache).await?;
+        assert_eq!(
+            state.node_lists.load(Ordering::SeqCst),
+            1,
+            "incremental update must not relist"
+        );
+        assert_eq!(
+            state.node_watches.load(Ordering::SeqCst),
+            1,
+            "incremental update must keep the watch"
+        );
         let observer = KubernetesGpuCapacityObserver {
             provider_binding: "test-provider".into(),
             observation_ttl: Duration::from_secs(30),
             cache: cache.clone(),
         };
         let observations = observer.observe(&[entry()?], &[]).await?;
-        assert_eq!(observations.values().copied().collect::<Vec<_>>(), vec![0]);
+        assert_eq!(
+            observations.units.values().copied().collect::<Vec<_>>(),
+            vec![0]
+        );
         cache.shutdown();
         server.abort();
         let _ = server.await;
@@ -2405,6 +2640,13 @@ mod tests {
             state.node_watches.load(Ordering::SeqCst),
         );
         cache.shutdown();
+        tokio::time::timeout(Duration::from_secs(1), cache.join()).await?;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while state.active_watches.load(Ordering::SeqCst) != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(
             before,
@@ -2417,4 +2659,5 @@ mod tests {
         let _ = server.await;
         Ok(())
     }
+    include!("capacity_regressions.rs");
 }

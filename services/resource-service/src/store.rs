@@ -229,6 +229,12 @@ pub struct PgResourceStore {
     cursor_signing_key_previous: Option<Arc<Vec<u8>>>,
     environment_credit_owner: Option<String>,
     storage_health: crate::storage_health::StorageHealthGate,
+    gpu_observation_generation: uuid::Uuid,
+    gpu_observers: Arc<
+        std::sync::RwLock<
+            std::collections::BTreeMap<String, crate::capacity::KubernetesGpuCapacityObserver>,
+        >,
+    >,
 }
 
 enum LeaseRenewalIntent<'a> {
@@ -405,7 +411,21 @@ impl PgResourceStore {
             cursor_signing_key_previous: None,
             environment_credit_owner: None,
             storage_health: crate::storage_health::StorageHealthGate::from_env(),
+            gpu_observation_generation: uuid::Uuid::now_v7(),
+            gpu_observers: Arc::default(),
         }
+    }
+
+    pub(crate) fn register_gpu_observer(
+        &self,
+        binding: String,
+        observer: crate::capacity::KubernetesGpuCapacityObserver,
+    ) -> Result<(), ResourceStoreError> {
+        self.gpu_observers
+            .write()
+            .map_err(|_| ResourceStoreError::GpuObservationStale)?
+            .insert(binding, observer);
+        Ok(())
     }
 
     #[must_use]
@@ -1901,12 +1921,13 @@ impl PgResourceStore {
             // retry must not resurrect capacity or overwrite the historical owner/snapshot.
             return Err(ResourceStoreError::EnvironmentResourceReservationConflict);
         }
-        let allocation = resolve_gpu_allocation(
-            &mut transaction,
-            &request.provider_binding,
-            request.gpu.as_ref(),
-        )
-        .await?;
+        let allocation = self
+            .resolve_gpu_allocation(
+                &mut transaction,
+                &request.provider_binding,
+                request.gpu.as_ref(),
+            )
+            .await?;
         let contract = EnvironmentResourceReservationContract {
             environment_id: request.environment_id,
             project_id: request.project_id,
@@ -2391,7 +2412,7 @@ impl PgResourceStore {
         valid_until: UtcTimestamp,
     ) -> Result<(), ResourceStoreError> {
         if source_binding.trim().is_empty()
-            || source_binding.len() > 256
+            || source_binding.len() > 219
             || valid_until <= observed_at
         {
             return Err(ResourceStoreError::GpuObservationInvalid);
@@ -2418,7 +2439,10 @@ impl PgResourceStore {
         .bind(uuid::Uuid::now_v7())
         .bind(entry_id.as_uuid())
         .bind(i32::try_from(available_units)?)
-        .bind(source_binding)
+        .bind(format!(
+            "{}/{source_binding}",
+            self.gpu_observation_generation
+        ))
         .bind(observed_at.get())
         .bind(valid_until.get())
         .execute(&self.pool)
@@ -2810,12 +2834,13 @@ impl PgResourceStore {
                     }
                     let mut claim = allocation.claim.clone();
                     claim.updated_at = Some(now);
-                    claim.gpu_allocation = resolve_gpu_allocation(
-                        &mut transaction,
-                        approval.provider_binding.as_str(),
-                        approval.approved_resources.gpu.as_ref(),
-                    )
-                    .await?;
+                    claim.gpu_allocation = self
+                        .resolve_gpu_allocation(
+                            &mut transaction,
+                            approval.provider_binding.as_str(),
+                            approval.approved_resources.gpu.as_ref(),
+                        )
+                        .await?;
                     let resolved_allocation = PendingAllocation {
                         claim,
                         lease_id: allocation.lease_id,
@@ -5279,16 +5304,18 @@ fn gpu_seed_matches(entry: &GpuCatalogEntry, seed: &GpuCatalogSeed) -> bool {
         && entry.allocation_binding == seed.allocation_binding
 }
 
-async fn resolve_gpu_allocation(
-    transaction: &mut Transaction<'_, Postgres>,
-    provider_binding: &str,
-    request: Option<&contracts::resource::GpuRequest>,
-) -> Result<Option<GpuAllocation>, ResourceStoreError> {
-    let Some(request) = request else {
-        return Ok(None);
-    };
-    lock_gpu_admission(transaction).await?;
-    let mut rows = sqlx::query(
+impl PgResourceStore {
+    async fn resolve_gpu_allocation(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        provider_binding: &str,
+        request: Option<&contracts::resource::GpuRequest>,
+    ) -> Result<Option<GpuAllocation>, ResourceStoreError> {
+        let Some(request) = request else {
+            return Ok(None);
+        };
+        lock_gpu_admission(transaction).await?;
+        let mut rows = sqlx::query(
         "SELECT entry_id,class,mode,provider_binding,capacity_units,allocation_binding,revision \
          FROM resource.gpu_catalog_entries \
          WHERE class=$1 AND provider_binding=$2 AND active \
@@ -5298,46 +5325,72 @@ async fn resolve_gpu_allocation(
     .bind(provider_binding)
     .fetch_all(&mut **transaction)
     .await?;
-    if rows.len() > 1 {
-        tracing::error!(
-            class = %request.class,
-            provider_binding,
-            active_catalog_entries = rows.len(),
-            event = "resource.gpu_catalog.ambiguous",
-            diagnostic_code = "LW_RESOURCE_GPU_CATALOG_AMBIGUOUS",
-        );
-        return Err(ResourceStoreError::GpuCatalogAmbiguous);
-    }
-    let Some(row) = rows.pop() else {
-        return Err(ResourceStoreError::GpuCatalogMissing);
-    };
-    let entry_id: uuid::Uuid = row.try_get("entry_id")?;
-    let mode: String = row.try_get("mode")?;
-    let mode = serde_json::from_value::<GpuAllocationMode>(Value::String(mode))
-        .map_err(|_| ResourceStoreError::GpuCatalogInvalid)?;
-    let catalog_revision: i64 = row.try_get("revision")?;
-    let class: String = row.try_get("class")?;
-    let provider: String = row.try_get("provider_binding")?;
-    let allocation_binding: String = row.try_get("allocation_binding")?;
-    let capacity = i64::from(row.try_get::<i32, _>("capacity_units")?);
-    let available: Option<i64> = sqlx::query_scalar(
-        "SELECT available_units::bigint FROM resource.gpu_capacity_observations \
-         WHERE entry_id=$1 AND valid_until > clock_timestamp() \
+        if rows.len() > 1 {
+            tracing::error!(
+                class = %request.class,
+                provider_binding,
+                active_catalog_entries = rows.len(),
+                event = "resource.gpu_catalog.ambiguous",
+                diagnostic_code = "LW_RESOURCE_GPU_CATALOG_AMBIGUOUS",
+            );
+            return Err(ResourceStoreError::GpuCatalogAmbiguous);
+        }
+        let Some(row) = rows.pop() else {
+            return Err(ResourceStoreError::GpuCatalogMissing);
+        };
+        let entry_id: uuid::Uuid = row.try_get("entry_id")?;
+        let mode: String = row.try_get("mode")?;
+        let mode = serde_json::from_value::<GpuAllocationMode>(Value::String(mode))
+            .map_err(|_| ResourceStoreError::GpuCatalogInvalid)?;
+        let catalog_revision: i64 = row.try_get("revision")?;
+        let class: String = row.try_get("class")?;
+        let provider: String = row.try_get("provider_binding")?;
+        let allocation_binding: String = row.try_get("allocation_binding")?;
+        let capacity = i64::from(row.try_get::<i32, _>("capacity_units")?);
+        let observation = sqlx::query(
+        "SELECT available_units::bigint AS available_units,source_binding,valid_until > clock_timestamp() AS fresh FROM resource.gpu_capacity_observations \
+         WHERE entry_id=$1 \
          ORDER BY observed_at DESC LIMIT 1",
     )
     .bind(entry_id)
     .fetch_optional(&mut **transaction)
     .await?;
-    // A catalog entry without a fresh provider observation cannot authorize a
-    // claim.  The catalog capacity is a policy limit, never a substitute for
-    // current provider inventory.
-    let Some(available) = available else {
-        return Err(ResourceStoreError::GpuObservationStale);
-    };
-    // Work claims and Experiment environment reservations share one physical allocation binding,
-    // so both durable reservation tables must be subtracted before admitting new capacity.
-    let reserved: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(sum(reserved.units),0)::bigint
+        // A catalog entry without a fresh provider observation cannot authorize a
+        // claim.  The catalog capacity is a policy limit, never a substitute for
+        // current provider inventory.
+        let Some(observation) = observation else {
+            return Err(ResourceStoreError::GpuObservationStale);
+        };
+        if !observation.try_get::<bool, _>("fresh")? {
+            return Err(ResourceStoreError::GpuObservationStale);
+        }
+        let source: String = observation.try_get("source_binding")?;
+        let prefix = format!("{}/", self.gpu_observation_generation);
+        let source = source
+            .strip_prefix(&prefix)
+            .ok_or(ResourceStoreError::GpuObservationStale)?;
+        // HTTP and worker clones share these live sync epochs. A disconnected, changed,
+        // expired or not-yet-synced provider cannot reuse a still-valid database row.
+        let observer = self
+            .gpu_observers
+            .read()
+            .map_err(|_| ResourceStoreError::GpuObservationStale)?
+            .get(provider_binding)
+            .cloned();
+        if let Some(observer) = observer {
+            let (current_source, _) = observer
+                .source()
+                .await
+                .map_err(|_| ResourceStoreError::GpuObservationStale)?;
+            if source != current_source {
+                return Err(ResourceStoreError::GpuObservationStale);
+            }
+        }
+        let available: i64 = observation.try_get("available_units")?;
+        // Work claims and Experiment environment reservations share one physical allocation binding,
+        // so both durable reservation tables must be subtracted before admitting new capacity.
+        let reserved: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(sum(reserved.units),0)::bigint
          FROM (
              SELECT reservation.units AS units
              FROM resource.gpu_capacity_reservations reservation
@@ -5351,29 +5404,30 @@ async fn resolve_gpu_allocation(
              WHERE reservation.state='reserved'
                AND reservation.allocation_binding=$1
          ) AS reserved",
-    )
-    .bind(&allocation_binding)
-    .fetch_one(&mut **transaction)
-    .await?;
-    let requested = i64::from(request.count);
-    if available.min(capacity).saturating_sub(reserved) < requested {
-        return Err(ResourceStoreError::GpuCapacityExhausted);
+        )
+        .bind(&allocation_binding)
+        .fetch_one(&mut **transaction)
+        .await?;
+        let requested = i64::from(request.count);
+        if available.min(capacity).saturating_sub(reserved) < requested {
+            return Err(ResourceStoreError::GpuCapacityExhausted);
+        }
+        let catalog_revision = Revision::new(u64::try_from(catalog_revision)?)?;
+        let allocation = GpuAllocation {
+            entry_id: GpuCatalogEntryId::from_str(&entry_id.to_string())
+                .map_err(|_| ResourceStoreError::GpuCatalogInvalid)?,
+            class,
+            count: request.count,
+            mode,
+            provider_binding: provider,
+            allocation_binding,
+            catalog_revision,
+        };
+        allocation
+            .validate()
+            .map_err(|_| ResourceStoreError::GpuCatalogInvalid)?;
+        Ok(Some(allocation))
     }
-    let catalog_revision = Revision::new(u64::try_from(catalog_revision)?)?;
-    let allocation = GpuAllocation {
-        entry_id: GpuCatalogEntryId::from_str(&entry_id.to_string())
-            .map_err(|_| ResourceStoreError::GpuCatalogInvalid)?,
-        class,
-        count: request.count,
-        mode,
-        provider_binding: provider,
-        allocation_binding,
-        catalog_revision,
-    };
-    allocation
-        .validate()
-        .map_err(|_| ResourceStoreError::GpuCatalogInvalid)?;
-    Ok(Some(allocation))
 }
 
 async fn insert_gpu_reservation(

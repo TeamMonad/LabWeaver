@@ -200,6 +200,19 @@ bounded timeout, an observation TTL of at most 300 seconds and non-zero node/pod
 observer for a GPU provider binding, a GPU request fails closed with `GpuObservationStale` rather
 than being admitted against an unobserved capacity.
 
+`clusterCaFile` contains a PEM certificate bundle (decoded to DER for the Kubernetes client).
+The read-only observer performs bounded paginated lists and a watch with `sendInitialEvents` and
+`resourceVersionMatch=NotOlderThan`. The API server must support streaming initial events and
+the `k8s.io/initial-events-end` bookmark; list completion or watch HTTP headers alone do not
+authorize admission. A missing/failed synchronization barrier remains unavailable.
+
+Node and Pod apply/delete events update the shared snapshot without a per-request cluster list.
+The durable deadline is based on the older source observation of the two streams, not the time
+the worker reads the cache. Admission checks the same live observer epoch as the persisted row;
+disconnect, source expiry, changed-but-not-persisted snapshots, shutdown and process restart
+cannot reuse an earlier observation. Reconnects, including successful empty watch responses,
+have a cancellable 100 ms minimum backoff. Shutdown waits for both observation tasks to exit.
+
 `deploy/versions.lock.yml` `platform_gpu_classes` is the reviewed starting catalog
 (`class`, `mode`, `provider_binding`, `capacity_units`, `allocation_binding`). The
 `resource_application` role renders it into `resource-service-config/capacity.json`
