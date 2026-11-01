@@ -769,17 +769,61 @@ async fn gateway_observability_covers_admission_transport_and_http_without_secre
             recorded,
             "a request receipt survives upstream rejection and transport failure"
         );
+        if matches!(mode, Mode::Json) {
+            let accepted_call = events
+                .iter()
+                .find(|event| {
+                    event
+                        .get("outcome")
+                        .is_some_and(|value| value == "accepted")
+                })
+                .and_then(|event| event.get("operation_id"))
+                .ok_or("accepted call identity missing")?;
+            assert_eq!(
+                f.request("observability-call").send().await?.status(),
+                StatusCode::CONFLICT
+            );
+            let events = logs.events();
+            let denied = events
+                .iter()
+                .find(|event| {
+                    event.get("run_id") == Some(&f.run_id.to_string())
+                        && event
+                            .get("outcome")
+                            .is_some_and(|value| value == "admission-denied")
+                })
+                .ok_or("missing run-scoped rejection")?;
+            assert_eq!(
+                denied.get("diagnostic_code").map(String::as_str),
+                Some("LW_MODEL_CALL_OUTCOME_UNKNOWN")
+            );
+            assert_eq!(denied.get("attempt"), Some(&f.attempt.to_string()));
+            assert_eq!(denied.get("operation_id"), Some(accepted_call));
+        }
     }
     let denied = Fixture::new(Mode::Json, false).await?;
     let response = denied.request("observability-denied").send().await?;
     assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
     assert_eq!(denied.calls.load(Ordering::SeqCst), 0);
     let events = logs.events();
-    assert!(events.iter().any(|event| {
-        event
-            .get("outcome")
-            .is_some_and(|value| value == "admission-denied")
-    }));
+    let rejected = events
+        .iter()
+        .find(|event| {
+            event.get("run_id") == Some(&denied.run_id.to_string())
+                && event
+                    .get("outcome")
+                    .is_some_and(|value| value == "admission-denied")
+        })
+        .ok_or("missing specific run admission denial")?;
+    assert_eq!(
+        rejected.get("diagnostic_code").map(String::as_str),
+        Some("LW_CREDITS_INSUFFICIENT")
+    );
+    assert_eq!(rejected.get("attempt"), Some(&denied.attempt.to_string()));
+    let _: uuid::Uuid = rejected
+        .get("operation_id")
+        .ok_or("missing denied call identity")?
+        .parse()?;
     let rendered = format!("{events:?}");
     for secret in [
         "upstream-private-key",

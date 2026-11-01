@@ -4,6 +4,8 @@
 //! `upstream-connect-tls-or-timeout-error` (with `error_kind=timeout|connect-or-tls|transport`),
 //! and `upstream-http-status` (with the numeric status). Validated requests and upstream events
 //! carry the Agent run and attempt identifiers; upstream events also carry the fenced call id.
+//! Admission-denied events also carry verified run/attempt identity and the fenced call identity
+//! once known. Rejections before signature verification never attach caller-supplied identities.
 //! No URL, credential, request body, response body or raw transport error is logged.
 //!
 //! `model_gateway_request` ledger receipts mean only that an authoring capability reached the
@@ -344,11 +346,13 @@ impl GatewayState {
 
     async fn refuse_before_send(
         &self,
+        claims: &TokenClaims,
         hold_id: Uuid,
         call_id: Uuid,
         model: &str,
         code: &'static str,
     ) -> Response {
+        let error_response = verified_rejection(claims, Some(call_id));
         let Ok(event_id) = zero_settlement_event(call_id) else {
             return error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -476,6 +480,33 @@ fn error_response(status: StatusCode, code: &'static str, message: &str) -> Resp
         diagnostic_code = code,
         http_status = status.as_u16()
     );
+    error_payload(status, code, message)
+}
+
+fn verified_rejection(
+    claims: &TokenClaims,
+    call_id: Option<Uuid>,
+) -> impl Fn(StatusCode, &'static str, &str) -> Response + Copy + use<> {
+    let run_id = claims.agent_run_id;
+    let attempt = claims.attempt;
+    move |status, code, message| {
+        tracing::warn!(
+            event = "agent.model_gateway.request_completed",
+            component = "agent-service",
+            operation = "model_gateway.request",
+            outcome = "admission-denied",
+            duration_ms = 0_u64,
+            diagnostic_code = code,
+            http_status = status.as_u16(),
+            run_id = %run_id,
+            attempt,
+            operation_id = call_id.as_ref().map(tracing::field::display),
+        );
+        error_payload(status, code, message)
+    }
+}
+
+fn error_payload(status: StatusCode, code: &'static str, message: &str) -> Response {
     (status,axum::Json(json!({"type":"error","error":{"type":"invalid_request_error","message":message},"lwCode":code}))).into_response()
 }
 fn identity(parts: &[&[u8]]) -> Uuid {
@@ -525,6 +556,7 @@ async fn messages(
             return error_response(StatusCode::UNAUTHORIZED, code, "gateway token rejected");
         }
     };
+    let error_response = verified_rejection(&claims, None);
     tracing::info!(event = "agent.model_gateway.request_received", outcome = "received", run_id = %claims.agent_run_id, attempt = claims.attempt);
     if let ModelGatewayScope::Authoring { task_run_id, .. } = &claims.scope {
         // This receipt means only "a validated capability reached Messages", not admission,
@@ -598,6 +630,7 @@ async fn messages(
             );
         }
     };
+    let error_response = verified_rejection(&claims, Some(call_id));
     let accepted: Result<bool, _> = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent.idempotency_ledger WHERE operation='model_gateway_call' AND idempotency_key=$1)")
         .bind(call_id.to_string()).fetch_one(&state.pool).await;
     match accepted {
@@ -724,12 +757,13 @@ async fn forward(
     call_id: Uuid,
     claims: TokenClaims,
 ) -> Response {
+    let error_response = verified_rejection(&claims, Some(call_id));
     // Admission may race revocation, cancellation, or a changed egress policy. No request has
     // left the platform yet, so this path has a known zero observation, never unknown usage.
     let allowed = state.preflight(&claims, &headers, &body, &model).await;
     if let Err(code) = allowed {
         return state
-            .refuse_before_send(hold_id, call_id, &model, code)
+            .refuse_before_send(&claims, hold_id, call_id, &model, code)
             .await;
     }
     let Ok(url) = state.upstream.join("v1/messages") else {
@@ -1098,6 +1132,7 @@ async fn authorize_tool(
             return error_response(StatusCode::UNAUTHORIZED, code, "gateway token rejected");
         }
     };
+    let error_response = verified_rejection(&claims, None);
     match state.authorize(&claims).await {
         Ok(_) => {
             let input: Value = match contracts::parse_strict_json(&body) {

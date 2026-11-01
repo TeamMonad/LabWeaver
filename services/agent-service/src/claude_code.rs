@@ -731,6 +731,16 @@ impl ClaudeCodeProcessOutput {
             .or_else(|| self.failure_class.map(RuntimeFailureClass::runtime_error))
     }
 
+    // A verified Resource receipt is authoritative even when the CLI emits a generic model-error
+    // envelope. Without that receipt, preserve the existing envelope-before-stderr precedence.
+    fn envelope_failure(&self, envelope: &ClaudeCodeResultEnvelope) -> ClaudeCodeRuntimeError {
+        self.resource_admission
+            .map(ClaudeCodeRuntimeError::ResourceAdmission)
+            .or_else(|| envelope.runtime_error())
+            .or_else(|| self.failure_class.map(RuntimeFailureClass::runtime_error))
+            .unwrap_or(ClaudeCodeRuntimeError::ExecutionFailed)
+    }
+
     pub(crate) fn with_gateway_request_observed(mut self, observed: Option<bool>) -> Self {
         self.gateway_request_observed = observed;
         self
@@ -2425,10 +2435,7 @@ impl ClaudeCodeRuntime {
                 .map_err(|error| review_failure(error, usage_option(total_usage)))?;
             if !process_output.is_success() || envelope.is_error {
                 return Err(review_failure(
-                    envelope
-                        .runtime_error()
-                        .or_else(|| process_output.classified_error())
-                        .unwrap_or(ClaudeCodeRuntimeError::ExecutionFailed),
+                    process_output.envelope_failure(&envelope),
                     usage_option(total_usage),
                 ));
             }
@@ -2496,7 +2503,7 @@ impl ClaudeCodeRuntime {
         clippy::too_many_arguments,
         reason = "one parse boundary carries the immutable candidate, policy and audit identity"
     )]
-    async fn parse_result(
+    pub(crate) async fn parse_result(
         &self,
         track: AgentTrackKind,
         input: &ImmutableEgressInput,
@@ -2556,10 +2563,7 @@ impl ClaudeCodeRuntime {
             ));
         }
         if !process_output.is_success() || envelope.is_error {
-            let error = envelope
-                .runtime_error()
-                .or_else(|| process_output.classified_error())
-                .unwrap_or(ClaudeCodeRuntimeError::ExecutionFailed);
+            let error = process_output.envelope_failure(&envelope);
             return Err(failure_with_audit(error, audit));
         }
         if envelope.kind != "result" || envelope.subtype != "success" || audit.session_id.is_none()
@@ -4441,6 +4445,35 @@ mod tests {
                 .map(ClaudeCodeRuntimeError::diagnostic_code),
             Some("LW_RESOURCE_RATE_UNCONFIGURED")
         );
+    }
+
+    #[test]
+    fn verified_resource_admission_precedes_envelope_without_reordering_stderr()
+    -> Result<(), Box<dyn Error>> {
+        let mut envelope: ClaudeCodeResultEnvelope = serde_json::from_value(json!({
+            "type":"result", "subtype":"error_during_execution", "is_error":true,
+            "session_id":"01900000-0000-7000-8000-000000000001", "num_turns":1,
+            "total_cost_usd":0, "usage":{"input_tokens":0,"output_tokens":0},
+            "permission_denials":[], "terminal_reason":"model_error"
+        }))?;
+        let output =
+            ClaudeCodeProcessOutput::from_raw(Some(1), Vec::new(), b"rate limit private stderr");
+        assert_eq!(
+            output.envelope_failure(&envelope).diagnostic_code(),
+            "LW_PROVIDER_UNAVAILABLE"
+        );
+        envelope.terminal_reason = None;
+        assert_eq!(
+            output.envelope_failure(&envelope).diagnostic_code(),
+            "LW_RATE_LIMITED"
+        );
+        envelope.terminal_reason = Some("model_error".to_owned());
+        let output = output.with_resource_admission(Some("LW_RESOURCE_RATE_UNCONFIGURED"));
+        assert_eq!(
+            output.envelope_failure(&envelope).diagnostic_code(),
+            "LW_RESOURCE_RATE_UNCONFIGURED"
+        );
+        Ok(())
     }
 
     #[test]

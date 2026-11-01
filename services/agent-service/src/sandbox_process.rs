@@ -667,7 +667,13 @@ impl SandboxAuthoringProcess {
                         .map_err(|_| ClaudeCodeProcessError::Io)?;
                     let frozen: FrozenSandboxReceipt = serde_json::from_value(canonical)
                         .map_err(|_| ClaudeCodeProcessError::Io)?;
-                    let output = self.assemble_output(&frozen, false).await?;
+                    let output = Self::assemble_output(
+                        self.store.pool(),
+                        self.objects.as_ref(),
+                        &frozen,
+                        false,
+                    )
+                    .await?;
                     self.store
                         .complete_sandbox_attempt(
                             &intent,
@@ -1014,7 +1020,13 @@ impl SandboxAuthoringProcess {
                         return Err(ClaudeCodeProcessError::Io);
                     }
                 }
-                return self.assemble_output(&frozen, true).await;
+                return Self::assemble_output(
+                    self.store.pool(),
+                    self.objects.as_ref(),
+                    &frozen,
+                    true,
+                )
+                .await;
             }
             let status = self
                 .resources
@@ -1089,7 +1101,13 @@ impl SandboxAuthoringProcess {
                         .map_err(|_| ClaudeCodeProcessError::Io)?;
                     let canonical: FrozenSandboxReceipt =
                         serde_json::from_value(value).map_err(|_| ClaudeCodeProcessError::Io)?;
-                    return self.assemble_output(&canonical, false).await;
+                    return Self::assemble_output(
+                        self.store.pool(),
+                        self.objects.as_ref(),
+                        &canonical,
+                        false,
+                    )
+                    .await;
                 }
                 KubernetesJobObservation::Running
                     if !cancellation.is_cancelled() && tokio::time::Instant::now() < deadline =>
@@ -1310,15 +1328,14 @@ impl SandboxAuthoringProcess {
     }
 
     async fn assemble_output(
-        &self,
+        pool: &sqlx::PgPool,
+        objects: &dyn ImmutableObjectStore,
         frozen: &FrozenSandboxReceipt,
         verify_export: bool,
     ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
-        let output = frozen
-            .assemble(self.objects.as_ref(), verify_export)
-            .await?;
+        let output = frozen.assemble(objects, verify_export).await?;
         let observation = sqlx::query_scalar::<_, Option<serde_json::Value>>("SELECT result FROM agent.idempotency_ledger WHERE operation='model_gateway_request' AND idempotency_key=$1")
-            .bind(frozen.task_run_id.to_string()).fetch_optional(self.store.pool()).await;
+            .bind(frozen.task_run_id.to_string()).fetch_optional(pool).await;
         let (observed, admission) = if let Ok(row) = observation {
             let admission = row
                 .as_ref()
@@ -2230,6 +2247,12 @@ impl ClaudeCodeProcess for SandboxAuthoringProcess {
 }
 
 #[cfg(test)]
+use crate::build_billing;
+#[cfg(test)]
+#[path = "../tests/support/model_authorization.rs"]
+mod model_authorization;
+
+#[cfg(test)]
 mod tests {
     use super::{
         SandboxReceipt, SandboxReceiptError, map_task_resource, parse_receipt, sandbox_failure,
@@ -2487,6 +2510,7 @@ mod tests {
     }
     struct ReceiptObjects {
         export: Vec<u8>,
+        result: Vec<u8>,
         stream_reads: std::sync::atomic::AtomicUsize,
         paths: std::sync::Mutex<Vec<std::path::PathBuf>>,
     }
@@ -2538,19 +2562,33 @@ mod tests {
         }
         async fn read_verified(
             &self,
-            _key: &str,
-            _expected: &contracts::ArtifactRef,
+            key: &str,
+            expected: &contracts::ArtifactRef,
         ) -> Result<artifact_store::VerifiedObject, artifact_store::ObjectStoreError> {
-            // This fixture has only an export: accepting a byte read would hide a streaming regression.
-            Err(artifact_store::ObjectStoreError::StreamingUnsupported)
+            if key != "own/result"
+                || self.result.is_empty()
+                || expected.size_bytes != self.result.len() as u64
+            {
+                return Err(artifact_store::ObjectStoreError::StreamingUnsupported);
+            }
+            Ok(artifact_store::VerifiedObject {
+                reference: expected.clone(),
+                bytes: self.result.clone(),
+            })
         }
         async fn freeze_current(
             &self,
-            _key: &str,
-            _size: u64,
-            _media: &str,
+            key: &str,
+            size: u64,
+            media: &str,
         ) -> Result<artifact_store::VerifiedObject, artifact_store::ObjectStoreError> {
-            Err(artifact_store::ObjectStoreError::StreamingUnsupported)
+            if key != "own/result" || self.result.is_empty() || size != self.result.len() as u64 {
+                return Err(artifact_store::ObjectStoreError::StreamingUnsupported);
+            }
+            Ok(artifact_store::VerifiedObject {
+                reference: Self::reference(size, media),
+                bytes: self.result.clone(),
+            })
         }
         async fn freeze_current_file(
             &self,
@@ -2576,6 +2614,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let objects = ReceiptObjects {
             export: b"oci-layout-test".to_vec(),
+            result: Vec::new(),
             stream_reads: std::sync::atomic::AtomicUsize::new(0),
             paths: std::sync::Mutex::new(Vec::new()),
         };
@@ -2643,6 +2682,170 @@ mod tests {
                 .iter()
                 .all(|p| !p.exists())
         );
+        Ok(())
+    }
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "native receipt, database read faults, runtime parsing and public persistence form one boundary scenario"
+    )]
+    async fn sandbox_assembly_preserves_ledger_diagnostic_and_database_observation_states()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::claude_code::{ClaudeCodeRuntime, TokioClaudeCodeProcess};
+        use crate::run_store::PostgresAgentRunStore;
+        use serde_json::json;
+        use std::sync::Arc;
+        use testcontainers::{ImageExt, runners::AsyncRunner};
+        use testcontainers_modules::postgres::Postgres;
+
+        let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(12)
+            .connect(&format!(
+                "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+                postgres.get_host_port_ipv4(5432).await?
+            ))
+            .await?;
+        let billing = crate::build_billing::BuildBillingFixture::start(pool.clone()).await?;
+        super::model_authorization::apply(&pool, persistence_sqlx::Domain::Agent).await?;
+        let authority =
+            super::model_authorization::ModelAuthorizationFixture::start(pool.clone(), &billing)
+                .await?;
+        let task_run_id = match authority.scope {
+            crate::model_gateway::ModelGatewayScope::Authoring { task_run_id, .. } => {
+                task_run_id.as_uuid()
+            }
+            crate::model_gateway::ModelGatewayScope::Review { .. } => {
+                return Err("authoring task required".into());
+            }
+        };
+        let session_id = uuid::Uuid::now_v7();
+        let result = format!("{}\n{}\n",
+            json!({"type":"system","subtype":"init","session_id":session_id}),
+            json!({"type":"result","subtype":"error_during_execution","is_error":true,"session_id":session_id,
+                "num_turns":1,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0},
+                "permission_denials":[],"terminal_reason":"model_error"})).into_bytes();
+        let objects = ReceiptObjects {
+            export: Vec::new(),
+            result,
+            stream_reads: std::sync::atomic::AtomicUsize::new(0),
+            paths: std::sync::Mutex::new(Vec::new()),
+        };
+        let empty = Sha256Digest::of_bytes(&[]).to_string();
+        let receipt = SandboxReceipt {
+            result_size_bytes: objects.result.len() as u64,
+            result_sha256: Sha256Digest::of_bytes(&objects.result).to_string(),
+            stderr_size_bytes: 0,
+            stderr_sha256: empty.clone(),
+            exit_code: 1,
+            claude_version: authority.policy.binding.claude_code_version.clone(),
+            export_size_bytes: 0,
+            export_sha256: empty,
+        };
+        let frozen = super::freeze_terminal_receipt(
+            &objects,
+            task_run_id,
+            &receipt,
+            ["own/result", "own/stderr", "own/export"],
+        )
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+        let runtime = ClaudeCodeRuntime::new(
+            authority.policy.clone(),
+            Arc::new(TokioClaudeCodeProcess::new(BTreeMap::new())),
+        )?;
+        let store = PostgresAgentRunStore::new(pool.clone());
+        for (name, present, read_error, gateway, expected_code) in [
+            (
+                "absent",
+                false,
+                false,
+                "not-observed",
+                "LW_PROVIDER_UNAVAILABLE",
+            ),
+            (
+                "present",
+                true,
+                false,
+                "observed",
+                "LW_RESOURCE_RATE_UNCONFIGURED",
+            ),
+            (
+                "read-error",
+                true,
+                true,
+                "unknown",
+                "LW_PROVIDER_UNAVAILABLE",
+            ),
+        ] {
+            sqlx::query("DELETE FROM agent.model_diagnostics WHERE run_id=$1")
+                .bind(authority.run_id.as_uuid())
+                .execute(&pool)
+                .await?;
+            sqlx::query("DELETE FROM agent.idempotency_ledger WHERE operation='model_gateway_request' AND idempotency_key=$1").bind(task_run_id.to_string()).execute(&pool).await?;
+            if present {
+                sqlx::query("INSERT INTO agent.idempotency_ledger(operation,idempotency_key,request_sha256,state,result) VALUES('model_gateway_request',$1,$2,'in_progress',$3)")
+                    .bind(task_run_id.to_string()).bind(Sha256Digest::of_bytes(b"authorized request").to_string())
+                    .bind(json!({"admissionDiagnostic":"LW_RESOURCE_RATE_UNCONFIGURED"})).execute(&pool).await?;
+            }
+            if read_error {
+                sqlx::query(
+                    "ALTER TABLE agent.idempotency_ledger RENAME TO unavailable_idempotency_ledger",
+                )
+                .execute(&pool)
+                .await?;
+            }
+            let output =
+                super::SandboxAuthoringProcess::assemble_output(&pool, &objects, &frozen, false)
+                    .await?;
+            if read_error {
+                sqlx::query(
+                    "ALTER TABLE agent.unavailable_idempotency_ledger RENAME TO idempotency_ledger",
+                )
+                .execute(&pool)
+                .await?;
+            }
+            let failure = runtime
+                .parse_result(
+                    AgentTrackKind::Environment,
+                    &authority.prepared,
+                    &json!({"type":"object"}),
+                    "controlled prompt",
+                    Sha256Digest::of_bytes(b"tool-policy"),
+                    &output,
+                    contracts::authoring::EnvironmentClass::Work,
+                )
+                .await
+                .err()
+                .ok_or("failure envelope must not become a candidate")?;
+            assert_eq!(failure.diagnostic_code(), expected_code, "{name}");
+            // A populated session confirms the valid envelope path, not malformed-output fallback.
+            assert!(failure.audit().session_id.is_some(), "{name}");
+            let mut transaction = pool.begin().await?;
+            crate::model_diagnostics::record_failure(
+                &mut transaction,
+                authority.run_id,
+                authority.attempt,
+                failure.audit(),
+                failure.user_guidance(),
+                authority.now,
+            )
+            .await?;
+            transaction.commit().await?;
+            let diagnostics = store.diagnostics(authority.run_id).await?;
+            assert_eq!(diagnostics.items.len(), 1, "{name}");
+            assert_eq!(
+                diagnostics.items[0].diagnostic_code, expected_code,
+                "{name}"
+            );
+            assert!(
+                diagnostics.items[0].reason.contains(&format!(
+                    "exit_status=1; gateway_request={gateway}; stderr_category=empty"
+                )),
+                "{name}"
+            );
+            assert!(!serde_json::to_string(&diagnostics)?.contains("model_error"));
+        }
         Ok(())
     }
 }
