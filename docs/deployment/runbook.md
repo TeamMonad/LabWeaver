@@ -111,6 +111,10 @@ python tools/deployment_bundle.py deploy --archive .private/installation.age \
 
 Resource 配置应用使用 Bundle 中的目标 namespace，配置对象的 namespace 必须完全相符；读取 NATS Secret 与应用 ConfigMap 都在同一目标中执行，不回退到 `labweaver-system`。基础服务的失败 revision 恢复仅处理安装 ID 相符的既定 StatefulSet，删除前核对 Pod 的 controller UID，并以 Pod UID 前置条件防止删除并发替换出的新对象。
 
+应用阶段在修改集群前核对 portal、evaluation、authoring、data namespace 及其实际写入的 Secret、策略、ServiceAccount、Gateway/Service 和路由；Helm 使用最终 values/镜像参数先渲染目标清单，再核对所有对象（含跨 namespace 对象与集群 RBAC）。仅配置内容或 NetworkPolicy spec 相同不代表允许认领。Deployment → ReplicaSet → Pod 等控制器子对象沿已观测的 owner UID 回溯到已核验的安装根对象，不能靠名称或标签推测，父对象缺失、UID 更换或循环引用均拒绝。
+
+Harbor 新 namespace 仅在 API 明确返回 NotFound 时以 `create` 写入安装 ID；已有 namespace 不补写缺失 ID。已有 Harbor Helm release 须具有准确 name/namespace，且保存的 `labweaverInstallationId` 与 Bundle 相同。Identity 同样检查 namespace、凭据、证书目标、CNPG Cluster/备份、RBAC、工作负载与配置的安装 ID；role-only provisioning 也不绕过检查。既有无 ID 的实例不会自动迁移。以上检查不替代真实集群上的首次安装、重入与升级验证。
+
 清空仅能在另行授权的维护窗口执行，必须指定目标、范围和原 Bundle 安装 ID；先完成独立备份与数据处置审批。入口仅选择安装 ID 相符的 namespace，逐个核对其资源、所有命中的 Helm release 与绑定 PV 的归属，核对失败时在任何卸载或删除前停止。PV 缺少 `labweaver.io/installation-id` 标记时不会依赖 `claimRef` 推测归属或静默删除；须先在独立审批中查清盘身份并处理，不能把再次运行清空当作授权。外国 `lw-env-*` 命名空间不因名称相似被选中；无标记的旧安装不能自动采用或清空：
 
 ```sh

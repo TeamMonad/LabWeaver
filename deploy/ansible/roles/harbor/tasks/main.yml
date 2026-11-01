@@ -58,6 +58,13 @@
     - "{{ storageclass_local_path }}"
     - "{{ storageclass_nfs_rwx }}"
 
+- name: Require verified Harbor installation identity
+  ansible.builtin.assert:
+    that:
+      - labweaver_installation_id | default('') is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - labweaver_installation_id == lookup('ansible.builtin.env', 'LW_BUNDLE_INSTALLATION_ID')
+    fail_msg: HARBOR_INSTALLATION_ID_REQUIRED
+
 - name: Read existing Harbor namespace
   ansible.builtin.command:
     argv:
@@ -71,14 +78,85 @@
       - json
   check_mode: false
   changed_when: false
-  failed_when: harbor_namespace_read.rc != 0 and (harbor_namespace_read.stderr | default('')) is not search('(?i)not found')
+  failed_when: >-
+    harbor_namespace_read.rc != 0 and
+    (harbor_namespace_read.stderr | default('')) is not search('(?i)\(NotFound\): namespaces? .* not found')
   register: harbor_namespace_read
 
 - name: Reject an existing namespace not labelled as LabWeaver infrastructure
   ansible.builtin.assert:
     that:
-      - harbor_namespace_read.rc == 0 or (harbor_namespace_read.stderr | default('')) is search('(?i)not found')
+      - >-
+        (harbor_namespace_read.rc != 0 and (harbor_namespace_read.stderr | default('')) is search('(?i)\(NotFound\): namespaces? .* not found')) or
+        (harbor_namespace_read.rc == 0 and
+         (harbor_namespace_read.stdout | from_json).metadata.name == harbor_namespace and
+         (harbor_namespace_read.stdout | from_json).metadata.labels['app.kubernetes.io/part-of'] | default('') == 'labweaver-infrastructure' and
+         (harbor_namespace_read.stdout | from_json).metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id)
     fail_msg: HARBOR_NAMESPACE_UNMANAGED
+
+- name: List the exact Harbor Helm release before any mutation
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/helm
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - list
+      - --all
+      - --namespace
+      - "{{ harbor_namespace }}"
+      - --filter
+      - "^{{ harbor_release_name }}$"
+      - --output
+      - json
+  register: harbor_release_list
+  changed_when: false
+
+- name: Read existing Harbor Helm release metadata
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/helm
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - get
+      - metadata
+      - "{{ harbor_release_name }}"
+      - --namespace
+      - "{{ harbor_namespace }}"
+      - --output
+      - json
+  register: harbor_release_metadata
+  changed_when: false
+  when: harbor_release_list.stdout | from_json | length == 1
+
+- name: Read the existing Harbor release installation identity
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/helm
+      - --kubeconfig
+      - "{{ harbor_kubeconfig_path }}"
+      - get
+      - values
+      - "{{ harbor_release_name }}"
+      - --namespace
+      - "{{ harbor_namespace }}"
+      - --output
+      - json
+  register: harbor_release_values
+  changed_when: false
+  no_log: true
+  when: harbor_release_list.stdout | from_json | length == 1
+
+- name: Refuse a foreign Harbor Helm installation
+  ansible.builtin.assert:
+    that:
+      - harbor_release_list.stdout | from_json | length <= 1
+      - >-
+        harbor_release_list.stdout | from_json | length == 0 or
+        ((harbor_release_metadata.stdout | from_json).name == harbor_release_name and
+         (harbor_release_metadata.stdout | from_json).namespace == harbor_namespace and
+         (harbor_release_values.stdout | from_json).labweaverInstallationId | default('') == labweaver_installation_id)
+    fail_msg: HARBOR_RELEASE_OWNERSHIP_CONFLICT
+  no_log: true
 
 - name: Capture the shared demo Gateway identity without modifying it
   ansible.builtin.command:
@@ -147,34 +225,31 @@
 - name: Load Harbor credentials from the configured source
   ansible.builtin.include_tasks: secret-locator.yml
 
-- name: Create the isolated Harbor namespace
+- name: Bind the new Harbor namespace ownership boundary
+  ansible.builtin.set_fact:
+    harbor_namespace_definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ harbor_namespace }}"
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
+        labels:
+          app.kubernetes.io/part-of: labweaver-infrastructure
+          pod-security.kubernetes.io/enforce: restricted
+
+- name: Create the isolated Harbor namespace only when verified absent
   ansible.builtin.command:
     argv:
       - "{{ harbor_kubectl_path }}"
       - --kubeconfig
       - "{{ harbor_kubeconfig_path }}"
       - create
-      - namespace
-      - "{{ harbor_namespace }}"
-      - --dry-run=client
-      - -o
-      - yaml
-  changed_when: false
-  register: harbor_namespace_definition
-
-- name: Apply the Harbor namespace ownership boundary
-  ansible.builtin.command:
-    argv:
-      - "{{ harbor_kubectl_path }}"
-      - --kubeconfig
-      - "{{ harbor_kubeconfig_path }}"
-      - apply
       - -f
       - "-"
-  args:
-    stdin: "{{ harbor_namespace_definition.stdout }}"
-  changed_when: false
-  register: harbor_namespace_apply
+    stdin: "{{ harbor_namespace_definition | to_json }}"
+  changed_when: true
+  when: harbor_namespace_read.rc != 0
 
 - name: Label the Harbor namespace as a restricted LabWeaver boundary
   ansible.builtin.command:
@@ -309,6 +384,7 @@
     wait: false
     atomic: false
     values:
+      labweaverInstallationId: "{{ labweaver_installation_id }}"
       externalURL: "https://{{ harbor_hostname }}"
       expose:
         type: clusterIP

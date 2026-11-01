@@ -61,16 +61,23 @@
     cmd: >-
       set -o pipefail;
       {{ resource_application_kubectl }} --kubeconfig {{ resource_application_kubeconfig }}
-      --namespace {{ resource_application_namespace }} get all,configmap,secret,serviceaccount,role,rolebinding
+      --namespace {{ resource_application_namespace }} get all,configmap,secret,serviceaccount,role,rolebinding,networkpolicy
       --output json |
-      jq -e '[.items[] | select(.metadata.name != "default") |
-        select((((.metadata.annotations["meta.helm.sh/release-name"] // "") == "{{ resource_application_release_name }}"
-          and (.metadata.annotations["meta.helm.sh/release-namespace"] // "") == "{{ resource_application_namespace }}"
-          and (.metadata.labels["app.kubernetes.io/managed-by"] // "") == "Helm")
-          or ((.metadata.annotations["labweaver.io/installation-id"] // "") == "{{ resource_application_installation_id }}"
-          and (.metadata.labels["app.kubernetes.io/part-of"] // "") == "labweaver")
-          or (.kind == "Secret" and .metadata.name == "resource-service-secrets"
-              and (.metadata.labels["app.kubernetes.io/part-of"] // "") == "labweaver")) | not)] | length == 0'
+      jq -e '.items as $all |
+        def owned($object; $seen):
+          (($object.metadata.annotations["meta.helm.sh/release-name"] // "") == "{{ resource_application_release_name }}"
+            and ($object.metadata.annotations["meta.helm.sh/release-namespace"] // "") == "{{ resource_application_namespace }}"
+            and ($object.metadata.labels["app.kubernetes.io/managed-by"] // "") == "Helm")
+          or (($object.metadata.annotations["labweaver.io/installation-id"] // "") == "{{ resource_application_installation_id }}"
+            and ($object.metadata.labels["app.kubernetes.io/part-of"] // "") == "labweaver")
+          or any($object.metadata.ownerReferences[]?.uid;
+            . as $uid | $uid != null and ($seen | index($uid)) == null and
+            any($all[]; .metadata.uid == $uid and owned(.; $seen + [$uid])));
+        [$all[] | select(.kind != "ServiceAccount" or .metadata.name != "default") |
+          select(.kind != "ConfigMap" or .metadata.name != "kube-root-ca.crt") |
+          select(.kind != "Secret" or .type != "helm.sh/release.v1" or
+            .metadata.labels.owner != "helm" or .metadata.labels.name != "{{ resource_application_release_name }}") |
+          select(owned(.; []) | not)] | length == 0'
   args:
     executable: /bin/bash
   changed_when: false

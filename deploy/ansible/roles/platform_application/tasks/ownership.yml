@@ -1,0 +1,107 @@
+---
+- name: Inspect every application namespace mutation boundary
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    api_version: v1
+    kind: Namespace
+    name: "{{ item }}"
+  loop: >-
+    {{ ([platform_application_evaluation_namespace, platform_application_authoring_namespace,
+         platform_application_data_namespace] +
+        ([platform_application_portal_route_namespace]
+         if platform_application_portal_route_name | length > 0 or platform_application_ssh_load_balancer_ip | length > 0 else [])) | unique }}
+  register: platform_application_mutation_namespaces
+  changed_when: false
+
+- name: Reject foreign application namespace mutation boundaries
+  ansible.builtin.assert:
+    that:
+      - item.resources | length == 0 or
+        item.resources[0].metadata.annotations['labweaver.io/installation-id'] | default('') == platform_application_installation_id
+    fail_msg: PLATFORM_APPLICATION_NAMESPACE_OWNERSHIP_CONFLICT
+  loop: "{{ platform_application_mutation_namespaces.results }}"
+
+- name: Bind the complete cross-namespace application mutation inventory
+  ansible.builtin.set_fact:
+    platform_application_cross_namespace_targets:
+      - {apiVersion: networking.k8s.io/v1, kind: NetworkPolicy, metadata: {name: oj-runner-default-deny, namespace: "{{ platform_application_evaluation_namespace }}"}}
+      - {apiVersion: networking.k8s.io/v1, kind: NetworkPolicy, metadata: {name: oj-runner-object-store-egress, namespace: "{{ platform_application_evaluation_namespace }}"}}
+      - {apiVersion: networking.k8s.io/v1, kind: NetworkPolicy, metadata: {name: ansible-probe-default-deny, namespace: "{{ platform_application_evaluation_namespace }}"}}
+      - {apiVersion: v1, kind: ServiceAccount, metadata: {name: oj-runner, namespace: "{{ platform_application_evaluation_namespace }}"}}
+      - {apiVersion: v1, kind: ServiceAccount, metadata: {name: ansible-probe, namespace: "{{ platform_application_evaluation_namespace }}"}}
+      - {apiVersion: v1, kind: Secret, metadata: {name: "{{ platform_application_evaluation_pull_secret_name }}", namespace: "{{ platform_application_evaluation_namespace }}"}}
+      - {apiVersion: networking.k8s.io/v1, kind: NetworkPolicy, metadata: {name: authoring-default-deny, namespace: "{{ platform_application_authoring_namespace }}"}}
+      - {apiVersion: cilium.io/v2, kind: CiliumNetworkPolicy, metadata: {name: authoring-platform-egress, namespace: "{{ platform_application_authoring_namespace }}"}}
+      - {apiVersion: v1, kind: ServiceAccount, metadata: {name: "{{ platform_application_authoring_service_account_name }}", namespace: "{{ platform_application_authoring_namespace }}"}}
+      - {apiVersion: v1, kind: Secret, metadata: {name: "{{ platform_application_authoring_pull_secret_name }}", namespace: "{{ platform_application_authoring_namespace }}"}}
+      - {apiVersion: v1, kind: ConfigMap, metadata: {name: "{{ platform_application_authoring_buildkit_config_name }}", namespace: "{{ platform_application_authoring_namespace }}"}}
+      - {apiVersion: cilium.io/v2, kind: CiliumNetworkPolicy, metadata: {name: admin-probes, namespace: "{{ platform_application_data_namespace }}"}}
+
+- name: Include every enabled Portal and runtime route mutation target
+  ansible.builtin.set_fact:
+    platform_application_cross_namespace_targets: >-
+      {{ platform_application_cross_namespace_targets + [
+        {'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'name': platform_application_portal_tls_secret_name, 'namespace': platform_application_portal_route_namespace}},
+        {'apiVersion': 'gateway.networking.k8s.io/v1', 'kind': 'Gateway', 'metadata': {'name': platform_application_runtime_gateway_name, 'namespace': platform_application_portal_route_namespace}},
+        {'apiVersion': 'gateway.networking.k8s.io/v1', 'kind': 'HTTPRoute', 'metadata': {'name': platform_application_portal_route_name, 'namespace': platform_application_portal_route_namespace}},
+        {'apiVersion': 'gateway.networking.k8s.io/v1', 'kind': 'HTTPRoute', 'metadata': {'name': platform_application_portal_route_name ~ '-runtime', 'namespace': platform_application_portal_route_namespace}}
+      ] }}
+  when: platform_application_portal_route_name | length > 0
+
+- name: Include the retained Gateway mutation target
+  ansible.builtin.set_fact:
+    platform_application_cross_namespace_targets: >-
+      {{ platform_application_cross_namespace_targets + [
+        {'apiVersion': 'gateway.networking.k8s.io/v1', 'kind': 'Gateway', 'metadata': {'name': platform_application_portal_gateway_name, 'namespace': platform_application_portal_route_namespace}}
+      ] }}
+  when: platform_application_portal_route_name | length > 0 or platform_application_ssh_load_balancer_ip | length > 0
+
+- name: Inspect every cross-namespace application mutation target before mutation
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    api_version: "{{ item.apiVersion }}"
+    kind: "{{ item.kind }}"
+    namespace: "{{ item.metadata.namespace }}"
+    name: "{{ item.metadata.name }}"
+  loop: "{{ platform_application_cross_namespace_targets }}"
+  register: platform_application_cross_namespace_ownership
+  changed_when: false
+  no_log: true
+
+- name: Reject foreign cross-namespace application mutation targets
+  ansible.builtin.assert:
+    that:
+      - >-
+        item.resources | length == 0 or
+        (item.resources[0].metadata.annotations['labweaver.io/installation-id'] | default('') == platform_application_installation_id) or
+        (item.resources[0].metadata.annotations['meta.helm.sh/release-name'] | default('') == platform_application_release_name and
+         item.resources[0].metadata.annotations['meta.helm.sh/release-namespace'] | default('') == platform_application_namespace and
+         item.resources[0].metadata.labels['app.kubernetes.io/managed-by'] | default('') == 'Helm')
+    fail_msg: PLATFORM_APPLICATION_OBJECT_OWNERSHIP_CONFLICT
+  loop: "{{ platform_application_cross_namespace_ownership.results }}"
+  no_log: true
+
+- name: Inspect the retained Gateway Service mutation targets before mutation
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    api_version: v1
+    kind: Service
+    namespace: "{{ platform_application_portal_route_namespace }}"
+    label_selectors:
+      - "gateway.networking.k8s.io/gateway-name={{ platform_application_portal_gateway_name }}"
+  register: platform_application_gateway_service_ownership
+  changed_when: false
+  when: platform_application_ssh_load_balancer_ip | length > 0
+
+- name: Reject Gateway Services without a verified owning Gateway UID
+  ansible.builtin.assert:
+    that:
+      - >-
+        item.metadata.annotations['labweaver.io/installation-id'] | default('') == platform_application_installation_id or
+        (item.metadata.ownerReferences | default([]) | map(attribute='uid') | list |
+         intersect(platform_application_cross_namespace_ownership.results | selectattr('item.kind', 'equalto', 'Gateway') |
+           selectattr('item.metadata.name', 'equalto', platform_application_portal_gateway_name) |
+           map(attribute='resources') | flatten | map(attribute='metadata.uid') | list) | length > 0)
+    fail_msg: PLATFORM_APPLICATION_GATEWAY_SERVICE_OWNERSHIP_CONFLICT
+  loop: "{{ platform_application_gateway_service_ownership.resources | default([]) }}"
+  when: platform_application_ssh_load_balancer_ip | length > 0

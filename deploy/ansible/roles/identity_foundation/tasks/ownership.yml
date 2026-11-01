@@ -1,0 +1,70 @@
+---
+- name: Bind every identity credential and controller-produced certificate target
+  ansible.builtin.set_fact:
+    identity_planned_objects:
+      - {apiVersion: v1, kind: ConfigMap, metadata: {name: "{{ identity_ca_bundle_configmap_name }}", namespace: "{{ identity_namespace }}"}}
+      - {apiVersion: v1, kind: Secret, metadata: {name: "{{ identity_ca_secret_name }}", namespace: "{{ identity_namespace }}"}}
+      - {apiVersion: v1, kind: Secret, metadata: {name: "{{ identity_tls_secret_name }}", namespace: "{{ identity_namespace }}"}}
+      - {apiVersion: v1, kind: Secret, metadata: {name: "{{ identity_database_secret_name }}", namespace: "{{ identity_namespace }}"}}
+      - {apiVersion: v1, kind: Secret, metadata: {name: "{{ identity_bootstrap_secret_name }}", namespace: "{{ identity_namespace }}"}}
+      - {apiVersion: v1, kind: Secret, metadata: {name: identity-backup-secrets, namespace: "{{ identity_namespace }}"}}
+      - {apiVersion: apps/v1, kind: Deployment, metadata: {name: "{{ identity_name }}", namespace: "{{ identity_namespace }}"}}
+
+- name: Include all service client credential targets
+  ansible.builtin.set_fact:
+    identity_planned_objects: >-
+      {{ identity_planned_objects + [{'apiVersion': 'v1', 'kind': 'Secret',
+         'metadata': {'name': item.secret_name, 'namespace': identity_namespace}}] }}
+  loop: "{{ identity_service_clients }}"
+  no_log: true
+
+- name: Include the final rendered identity mutation targets
+  ansible.builtin.set_fact:
+    identity_planned_objects: >-
+      {{ identity_planned_objects + (lookup('template', item) | from_yaml_all | list) }}
+  loop: >-
+    {{ ['provision-job.yml.j2'] if identity_foundation_realm_roles_only | bool else
+       ['operator-rbac.yml.j2', 'pki.yml.j2', 'policy.yml.j2', 'database.yml.j2',
+        'workloads.yml.j2', 'provision-job.yml.j2', 'gateway.yml.j2'] }}
+  no_log: true
+
+- name: Inspect every identity target namespace before mutation
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ identity_kubeconfig_path }}"
+    api_version: v1
+    kind: Namespace
+    name: "{{ item }}"
+  loop: >-
+    {{ identity_planned_objects | selectattr('metadata.namespace', 'defined') |
+       map(attribute='metadata.namespace') | unique | list }}
+  register: identity_target_namespaces
+  changed_when: false
+
+- name: Refuse foreign identity target namespaces
+  ansible.builtin.assert:
+    that:
+      - item.resources | length == 0 or
+        item.resources[0].metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id
+    fail_msg: IDENTITY_NAMESPACE_OWNERSHIP_CONFLICT
+  loop: "{{ identity_target_namespaces.results }}"
+
+- name: Inspect every planned identity object before mutation
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ identity_kubeconfig_path }}"
+    api_version: "{{ item.apiVersion }}"
+    kind: "{{ item.kind }}"
+    namespace: "{{ item.metadata.namespace | default(omit) }}"
+    name: "{{ item.metadata.name }}"
+  loop: "{{ identity_planned_objects }}"
+  register: identity_object_ownership
+  changed_when: false
+  no_log: true
+
+- name: Refuse to overwrite any unowned identity object
+  ansible.builtin.assert:
+    that:
+      - item.resources | length == 0 or
+        item.resources[0].metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id
+    fail_msg: IDENTITY_OBJECT_OWNERSHIP_CONFLICT
+  loop: "{{ identity_object_ownership.results }}"
+  no_log: true

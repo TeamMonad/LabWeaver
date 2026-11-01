@@ -1,0 +1,64 @@
+---
+- name: Render the exact final Helm mutation inventory without mutation
+  ansible.builtin.command:
+    argv: >-
+      {{ [platform_application_helm, '--kubeconfig', platform_application_kubeconfig,
+          'template', platform_application_release_name,
+          platform_application_work_root + '/' + platform_application_run_id + '/chart',
+          '--namespace', platform_application_namespace]
+          + platform_application_values_argv + platform_application_image_argv
+          + platform_application_route_argv }}
+  register: platform_application_chart_inventory
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Bind the final chart object identities
+  ansible.builtin.set_fact:
+    platform_application_chart_objects: "{{ platform_application_chart_inventory.stdout | from_yaml_all | select('mapping') | list }}"
+  no_log: true
+
+- name: Inspect every final chart namespace boundary
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    api_version: v1
+    kind: Namespace
+    name: "{{ item }}"
+  loop: >-
+    {{ platform_application_chart_objects | selectattr('metadata.namespace', 'defined') |
+       map(attribute='metadata.namespace') | unique | list }}
+  register: platform_application_chart_namespaces
+  changed_when: false
+
+- name: Reject foreign final chart namespace boundaries
+  ansible.builtin.assert:
+    that:
+      - item.resources | length == 0 or
+        item.resources[0].metadata.annotations['labweaver.io/installation-id'] | default('') == platform_application_installation_id
+    fail_msg: PLATFORM_APPLICATION_NAMESPACE_OWNERSHIP_CONFLICT
+  loop: "{{ platform_application_chart_namespaces.results }}"
+
+- name: Inspect every final chart mutation target including cluster RBAC
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    api_version: "{{ item.apiVersion }}"
+    kind: "{{ item.kind }}"
+    namespace: "{{ item.metadata.namespace | default(omit) }}"
+    name: "{{ item.metadata.name }}"
+  loop: "{{ platform_application_chart_objects }}"
+  register: platform_application_chart_ownership
+  changed_when: false
+  no_log: true
+
+- name: Reject foreign final chart mutation targets
+  ansible.builtin.assert:
+    that:
+      - >-
+        item.resources | length == 0 or
+        (item.resources[0].metadata.annotations['labweaver.io/installation-id'] | default('') == platform_application_installation_id) or
+        (item.resources[0].metadata.annotations['meta.helm.sh/release-name'] | default('') == platform_application_release_name and
+         item.resources[0].metadata.annotations['meta.helm.sh/release-namespace'] | default('') == platform_application_namespace and
+         item.resources[0].metadata.labels['app.kubernetes.io/managed-by'] | default('') == 'Helm')
+    fail_msg: PLATFORM_APPLICATION_OBJECT_OWNERSHIP_CONFLICT
+  loop: "{{ platform_application_chart_ownership.results }}"
+  no_log: true

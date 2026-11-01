@@ -47,14 +47,23 @@
     cmd: >-
       set -o pipefail;
       {{ platform_application_kubectl }} --kubeconfig {{ platform_application_kubeconfig }}
-      --namespace {{ platform_application_namespace }} get all,configmap,secret,serviceaccount,role,rolebinding,datavolume,persistentvolumeclaim,datasource
+      --namespace {{ platform_application_namespace }} get all,configmap,secret,serviceaccount,role,rolebinding,datavolume,persistentvolumeclaim,datasource,networkpolicy,ciliumnetworkpolicy,referencegrant
       --output json |
-      jq -e '[.items[] | select(.metadata.name != "default") |
-        select((((.metadata.annotations["meta.helm.sh/release-name"] // "") == "{{ platform_application_release_name }}"
-          and (.metadata.annotations["meta.helm.sh/release-namespace"] // "") == "{{ platform_application_namespace }}"
-          and (.metadata.labels["app.kubernetes.io/managed-by"] // "") == "Helm")
-          or ((.metadata.annotations["labweaver.io/installation-id"] // "") == "{{ platform_application_installation_id }}"
-          and (.metadata.labels["app.kubernetes.io/part-of"] // "") == "labweaver")) | not)] | length == 0'
+      jq -e '.items as $all |
+        def owned($object; $seen):
+          (($object.metadata.annotations["meta.helm.sh/release-name"] // "") == "{{ platform_application_release_name }}"
+            and ($object.metadata.annotations["meta.helm.sh/release-namespace"] // "") == "{{ platform_application_namespace }}"
+            and ($object.metadata.labels["app.kubernetes.io/managed-by"] // "") == "Helm")
+          or (($object.metadata.annotations["labweaver.io/installation-id"] // "") == "{{ platform_application_installation_id }}"
+            and ($object.metadata.labels["app.kubernetes.io/part-of"] // "") == "labweaver")
+          or any($object.metadata.ownerReferences[]?.uid;
+            . as $uid | $uid != null and ($seen | index($uid)) == null and
+            any($all[]; .metadata.uid == $uid and owned(.; $seen + [$uid])));
+        [$all[] | select(.kind != "ServiceAccount" or .metadata.name != "default") |
+          select(.kind != "ConfigMap" or .metadata.name != "kube-root-ca.crt") |
+          select(.kind != "Secret" or .type != "helm.sh/release.v1" or
+            .metadata.labels.owner != "helm" or .metadata.labels.name != "{{ platform_application_release_name }}") |
+          select(owned(.; []) | not)] | length == 0'
   args:
     executable: /bin/bash
   changed_when: false
@@ -111,6 +120,9 @@
          (platform_application_release_metadata.stdout | from_json).description == 'labweaver-installation:' ~ platform_application_installation_id)
     fail_msg: PLATFORM_APPLICATION_RELEASE_OWNERSHIP_CONFLICT
   changed_when: false
+
+- name: Verify all cross-namespace mutation targets before reconciliation
+  ansible.builtin.include_tasks: ownership.yml
 
 - name: Load the application identities from the selected Bundle
   ansible.builtin.set_fact:
@@ -1185,8 +1197,9 @@
   register: platform_application_stream_info_before
   check_mode: false
   failed_when: >-
-    item.rc != 0 and
-    ((item.stdout | default('') ~ item.stderr | default('')) is not search('(?i)stream\\s+.*not found|stream not found'))
+    platform_application_stream_info_before.rc != 0 and
+    ((platform_application_stream_info_before.stdout | default('') ~ platform_application_stream_info_before.stderr | default(''))
+      is not search('(?i)stream\\s+.*not found|stream not found'))
   changed_when: false
 
 - name: Create only missing configured streams
@@ -1345,8 +1358,9 @@
   register: platform_application_consumer_info_before
   check_mode: false
   failed_when: >-
-    item.rc != 0 and
-    ((item.stdout | default('') ~ item.stderr | default('')) is not search('(?i)consumer\\s+.*not found|consumer not found'))
+    platform_application_consumer_info_before.rc != 0 and
+    ((platform_application_consumer_info_before.stdout | default('') ~ platform_application_consumer_info_before.stderr | default(''))
+      is not search('(?i)consumer\\s+.*not found|consumer not found'))
   changed_when: false
 
 - name: Materialize structured NATS consumer configurations
@@ -1649,7 +1663,7 @@
   loop_control:
     label: "{{ item.binding }}"
   register: platform_application_harbor_seed_digest_probes
-  failed_when: item.status | default(0) not in [200, 404]
+  failed_when: platform_application_harbor_seed_digest_probes.status | default(0) not in [200, 404]
   no_log: true
 
 - name: Require every reviewed container base image digest in the retained Harbor project
@@ -2278,6 +2292,87 @@
   check_mode: false
   no_log: true
 
+- name: Copy reviewed Helm chart
+  ansible.builtin.copy:
+    src: "{{ platform_application_chart_source }}/"
+    dest: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/chart/"
+    owner: root
+    group: root
+    mode: preserve
+
+- name: Copy reviewed private values files
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/{{ item | basename }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ platform_application_values_files }}"
+  no_log: true
+
+- name: Build immutable Helm arguments
+  ansible.builtin.set_fact:
+    platform_application_values_argv: >-
+      {%- set values = [] -%}
+      {%- for values_file in platform_application_values_files -%}
+      {%- set _ = values.append(
+        '--values=' + platform_application_work_root + '/' + platform_application_run_id
+        + '/' + (values_file | basename)) -%}
+      {%- endfor -%}
+      {{ values }}
+    platform_application_image_argv: >-
+      {%- set values = [
+        '--set-string',
+        'imagePullSecrets[0].name=' + platform_application_image_pull_secret_name,
+        '--set-string',
+        'deploymentIdentity.configurationBundleSha256=' + platform_application_configuration_bundle_sha256
+      ] -%}
+      {%- for image in platform_application_package.images -%}
+      {%- set _ = values.extend(['--set-string', 'images.' + (image.component | replace('-', '_')) + '=' + image.reference]) -%}
+      {%- endfor -%}
+      {{ values }}
+    platform_application_route_argv: >-
+      {%- set values = [] -%}
+      {%- if platform_application_portal_route_name | length > 0 -%}
+      {%- set _ = values.extend([
+        '--set', 'portalRoute.enabled=true',
+        '--set-string', 'portalRoute.namespace=' + platform_application_portal_route_namespace,
+        '--set-string', 'portalRoute.name=' + platform_application_portal_route_name,
+        '--set-string', 'portalRoute.hostname=' + platform_application_portal_hostname,
+        '--set-string', 'portalRoute.gatewayName=' + platform_application_portal_gateway_name,
+        '--set-string', 'portalRoute.gatewaySectionName=' + platform_application_portal_gateway_listener_name,
+        '--set-string', 'runtimeRoute.baseHostname=' + platform_application_runtime_base_hostname,
+        '--set-string', 'runtimeRoute.gatewayName=' + platform_application_runtime_gateway_name,
+        '--set-string', 'runtimeRoute.gatewayClassName=' + platform_application_runtime_gateway_class_name,
+        '--set-string', 'runtimeRoute.tlsHostname=' + platform_application_runtime_tls_hostname,
+        '--set-string', 'runtimeRoute.tlsSecretName=' + platform_application_runtime_tls_secret_name
+      ]) -%}
+      {%- endif -%}
+      {%- if platform_application_object_store_route_enabled -%}
+      {%- set _ = values.extend([
+        '--set', 'objectStoreRoute.enabled=true',
+        '--set-string', 'objectStoreRoute.namespace=' + platform_application_data_namespace,
+        '--set-string', 'objectStoreRoute.serviceName=' + platform_application_object_store_service_name,
+        '--set', 'objectStoreRoute.servicePort=' + (platform_application_object_store_service_port | string),
+        '--set-string', 'objectStoreRoute.pathPrefix=/' + platform_application_minio_bucket,
+        '--set-string', 'objectStoreRoute.backendHostname=' + platform_application_object_store_backend_hostname,
+        '--set-file', 'objectStoreRoute.caCertificate=' + platform_application_minio_ca_file,
+        '--set-string', 'workloads.control-service.externalEgress[0].cidr=' + platform_application_object_store_external_cidr,
+        '--set', 'workloads.control-service.externalEgress[0].ports[0]=443'
+      ]) -%}
+      {%- endif -%}
+      {%- if platform_application_ssh_load_balancer_ip | length > 0 -%}
+      {%- set _ = values.extend([
+        '--set', 'sshGatewayService.enabled=true',
+        '--set-string', 'sshGatewayService.loadBalancerIP=' + platform_application_ssh_load_balancer_ip,
+        '--set-string', 'sshGatewayService.sharedIPKey=' + platform_application_ssh_shared_ip_key
+      ]) -%}
+      {%- endif -%}
+      {{ values }}
+
+- name: Verify every final Helm mutation target before Kubernetes reconciliation
+  ansible.builtin.include_tasks: chart-ownership.yml
+
 - name: Reconcile application namespace without deleting retained state
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_application_kubeconfig }}"
@@ -2523,6 +2618,8 @@
       apiVersion: v1
       kind: Secret
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: "{{ platform_application_image_pull_secret_name }}"
         namespace: "{{ platform_application_namespace }}"
         labels:
@@ -2546,6 +2643,8 @@
       apiVersion: v1
       kind: Secret
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: "{{ platform_application_portal_tls_secret_name }}"
         namespace: "{{ platform_application_portal_route_namespace }}"
         labels:
@@ -2830,7 +2929,7 @@
     kubeconfig: "{{ platform_application_kubeconfig }}"
     state: present
     apply: true
-    definition: "{{ item }}"
+    definition: "{{ item | combine({'metadata': {'annotations': {'labweaver.io/installation-id': platform_application_installation_id}}}, recursive=True) }}"
   loop: "{{ platform_application_configuration_objects }}"
   when: item.metadata.name != 'evaluation-service-config'
   no_log: true
@@ -2844,7 +2943,8 @@
       apiVersion: v1
       kind: ConfigMap
       metadata: >-
-        {{ platform_application_evaluation_configuration_object.metadata }}
+        {{ platform_application_evaluation_configuration_object.metadata |
+           combine({'annotations': {'labweaver.io/installation-id': platform_application_installation_id}}, recursive=True) }}
       data:
         config.yaml: >-
           {{
@@ -2896,7 +2996,8 @@
       apiVersion: v1
       kind: ConfigMap
       metadata: >-
-        {{ platform_application_build_executor_configuration_object.metadata }}
+        {{ platform_application_build_executor_configuration_object.metadata |
+           combine({'annotations': {'labweaver.io/installation-id': platform_application_installation_id}}, recursive=True) }}
       data:
         config.yaml: >-
           {{
@@ -2967,7 +3068,8 @@
       apiVersion: v1
       kind: ConfigMap
       metadata: >-
-        {{ platform_application_agent_configuration_object.metadata }}
+        {{ platform_application_agent_configuration_object.metadata |
+           combine({'annotations': {'labweaver.io/installation-id': platform_application_installation_id}}, recursive=True) }}
       data: >-
         {{
           platform_application_agent_configuration_object.data
@@ -3030,6 +3132,8 @@
       apiVersion: networking.k8s.io/v1
       kind: NetworkPolicy
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: oj-runner-default-deny
         namespace: "{{ platform_application_evaluation_namespace }}"
         labels:
@@ -3085,6 +3189,8 @@
       apiVersion: v1
       kind: ServiceAccount
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: "{{ item }}"
         namespace: "{{ platform_application_evaluation_namespace }}"
         labels:
@@ -3104,6 +3210,8 @@
       apiVersion: networking.k8s.io/v1
       kind: NetworkPolicy
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: oj-runner-object-store-egress
         namespace: "{{ platform_application_evaluation_namespace }}"
         labels:
@@ -3133,6 +3241,8 @@
       apiVersion: networking.k8s.io/v1
       kind: NetworkPolicy
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: ansible-probe-default-deny
         namespace: "{{ platform_application_evaluation_namespace }}"
         labels:
@@ -3190,6 +3300,8 @@
       apiVersion: v1
       kind: Secret
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: "{{ platform_application_evaluation_pull_secret_name }}"
         namespace: "{{ platform_application_evaluation_namespace }}"
         labels:
@@ -3234,6 +3346,8 @@
       apiVersion: networking.k8s.io/v1
       kind: NetworkPolicy
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: authoring-default-deny
         namespace: "{{ platform_application_authoring_namespace }}"
         labels:
@@ -3280,14 +3394,18 @@
     kubeconfig: "{{ platform_application_kubeconfig }}"
     state: present
     apply: true
-    definition: "{{ lookup('template', 'authoring-platform-egress.yml.j2') | from_yaml }}"
+    definition: >-
+      {{ lookup('template', 'authoring-platform-egress.yml.j2') | from_yaml |
+         combine({'metadata': {'annotations': {'labweaver.io/installation-id': platform_application_installation_id}}}, recursive=True) }}
 
 - name: Reconcile the reviewed model egress for the platform services
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_application_kubeconfig }}"
     state: present
     apply: true
-    definition: "{{ lookup('template', 'platform-model-egress.yml.j2') | from_yaml }}"
+    definition: >-
+      {{ lookup('template', 'platform-model-egress.yml.j2') | from_yaml |
+         combine({'metadata': {'annotations': {'labweaver.io/installation-id': platform_application_installation_id}}}, recursive=True) }}
 
 - name: Reconcile the tokenless authoring runner service account
   kubernetes.core.k8s:
@@ -3298,6 +3416,8 @@
       apiVersion: v1
       kind: ServiceAccount
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: "{{ platform_application_authoring_service_account_name }}"
         namespace: "{{ platform_application_authoring_namespace }}"
         labels:
@@ -3321,6 +3441,8 @@
       apiVersion: v1
       kind: Secret
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: "{{ platform_application_authoring_pull_secret_name }}"
         namespace: "{{ platform_application_authoring_namespace }}"
         labels:
@@ -3345,6 +3467,8 @@
       apiVersion: v1
       kind: ConfigMap
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: "{{ platform_application_authoring_buildkit_config_name }}"
         namespace: "{{ platform_application_authoring_namespace }}"
         labels:
@@ -3405,6 +3529,8 @@
       apiVersion: cilium.io/v2
       kind: CiliumNetworkPolicy
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: admin-probes
         namespace: "{{ platform_application_data_namespace }}"
         labels:
@@ -3496,6 +3622,16 @@
     that:
       - platform_application_cdi_clone_source_policy.resources | length <= 1
       - >-
+        platform_application_cdi_clone_source_policy.resources | length == 0 or
+        (platform_application_cdi_clone_source_policy.resources[0].metadata.annotations['labweaver.io/installation-id']
+          | default('') == platform_application_installation_id) or
+        (platform_application_cdi_clone_source_policy.resources[0].metadata.annotations['meta.helm.sh/release-name']
+          | default('') == platform_application_release_name and
+         platform_application_cdi_clone_source_policy.resources[0].metadata.annotations['meta.helm.sh/release-namespace']
+          | default('') == platform_application_namespace and
+         platform_application_cdi_clone_source_policy.resources[0].metadata.labels['app.kubernetes.io/managed-by']
+          | default('') == 'Helm')
+      - >-
         platform_application_cdi_clone_source_policy.resources | length == 0
         or
         platform_application_cdi_clone_source_policy.resources[0].spec.podSelector.matchLabels
@@ -3548,84 +3684,6 @@
           meta.helm.sh/release-name: "{{ platform_application_release_name }}"
           meta.helm.sh/release-namespace: "{{ platform_application_namespace }}"
   when: platform_application_cdi_clone_source_policy.resources | length == 1
-
-- name: Copy reviewed Helm chart
-  ansible.builtin.copy:
-    src: "{{ platform_application_chart_source }}/"
-    dest: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/chart/"
-    owner: root
-    group: root
-    mode: preserve
-
-- name: Copy reviewed private values files
-  ansible.builtin.copy:
-    src: "{{ item }}"
-    dest: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/{{ item | basename }}"
-    owner: root
-    group: root
-    mode: "0600"
-  loop: "{{ platform_application_values_files }}"
-  no_log: true
-
-- name: Build immutable Helm arguments
-  ansible.builtin.set_fact:
-    platform_application_values_argv: >-
-      {%- set values = [] -%}
-      {%- for values_file in platform_application_values_files -%}
-      {%- set _ = values.append(
-        '--values=' + platform_application_work_root + '/' + platform_application_run_id
-        + '/' + (values_file | basename)) -%}
-      {%- endfor -%}
-      {{ values }}
-    platform_application_image_argv: >-
-      {%- set values = [
-        '--set-string',
-        'imagePullSecrets[0].name=' + platform_application_image_pull_secret_name,
-        '--set-string',
-        'deploymentIdentity.configurationBundleSha256=' + platform_application_configuration_bundle_sha256
-      ] -%}
-      {%- for image in platform_application_package.images -%}
-      {%- set _ = values.extend(['--set-string', 'images.' + (image.component | replace('-', '_')) + '=' + image.reference]) -%}
-      {%- endfor -%}
-      {{ values }}
-    platform_application_route_argv: >-
-      {%- set values = [] -%}
-      {%- if platform_application_portal_route_name | length > 0 -%}
-      {%- set _ = values.extend([
-        '--set', 'portalRoute.enabled=true',
-        '--set-string', 'portalRoute.namespace=' + platform_application_portal_route_namespace,
-        '--set-string', 'portalRoute.name=' + platform_application_portal_route_name,
-        '--set-string', 'portalRoute.hostname=' + platform_application_portal_hostname,
-        '--set-string', 'portalRoute.gatewayName=' + platform_application_portal_gateway_name,
-        '--set-string', 'portalRoute.gatewaySectionName=' + platform_application_portal_gateway_listener_name,
-        '--set-string', 'runtimeRoute.baseHostname=' + platform_application_runtime_base_hostname,
-        '--set-string', 'runtimeRoute.gatewayName=' + platform_application_runtime_gateway_name,
-        '--set-string', 'runtimeRoute.gatewayClassName=' + platform_application_runtime_gateway_class_name,
-        '--set-string', 'runtimeRoute.tlsHostname=' + platform_application_runtime_tls_hostname,
-        '--set-string', 'runtimeRoute.tlsSecretName=' + platform_application_runtime_tls_secret_name
-      ]) -%}
-      {%- endif -%}
-      {%- if platform_application_object_store_route_enabled -%}
-      {%- set _ = values.extend([
-        '--set', 'objectStoreRoute.enabled=true',
-        '--set-string', 'objectStoreRoute.namespace=' + platform_application_data_namespace,
-        '--set-string', 'objectStoreRoute.serviceName=' + platform_application_object_store_service_name,
-        '--set', 'objectStoreRoute.servicePort=' + (platform_application_object_store_service_port | string),
-        '--set-string', 'objectStoreRoute.pathPrefix=/' + platform_application_minio_bucket,
-        '--set-string', 'objectStoreRoute.backendHostname=' + platform_application_object_store_backend_hostname,
-        '--set-file', 'objectStoreRoute.caCertificate=' + platform_application_minio_ca_file,
-        '--set-string', 'workloads.control-service.externalEgress[0].cidr=' + platform_application_object_store_external_cidr,
-        '--set', 'workloads.control-service.externalEgress[0].ports[0]=443'
-      ]) -%}
-      {%- endif -%}
-      {%- if platform_application_ssh_load_balancer_ip | length > 0 -%}
-      {%- set _ = values.extend([
-        '--set', 'sshGatewayService.enabled=true',
-        '--set-string', 'sshGatewayService.loadBalancerIP=' + platform_application_ssh_load_balancer_ip,
-        '--set-string', 'sshGatewayService.sharedIPKey=' + platform_application_ssh_shared_ip_key
-      ]) -%}
-      {%- endif -%}
-      {{ values }}
 
 - name: Deploy the immutable configured platform profile
   ansible.builtin.command:

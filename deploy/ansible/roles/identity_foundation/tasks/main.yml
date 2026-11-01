@@ -138,6 +138,29 @@
     fail_msg: IDENTITY_DIRECTORY_ROLE_SCOPE_INVALID
   when: identity_foundation_realm_roles_only | bool
 
+- name: Require verified identity installation identity
+  ansible.builtin.assert:
+    that:
+      - labweaver_installation_id | default('') is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - labweaver_installation_id == lookup('ansible.builtin.env', 'LW_BUNDLE_INSTALLATION_ID')
+    fail_msg: IDENTITY_INSTALLATION_ID_REQUIRED
+
+- name: Read the identity namespace before reconciliation
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ identity_kubeconfig_path }}"
+    api_version: v1
+    kind: Namespace
+    name: "{{ identity_namespace }}"
+  register: identity_existing_namespace
+  changed_when: false
+
+- name: Refuse an identity namespace owned by another installation
+  ansible.builtin.assert:
+    that:
+      - identity_existing_namespace.resources | length == 0 or
+        identity_existing_namespace.resources[0].metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id
+    fail_msg: IDENTITY_NAMESPACE_OWNERSHIP_CONFLICT
+
 - name: Read the adopted cluster identity
   ansible.builtin.command:
     argv: ["{{ identity_kubectl_path }}", --kubeconfig, "{{ identity_kubeconfig_path }}", get, namespace, kube-system, -o, 'jsonpath={.metadata.uid}']
@@ -298,6 +321,9 @@
           - identity_legacy_database.results | map(attribute='resources') | flatten | length == 0
         fail_msg: IDENTITY_CNPG_CUTOVER_REQUIRED_NO_AUTOMATIC_DATA_DELETION
 
+    - name: Verify every identity mutation target before reconciliation
+      ansible.builtin.include_tasks: ownership.yml
+
     - name: Create the restricted identity namespace
       kubernetes.core.k8s:
         kubeconfig: "{{ identity_kubeconfig_path }}"
@@ -307,6 +333,8 @@
           kind: Namespace
           metadata:
             name: "{{ identity_namespace }}"
+            annotations:
+              labweaver.io/installation-id: "{{ labweaver_installation_id }}"
             labels:
               pod-security.kubernetes.io/enforce: restricted
               pod-security.kubernetes.io/audit: restricted
@@ -316,13 +344,19 @@
       kubernetes.core.k8s:
         kubeconfig: "{{ identity_kubeconfig_path }}"
         state: present
-        definition: "{{ lookup('template', 'operator-rbac.yml.j2') | from_yaml_all | list }}"
+        definition: >-
+          {{ lookup('template', 'operator-rbac.yml.j2') | from_yaml_all |
+             map('combine', {'metadata': {'annotations': {'labweaver.io/installation-id': labweaver_installation_id}}}, recursive=True) | list }}
 
     - name: Apply the namespace-scoped internal CA chain
       kubernetes.core.k8s:
         kubeconfig: "{{ identity_kubeconfig_path }}"
         state: present
-        definition: "{{ lookup('template', 'pki.yml.j2') | from_yaml_all | list }}"
+        definition: >-
+          {{ item | combine({'metadata': {'annotations': {'labweaver.io/installation-id': labweaver_installation_id}}}, recursive=True) |
+             combine({'spec': {'secretTemplate': {'annotations': {'labweaver.io/installation-id': labweaver_installation_id}}}}
+                     if item.kind == 'Certificate' else {}, recursive=True) }}
+      loop: "{{ lookup('template', 'pki.yml.j2') | from_yaml_all | list }}"
 
     - name: Wait for the root and serving certificates
       ansible.builtin.command:
@@ -367,6 +401,8 @@
           metadata:
             name: "{{ identity_ca_bundle_configmap_name }}"
             namespace: "{{ identity_namespace }}"
+            annotations:
+              labweaver.io/installation-id: "{{ labweaver_installation_id }}"
             labels:
               app.kubernetes.io/part-of: labweaver-infrastructure
               labweaver.io/authority: identity-ca
@@ -381,7 +417,11 @@
         definition:
           apiVersion: v1
           kind: Secret
-          metadata: {name: "{{ item.name }}", namespace: "{{ identity_namespace }}"}
+          metadata:
+            name: "{{ item.name }}"
+            namespace: "{{ identity_namespace }}"
+            annotations:
+              labweaver.io/installation-id: "{{ labweaver_installation_id }}"
           type: "{{ item.type | default('Opaque') }}"
           stringData: "{{ item.data }}"
       loop:
@@ -406,6 +446,8 @@
           metadata:
             name: "{{ item.secret_name }}"
             namespace: "{{ identity_namespace }}"
+            annotations:
+              labweaver.io/installation-id: "{{ labweaver_installation_id }}"
           type: Opaque
           stringData:
             client-id: "{{ item.client_id }}"
@@ -420,13 +462,17 @@
       kubernetes.core.k8s:
         kubeconfig: "{{ identity_kubeconfig_path }}"
         state: present
-        definition: "{{ lookup('template', 'policy.yml.j2') | from_yaml_all | list }}"
+        definition: >-
+          {{ lookup('template', 'policy.yml.j2') | from_yaml_all |
+             map('combine', {'metadata': {'annotations': {'labweaver.io/installation-id': labweaver_installation_id}}}, recursive=True) | list }}
 
     - name: Apply the independent identity CNPG cluster and backup configuration
       kubernetes.core.k8s:
         kubeconfig: "{{ identity_kubeconfig_path }}"
         state: present
-        definition: "{{ lookup('template', 'database.yml.j2') | from_yaml_all | list }}"
+        definition: >-
+          {{ lookup('template', 'database.yml.j2') | from_yaml_all |
+             map('combine', {'metadata': {'annotations': {'labweaver.io/installation-id': labweaver_installation_id}}}, recursive=True) | list }}
 
     - name: Wait for the identity database primary and replicas before starting Keycloak
       ansible.builtin.command:
@@ -446,7 +492,9 @@
       kubernetes.core.k8s:
         kubeconfig: "{{ identity_kubeconfig_path }}"
         state: present
-        definition: "{{ lookup('template', 'workloads.yml.j2') | from_yaml_all | list }}"
+        definition: >-
+          {{ lookup('template', 'workloads.yml.j2') | from_yaml_all |
+             map('combine', {'metadata': {'annotations': {'labweaver.io/installation-id': labweaver_installation_id}}}, recursive=True) | list }}
 
     - name: Wait for identity workloads
       ansible.builtin.command:
@@ -467,7 +515,9 @@
       kubernetes.core.k8s:
         kubeconfig: "{{ identity_kubeconfig_path }}"
         state: present
-        definition: "{{ lookup('template', 'provision-job.yml.j2') | from_yaml }}"
+        definition: >-
+          {{ lookup('template', 'provision-job.yml.j2') | from_yaml |
+             combine({'metadata': {'annotations': {'labweaver.io/installation-id': labweaver_installation_id}}}, recursive=True) }}
 
     - name: Wait for workload client provisioning
       ansible.builtin.command:
@@ -487,7 +537,9 @@
       kubernetes.core.k8s:
         kubeconfig: "{{ identity_kubeconfig_path }}"
         state: present
-        definition: "{{ lookup('template', item) | from_yaml_all | list }}"
+        definition: >-
+          {{ lookup('template', item) | from_yaml_all |
+             map('combine', {'metadata': {'annotations': {'labweaver.io/installation-id': labweaver_installation_id}}}, recursive=True) | list }}
       loop: [gateway.yml.j2]
 
     - name: Read existing Keycloak DNS records
@@ -496,14 +548,14 @@
       delegate_to: "{{ groups['routers'][0] }}"
       become: true
       changed_when: false
-      failed_when: false
+      failed_when: identity_dns_records.rc not in [0, 1]
       register: identity_dns_records
       when: identity_dnsmasq_enabled | bool
 
     - name: Reject a Keycloak DNS collision outside the owned fragment
       ansible.builtin.assert:
         that: >-
-          identity_dns_records.rc != 0 or
+          identity_dns_records.rc == 1 or
           (identity_dns_records.stdout_lines | reject('search', identity_dns_fragment_path) | list | length == 0)
         fail_msg: IDENTITY_DNS_CONFLICT
       when: identity_dnsmasq_enabled | bool
@@ -582,6 +634,9 @@
     - not (identity_foundation_verify_only | bool)
     - identity_foundation_realm_roles_only | bool
   block:
+    - name: Verify role-only identity mutation targets before reconciliation
+      ansible.builtin.include_tasks: ownership.yml
+
     - name: Require the existing Keycloak workload before role-only provisioning
       ansible.builtin.command:
         argv:
@@ -600,7 +655,9 @@
       kubernetes.core.k8s:
         kubeconfig: "{{ identity_kubeconfig_path }}"
         state: present
-        definition: "{{ lookup('template', 'provision-job.yml.j2') | from_yaml }}"
+        definition: >-
+          {{ lookup('template', 'provision-job.yml.j2') | from_yaml |
+             combine({'metadata': {'annotations': {'labweaver.io/installation-id': labweaver_installation_id}}}, recursive=True) }}
 
     - name: Wait for organization-directory role provisioning
       ansible.builtin.command:
