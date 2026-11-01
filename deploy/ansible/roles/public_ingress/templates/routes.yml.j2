@@ -6,6 +6,7 @@ kind: HTTPRoute
 metadata:
   name: {{ route.name }}
   namespace: {{ route.namespace }}
+  annotations: {labweaver.io/installation-id: {{ labweaver_installation_id | quote }}}
   labels:
     app.kubernetes.io/part-of: labweaver-infrastructure
 spec:
@@ -44,6 +45,7 @@ kind: HTTPRoute
 metadata:
   name: runtime-public
   namespace: {{ public_ingress_namespace }}
+  annotations: {labweaver.io/installation-id: {{ labweaver_installation_id | quote }}}
 spec:
   parentRefs:
     - name: {{ public_ingress_gateway_name }}

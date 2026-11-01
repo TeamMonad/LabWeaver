@@ -1,0 +1,108 @@
+---
+- name: Require verified GPU plugin installation identity
+  ansible.builtin.assert:
+    that:
+      - labweaver_installation_id | default('') is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - labweaver_installation_id == lookup('ansible.builtin.env', 'LW_BUNDLE_INSTALLATION_ID')
+    fail_msg: GPU_DEVICE_PLUGIN_INSTALLATION_ID_REQUIRED
+
+- name: Inspect the GPU target namespace
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ gpu_device_plugin_kubeconfig }}"
+    api_version: v1
+    kind: Namespace
+    name: "{{ gpu_device_plugin_namespace }}"
+  register: gpu_device_plugin_existing_namespace
+
+- name: Refuse a foreign dedicated GPU namespace
+  ansible.builtin.assert:
+    that:
+      - gpu_device_plugin_existing_namespace.resources | length == 1
+      # kube-system is intentionally shared; only the exact GPU objects and
+      # the two GPU labels plus their ownership annotation on Nodes are managed.
+      - gpu_device_plugin_namespace == 'kube-system' or
+        gpu_device_plugin_existing_namespace.resources[0].metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id
+    fail_msg: GPU_DEVICE_PLUGIN_NAMESPACE_OWNERSHIP_CONFLICT
+
+- name: Bind the exact GPU mutation inventory
+  ansible.builtin.set_fact:
+    gpu_device_plugin_planned_objects: []
+
+- name: Include every selected GPU configuration and controller target
+  ansible.builtin.set_fact:
+    gpu_device_plugin_planned_objects: >-
+      {{ gpu_device_plugin_planned_objects +
+         [{'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata':
+           {'name': 'nvidia-gpu-device-plugin-' ~ item.mode ~ '-config', 'namespace': gpu_device_plugin_namespace}},
+          {'apiVersion': 'apps/v1', 'kind': 'DaemonSet', 'metadata':
+           {'name': 'nvidia-gpu-device-plugin-' ~ item.mode, 'namespace': gpu_device_plugin_namespace}}] }}
+  loop:
+    - {mode: exclusive, nodes: "{{ gpu_device_plugin_exclusive_nodes }}"}
+    - {mode: shared, nodes: "{{ gpu_device_plugin_shared_nodes }}"}
+  when: item.nodes | length > 0
+
+- name: Include the legacy GPU cleanup target
+  ansible.builtin.set_fact:
+    gpu_device_plugin_planned_objects: >-
+      {{ gpu_device_plugin_planned_objects +
+         [{'apiVersion': 'apps/v1', 'kind': 'DaemonSet', 'metadata':
+           {'name': 'nvidia-gpu-device-plugin', 'namespace': gpu_device_plugin_namespace}}] }}
+  when: gpu_device_plugin_remove_legacy_daemonset | bool
+
+- name: Inspect every planned GPU object before mutation
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ gpu_device_plugin_kubeconfig }}"
+    api_version: "{{ item.apiVersion }}"
+    kind: "{{ item.kind }}"
+    namespace: "{{ item.metadata.namespace }}"
+    name: "{{ item.metadata.name }}"
+  loop: "{{ gpu_device_plugin_planned_objects }}"
+  register: gpu_device_plugin_object_ownership
+
+- name: Refuse to overwrite or delete any foreign GPU object
+  ansible.builtin.assert:
+    that:
+      - item.resources | length == 0 or
+        item.resources[0].metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id
+    fail_msg: GPU_DEVICE_PLUGIN_OBJECT_OWNERSHIP_CONFLICT
+  loop: "{{ gpu_device_plugin_object_ownership.results }}"
+
+- name: Bind the verified legacy GPU DaemonSet observation
+  ansible.builtin.set_fact:
+    gpu_device_plugin_legacy: >-
+      {{ gpu_device_plugin_object_ownership.results |
+         selectattr('item.kind', 'equalto', 'DaemonSet') |
+         selectattr('item.metadata.name', 'equalto', 'nvidia-gpu-device-plugin') | first }}
+  when: gpu_device_plugin_remove_legacy_daemonset | bool
+
+- name: Read each selected GPU node before changing bounded labels
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ gpu_device_plugin_kubeconfig }}"
+    api_version: v1
+    kind: Node
+    name: "{{ item }}"
+  loop: "{{ (gpu_device_plugin_exclusive_nodes + gpu_device_plugin_shared_nodes) | unique | list }}"
+  register: gpu_device_plugin_selected_observations
+
+- name: Refuse conflicting GPU label ownership on selected nodes
+  ansible.builtin.assert:
+    that:
+      - item.resources | length == 1
+      - >-
+        item.resources[0].metadata.annotations['labweaver.io/gpu-plugin-installation-id'] | default('') == labweaver_installation_id or
+        (item.resources[0].metadata.annotations['labweaver.io/gpu-plugin-installation-id'] | default('') == '' and
+         gpu_device_plugin_node_label not in (item.resources[0].metadata.labels | default({})) and
+         'labweaver.io/gpu-plugin-managed' not in (item.resources[0].metadata.labels | default({})))
+    fail_msg: GPU_DEVICE_PLUGIN_NODE_OWNERSHIP_CONFLICT
+  loop: "{{ gpu_device_plugin_selected_observations.results }}"
+
+- name: Read nodes previously labelled by this GPU device-plugin role
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ gpu_device_plugin_kubeconfig }}"
+    api_version: v1
+    kind: Node
+    label_selectors:
+      - labweaver.io/gpu-plugin-managed=true
+  register: gpu_device_plugin_managed_nodes
+  when: gpu_device_plugin_enabled | bool
+

@@ -27,6 +27,7 @@ kind: Gateway
 metadata:
   name: public-gateway
   namespace: labweaver-demo
+  annotations: {labweaver.io/installation-id: {{ labweaver_installation_id | quote }}}
 spec:
   gatewayClassName: cilium
   infrastructure:

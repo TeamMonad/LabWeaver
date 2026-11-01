@@ -27,6 +27,10 @@
     fail_msg: GPU_DEVICE_PLUGIN_NODES_REQUIRED
   when: gpu_device_plugin_enabled | bool
 
+- name: Verify the exact GPU targets before any deletion or node patch
+  ansible.builtin.include_tasks: ownership.yml
+  when: gpu_device_plugin_enabled | bool
+
 - name: Remove the legacy single-mode NVIDIA device-plugin DaemonSet
   kubernetes.core.k8s:
     kubeconfig: "{{ gpu_device_plugin_kubeconfig }}"
@@ -35,24 +39,19 @@
     kind: DaemonSet
     namespace: "{{ gpu_device_plugin_namespace }}"
     name: nvidia-gpu-device-plugin
+    delete_options:
+      preconditions:
+        uid: "{{ gpu_device_plugin_legacy.resources[0].metadata.uid }}"
+        resourceVersion: "{{ gpu_device_plugin_legacy.resources[0].metadata.resourceVersion }}"
   when:
     - gpu_device_plugin_enabled | bool
     - gpu_device_plugin_remove_legacy_daemonset | bool
+    - gpu_device_plugin_legacy.resources | length == 1
 
 - name: Compute the selected GPU node set owned by this role
   ansible.builtin.set_fact:
     gpu_device_plugin_selected_nodes: >-
       {{ (gpu_device_plugin_exclusive_nodes + gpu_device_plugin_shared_nodes) | unique | list }}
-  when: gpu_device_plugin_enabled | bool
-
-- name: Read nodes previously labelled by this GPU device-plugin role
-  kubernetes.core.k8s_info:
-    kubeconfig: "{{ gpu_device_plugin_kubeconfig }}"
-    api_version: v1
-    kind: Node
-    label_selectors:
-      - labweaver.io/gpu-plugin-managed=true
-  register: gpu_device_plugin_managed_nodes
   when: gpu_device_plugin_enabled | bool
 
 - name: Remove stale GPU mode labels owned by this role
@@ -61,46 +60,69 @@
     api_version: v1
     kind: Node
     name: "{{ item.metadata.name }}"
-    patch:
-      - op: remove
-        path: "/metadata/labels/{{ gpu_device_plugin_node_label | replace('~', '~0') | replace('/', '~1') }}"
-      - op: remove
-        path: /metadata/labels/labweaver.io~1gpu-plugin-managed
+    patch: >-
+      {{ [{'op': 'test', 'path': '/metadata/uid', 'value': item.metadata.uid},
+          {'op': 'test', 'path': '/metadata/resourceVersion', 'value': item.metadata.resourceVersion},
+          {'op': 'test', 'path': '/metadata/annotations/labweaver.io~1gpu-plugin-installation-id', 'value': labweaver_installation_id}] +
+         ([{'op': 'remove', 'path': '/metadata/labels/' ~ (gpu_device_plugin_node_label | replace('~', '~0') | replace('/', '~1'))}]
+          if gpu_device_plugin_node_label in item.metadata.labels else []) +
+         [{'op': 'remove', 'path': '/metadata/labels/labweaver.io~1gpu-plugin-managed'},
+          {'op': 'remove', 'path': '/metadata/annotations/labweaver.io~1gpu-plugin-installation-id'}] }}
   loop: "{{ gpu_device_plugin_managed_nodes.resources }}"
   loop_control:
     label: "{{ item.metadata.name }}"
   when:
     - gpu_device_plugin_enabled | bool
     - item.metadata.name not in gpu_device_plugin_selected_nodes
-    - item.metadata.labels[gpu_device_plugin_node_label] is defined
+    - item.metadata.annotations['labweaver.io/gpu-plugin-installation-id'] | default('') == labweaver_installation_id
 
 - name: Label nodes selected for exclusive GPU allocation
-  kubernetes.core.k8s:
+  kubernetes.core.k8s_json_patch:
     kubeconfig: "{{ gpu_device_plugin_kubeconfig }}"
-    state: present
-    apply: true
-    definition:
-      apiVersion: v1
-      kind: Node
-      metadata:
-        name: "{{ item }}"
-        labels: "{{ {gpu_device_plugin_node_label: 'exclusive', 'labweaver.io/gpu-plugin-managed': 'true'} }}"
-  loop: "{{ gpu_device_plugin_exclusive_nodes }}"
-  when: gpu_device_plugin_enabled | bool
+    api_version: v1
+    kind: Node
+    name: "{{ item.resources[0].metadata.name }}"
+    patch:
+      - {op: test, path: /metadata/uid, value: "{{ item.resources[0].metadata.uid }}"}
+      - {op: test, path: /metadata/resourceVersion, value: "{{ item.resources[0].metadata.resourceVersion }}"}
+      - op: add
+        path: /metadata/labels
+        value: >-
+          {{ item.resources[0].metadata.labels | default({}) |
+             combine({gpu_device_plugin_node_label: 'exclusive', 'labweaver.io/gpu-plugin-managed': 'true'}) }}
+      - op: add
+        path: /metadata/annotations
+        value: >-
+          {{ item.resources[0].metadata.annotations | default({}) |
+             combine({'labweaver.io/gpu-plugin-installation-id': labweaver_installation_id}) }}
+  loop: "{{ gpu_device_plugin_selected_observations.results }}"
+  when:
+    - gpu_device_plugin_enabled | bool
+    - item.item in gpu_device_plugin_exclusive_nodes
 
 - name: Label nodes selected for shared GPU allocation
-  kubernetes.core.k8s:
+  kubernetes.core.k8s_json_patch:
     kubeconfig: "{{ gpu_device_plugin_kubeconfig }}"
-    state: present
-    apply: true
-    definition:
-      apiVersion: v1
-      kind: Node
-      metadata:
-        name: "{{ item }}"
-        labels: "{{ {gpu_device_plugin_node_label: 'shared', 'labweaver.io/gpu-plugin-managed': 'true'} }}"
-  loop: "{{ gpu_device_plugin_shared_nodes }}"
-  when: gpu_device_plugin_enabled | bool
+    api_version: v1
+    kind: Node
+    name: "{{ item.resources[0].metadata.name }}"
+    patch:
+      - {op: test, path: /metadata/uid, value: "{{ item.resources[0].metadata.uid }}"}
+      - {op: test, path: /metadata/resourceVersion, value: "{{ item.resources[0].metadata.resourceVersion }}"}
+      - op: add
+        path: /metadata/labels
+        value: >-
+          {{ item.resources[0].metadata.labels | default({}) |
+             combine({gpu_device_plugin_node_label: 'shared', 'labweaver.io/gpu-plugin-managed': 'true'}) }}
+      - op: add
+        path: /metadata/annotations
+        value: >-
+          {{ item.resources[0].metadata.annotations | default({}) |
+             combine({'labweaver.io/gpu-plugin-installation-id': labweaver_installation_id}) }}
+  loop: "{{ gpu_device_plugin_selected_observations.results }}"
+  when:
+    - gpu_device_plugin_enabled | bool
+    - item.item in gpu_device_plugin_shared_nodes
 
 - name: Reconcile exclusive NVIDIA device-plugin configuration
   kubernetes.core.k8s:
@@ -113,6 +135,8 @@
       metadata:
         name: nvidia-gpu-device-plugin-exclusive-config
         namespace: "{{ gpu_device_plugin_namespace }}"
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
         labels:
           app.kubernetes.io/name: nvidia-gpu-device-plugin
           labweaver.io/gpu-mode: exclusive
@@ -134,6 +158,8 @@
       metadata:
         name: nvidia-gpu-device-plugin-shared-config
         namespace: "{{ gpu_device_plugin_namespace }}"
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
         labels:
           app.kubernetes.io/name: nvidia-gpu-device-plugin
           labweaver.io/gpu-mode: shared

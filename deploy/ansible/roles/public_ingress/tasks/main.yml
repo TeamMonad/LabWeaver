@@ -49,6 +49,43 @@
         | rejectattr('paths') | rejectattr('service') | list | length == 0
     fail_msg: PUBLIC_INGRESS_ROUTE_INVALID
 
+- name: Verify every public ingress target before any credential or resource mutation
+  ansible.builtin.include_tasks: ownership.yml
+
+- name: Select the verified ACME account key observation
+  ansible.builtin.set_fact:
+    public_ingress_acme_account: >-
+      {{ public_ingress_object_ownership.results | selectattr('item.kind', 'equalto', 'Secret') |
+         selectattr('item.metadata.name', 'equalto', public_ingress_acme_issuer ~ '-account-key') |
+         selectattr('item.metadata.namespace', 'equalto', 'cert-manager') | first }}
+  when: public_ingress_tls_mode == 'acme'
+
+- name: Generate the ACME account private key only for a verified absent target
+  ansible.builtin.command:
+    argv: [openssl, genpkey, -algorithm, RSA, -pkeyopt, 'rsa_keygen_bits:2048']
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  register: public_ingress_acme_account_key
+  no_log: true
+  when:
+    - public_ingress_tls_mode == 'acme'
+    - public_ingress_acme_account.resources | length == 0
+
+- name: Create the installation-owned ACME account key without replacing an existing Secret
+  ansible.builtin.command:
+    argv: [kubectl, --kubeconfig, /etc/kubernetes/admin.conf, create, -f, '-']
+    stdin: >-
+      {{ {'apiVersion': 'v1', 'kind': 'Secret', 'type': 'Opaque',
+          'metadata': {'name': public_ingress_acme_issuer ~ '-account-key', 'namespace': 'cert-manager',
+                       'annotations': {'labweaver.io/installation-id': labweaver_installation_id}},
+          'data': {'tls.key': public_ingress_acme_account_key.stdout | b64encode}} | to_json }}
+  changed_when: true
+  no_log: true
+  when:
+    - public_ingress_tls_mode == 'acme'
+    - public_ingress_acme_account.resources | length == 0
+
 - name: Load the ACME credential from the configured source
   ansible.builtin.include_tasks: secret-locator.yml
   when: public_ingress_tls_mode == 'acme'
@@ -63,6 +100,8 @@
       metadata:
         name: "{{ public_ingress_cloudflare_secret_name }}"
         namespace: cert-manager
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
         labels:
           app.kubernetes.io/part-of: labweaver-infrastructure
       type: Opaque
@@ -105,6 +144,8 @@
       kind: Namespace
       metadata:
         name: "{{ public_ingress_entry_namespace }}"
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
         labels:
           app.kubernetes.io/part-of: labweaver-infrastructure
           labweaver.io/infrastructure: "true"
@@ -122,15 +163,19 @@
     state: absent
     wait: true
     wait_timeout: 120
-    definition:
-      apiVersion: "{{ item.apiVersion }}"
-      kind: "{{ item.kind }}"
-      metadata:
-        name: "{{ public_ingress_entry_name }}"
-        namespace: "{{ public_ingress_namespace }}"
-  loop:
-    - { apiVersion: v1, kind: ConfigMap }
-    - { apiVersion: apps/v1, kind: DaemonSet }
+    api_version: "{{ item.apiVersion }}"
+    kind: "{{ item.kind }}"
+    namespace: "{{ item.metadata.namespace }}"
+    name: "{{ item.metadata.name }}"
+    delete_options:
+      preconditions:
+        uid: "{{ item.metadata.uid }}"
+        resourceVersion: "{{ item.metadata.resourceVersion }}"
+  loop: >-
+    {{ public_ingress_object_ownership.results | selectattr('item.kind', 'in', ['ConfigMap', 'DaemonSet']) |
+       selectattr('item.metadata.name', 'equalto', public_ingress_entry_name) |
+       selectattr('item.metadata.namespace', 'equalto', public_ingress_namespace) |
+       map(attribute='resources') | flatten }}
   when:
     - public_ingress_entry_enabled | bool
     - public_ingress_entry_namespace != public_ingress_namespace

@@ -1,0 +1,80 @@
+---
+- name: Require verified public ingress installation identity
+  ansible.builtin.assert:
+    that:
+      - labweaver_installation_id | default('') is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - labweaver_installation_id == lookup('ansible.builtin.env', 'LW_BUNDLE_INSTALLATION_ID')
+    fail_msg: PUBLIC_INGRESS_INSTALLATION_ID_REQUIRED
+
+- name: Bind the complete public ingress mutation inventory
+  ansible.builtin.set_fact:
+    public_ingress_planned_objects: >-
+      {{ (lookup('template', 'issuers.yml.j2') | from_yaml_all | list) +
+         (lookup('template', 'routes.yml.j2') | from_yaml_all | list) +
+         [lookup('template', 'certificate.yml.j2') | from_yaml,
+          lookup('template', 'gateway.yml.j2') | from_yaml,
+          {'apiVersion': 'v1', 'kind': 'Secret', 'metadata':
+           {'name': public_ingress_certificate_secret, 'namespace': public_ingress_namespace}}] }}
+
+- name: Include the public entry and legacy cleanup targets
+  ansible.builtin.set_fact:
+    public_ingress_planned_objects: >-
+      {{ public_ingress_planned_objects +
+         [lookup('template', 'entry-configmap.yml.j2') | from_yaml,
+          lookup('template', 'entry-daemonset.yml.j2') | from_yaml,
+          {'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata':
+           {'name': public_ingress_entry_name, 'namespace': public_ingress_namespace}},
+          {'apiVersion': 'apps/v1', 'kind': 'DaemonSet', 'metadata':
+           {'name': public_ingress_entry_name, 'namespace': public_ingress_namespace}}] }}
+  when: public_ingress_entry_enabled | bool
+
+- name: Include every ACME credential target
+  ansible.builtin.set_fact:
+    public_ingress_planned_objects: >-
+      {{ public_ingress_planned_objects +
+         [{'apiVersion': 'v1', 'kind': 'Secret', 'metadata':
+           {'name': public_ingress_cloudflare_secret_name, 'namespace': 'cert-manager'}},
+          {'apiVersion': 'v1', 'kind': 'Secret', 'metadata':
+           {'name': public_ingress_acme_issuer ~ '-account-key', 'namespace': 'cert-manager'}}] }}
+  when: public_ingress_tls_mode == 'acme'
+
+- name: Inspect every public ingress target namespace before mutation
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/kubernetes/admin.conf
+    api_version: v1
+    kind: Namespace
+    name: "{{ item }}"
+  loop: >-
+    {{ public_ingress_planned_objects | selectattr('metadata.namespace', 'defined') |
+       map(attribute='metadata.namespace') | unique | list }}
+  register: public_ingress_target_namespaces
+  changed_when: false
+
+- name: Refuse foreign public ingress namespaces
+  ansible.builtin.assert:
+    that:
+      - item.resources | length == 0 or
+        item.resources[0].metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id
+    fail_msg: PUBLIC_INGRESS_NAMESPACE_OWNERSHIP_CONFLICT
+  loop: "{{ public_ingress_target_namespaces.results }}"
+
+- name: Inspect every planned public ingress object before mutation
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/kubernetes/admin.conf
+    api_version: "{{ item.apiVersion }}"
+    kind: "{{ item.kind }}"
+    namespace: "{{ item.metadata.namespace | default(omit) }}"
+    name: "{{ item.metadata.name }}"
+  loop: "{{ public_ingress_planned_objects }}"
+  register: public_ingress_object_ownership
+  changed_when: false
+  no_log: true
+
+- name: Refuse to overwrite or delete any foreign public ingress object
+  ansible.builtin.assert:
+    that:
+      - item.resources | length == 0 or
+        item.resources[0].metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id
+    fail_msg: PUBLIC_INGRESS_OBJECT_OWNERSHIP_CONFLICT
+  loop: "{{ public_ingress_object_ownership.results }}"
+  no_log: true

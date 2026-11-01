@@ -3,10 +3,13 @@ kind: Certificate
 metadata:
   name: {{ public_ingress_certificate_name }}
   namespace: {{ public_ingress_namespace }}
+  annotations: {labweaver.io/installation-id: {{ labweaver_installation_id | quote }}}
   labels:
     app.kubernetes.io/part-of: labweaver-infrastructure
 spec:
   secretName: {{ public_ingress_certificate_secret }}
+  secretTemplate:
+    annotations: {labweaver.io/installation-id: {{ labweaver_installation_id | quote }}}
   commonName: {{ public_ingress_domain }}
   dnsNames:
     - {{ public_ingress_domain }}
