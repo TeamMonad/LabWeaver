@@ -168,12 +168,13 @@ impl PgEnvironmentStore {
                 max_attempts: 3,
                 reset_target: None,
             };
-            match self
-                .accept_command(
-                    &format!("disk-purge-{}-{}", instance.id, instance.generation),
-                    &command,
-                )
-                .await
+            // Keep the large command transaction out of the scheduler/worker state machine.
+            // Allocate only when a retained disk actually expires, never for an idle scan.
+            match Box::pin(self.accept_command(
+                &format!("disk-purge-{}-{}", instance.id, instance.generation),
+                &command,
+            ))
+            .await
             {
                 Ok(_) | Err(EnvironmentStoreError::RevisionConflict) => {}
                 Err(error) => return Err(error),
