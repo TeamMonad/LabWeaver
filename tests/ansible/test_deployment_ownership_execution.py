@@ -24,7 +24,7 @@ def run_tasks(entries: list[dict], variables: dict, environment: dict | None = N
         playbook.write_text(yaml.safe_dump([{
             "name": "Exercise deployment ownership boundary", "hosts": "localhost",
             "connection": "local", "gather_facts": False, "tasks": entries,
-            "vars": variables,
+            "vars": variables, "environment": environment or {}, "become": False,
         }]))
         return subprocess.run(
             ["ansible-playbook", "-i", "localhost,", str(playbook)],

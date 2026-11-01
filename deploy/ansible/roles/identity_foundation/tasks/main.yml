@@ -146,13 +146,25 @@
     fail_msg: IDENTITY_INSTALLATION_ID_REQUIRED
 
 - name: Read the identity namespace before reconciliation
-  kubernetes.core.k8s_info:
-    kubeconfig: "{{ identity_kubeconfig_path }}"
-    api_version: v1
-    kind: Namespace
-    name: "{{ identity_namespace }}"
-  register: identity_existing_namespace
+  ansible.builtin.command:
+    argv:
+      - "{{ identity_kubectl_path }}"
+      - --kubeconfig
+      - "{{ identity_kubeconfig_path }}"
+      - get
+      - namespace
+      - "{{ identity_namespace }}"
+      - --ignore-not-found
+      - --output
+      - json
+  register: identity_namespace_read
+  check_mode: false
   changed_when: false
+
+- name: Bind the explicit identity namespace observation without requiring the Python client
+  ansible.builtin.set_fact:
+    identity_existing_namespace:
+      resources: "{{ [] if identity_namespace_read.stdout | trim | length == 0 else [identity_namespace_read.stdout | from_json] }}"
 
 - name: Refuse an identity namespace owned by another installation
   ansible.builtin.assert:
