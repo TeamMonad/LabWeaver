@@ -291,9 +291,10 @@ pub(crate) async fn record_transition(
 ) -> Result<(), EnvironmentStoreError> {
     crate::disk_retention::record_storage_usage(transaction, updated, occurred_at).await?;
     // Retention has its own platform-paid meter, never the old compute grant or project hold.
-    if previous.disk_retention.as_ref().is_some_and(|disk| disk.compute_retired_at.is_some()
-        && disk.state != contracts::environment::EnvironmentDiskState::Restored)
-        && updated.observed_state != ObservedEnvironmentState::Ready
+    if previous.disk_retention.as_ref().is_some_and(|disk| {
+        disk.compute_retired_at.is_some()
+            && disk.state != contracts::environment::EnvironmentDiskState::Restored
+    }) && updated.observed_state != ObservedEnvironmentState::Ready
     {
         return Ok(());
     }

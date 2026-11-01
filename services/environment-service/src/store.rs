@@ -164,7 +164,13 @@ impl PgEnvironmentStore {
                 max_attempts: 3,
                 reset_target: None,
             };
-            match self.accept_command(&format!("disk-purge-{}-{}", instance.id, instance.generation), &command).await {
+            match self
+                .accept_command(
+                    &format!("disk-purge-{}-{}", instance.id, instance.generation),
+                    &command,
+                )
+                .await
+            {
                 Ok(_) | Err(EnvironmentStoreError::RevisionConflict) => {}
                 Err(error) => return Err(error),
             }
@@ -876,12 +882,16 @@ impl PgEnvironmentStore {
             let row = sqlx::query("SELECT measured_until,storage_bytes::text AS bytes,closed_at IS NOT NULL AS closed FROM environment.retained_disk_usage WHERE environment_id=$1 AND started_at=$2")
                 .bind(instance.id.as_uuid()).bind(disk.started_at.get()).fetch_optional(&mut *transaction).await?;
             if let Some(row) = row {
-                status.retained_storage_usage = Some(contracts::environment::EnvironmentRetainedStorageUsage {
-                    started_at: disk.started_at,
-                    measured_until: UtcTimestamp::from_utc(row.try_get("measured_until")?)?,
-                    storage_bytes: row.try_get::<String,_>("bytes")?.parse().map_err(|_| EnvironmentStoreError::MeteringInvalid)?,
-                    closed: row.try_get("closed")?,
-                });
+                status.retained_storage_usage =
+                    Some(contracts::environment::EnvironmentRetainedStorageUsage {
+                        started_at: disk.started_at,
+                        measured_until: UtcTimestamp::from_utc(row.try_get("measured_until")?)?,
+                        storage_bytes: row
+                            .try_get::<String, _>("bytes")?
+                            .parse()
+                            .map_err(|_| EnvironmentStoreError::MeteringInvalid)?,
+                        closed: row.try_get("closed")?,
+                    });
             }
         }
         transaction.commit().await?;
@@ -1765,8 +1775,12 @@ fn cleanup_status_from_instance(
         return Err(EnvironmentStoreError::LeaseAuthorizationInvalid);
     }
     let compute_retired = instance.disk_retention.as_ref().map_or(
-        instance.observed_state == ObservedEnvironmentState::Deleted && instance.observed_generation == instance.generation,
-        |disk| disk.compute_retired_at.is_some() && disk.state != contracts::environment::EnvironmentDiskState::Restored,
+        instance.observed_state == ObservedEnvironmentState::Deleted
+            && instance.observed_generation == instance.generation,
+        |disk| {
+            disk.compute_retired_at.is_some()
+                && disk.state != contracts::environment::EnvironmentDiskState::Restored
+        },
     );
     let storage_purged = instance.disk_retention.as_ref().map_or(
         compute_retired && instance.cleanup_evidence.is_some(),

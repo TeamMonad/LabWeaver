@@ -8,9 +8,102 @@
       "description": "Strongly typed UUIDv7 identifier for `CourseId`.",
       "type": "string"
     },
+    "EnvironmentDiskRetention": {
+      "additionalProperties": false,
+      "description": "Immutable retention window, with separately observed retirement and purge facts.\nBoth user deletion and arrears retention are platform-paid; no compute hold funds this window.",
+      "properties": {
+        "computeRetiredAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expiresAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "purgedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "restoredGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retiredGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "startedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "state": {
+          "$ref": "#/$defs/EnvironmentDiskState"
+        }
+      },
+      "required": [
+        "state",
+        "startedAt",
+        "expiresAt",
+        "retiredGeneration"
+      ],
+      "type": "object"
+    },
+    "EnvironmentDiskState": {
+      "description": "Disk lifetime is independent of retirement of a compute generation.",
+      "enum": [
+        "retiring",
+        "retained",
+        "restored",
+        "purging",
+        "purged"
+      ],
+      "type": "string"
+    },
     "EnvironmentId": {
       "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
       "type": "string"
+    },
+    "EnvironmentRetainedStorageUsage": {
+      "additionalProperties": false,
+      "description": "Cumulative real disk occupancy. Always platform-paid, never attributed to a compute hold.",
+      "properties": {
+        "closed": {
+          "type": "boolean"
+        },
+        "measuredUntil": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "startedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "storageBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "startedAt",
+        "measuredUntil",
+        "storageBytes",
+        "closed"
+      ],
+      "type": "object"
     },
     "LeaseId": {
       "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
@@ -43,6 +136,10 @@
       "format": "uint64",
       "minimum": 1,
       "type": "integer"
+    },
+    "UtcTimestamp": {
+      "description": "UTC timestamp serialized with a literal `Z` and millisecond precision.",
+      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -53,6 +150,9 @@
       "type": "string"
     },
     "cleanupComplete": {
+      "type": "boolean"
+    },
+    "computeRetired": {
       "type": "boolean"
     },
     "courseId": {
@@ -71,8 +171,23 @@
         "null"
       ]
     },
+    "diskRetention": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EnvironmentDiskRetention"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "environmentId": {
       "$ref": "#/$defs/EnvironmentId"
+    },
+    "generation": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
     },
     "leaseId": {
       "$ref": "#/$defs/LeaseId"
@@ -89,8 +204,21 @@
     "projectId": {
       "$ref": "#/$defs/ProjectId"
     },
+    "retainedStorageUsage": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EnvironmentRetainedStorageUsage"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "revision": {
       "$ref": "#/$defs/Revision"
+    },
+    "storagePurged": {
+      "type": "boolean"
     },
     "version": {
       "format": "uint8",
@@ -109,7 +237,10 @@
     "capacityBinding",
     "revision",
     "observedState",
-    "cleanupComplete"
+    "cleanupComplete",
+    "generation",
+    "computeRetired",
+    "storagePurged"
   ],
   "title": "ResourceWorkCleanupStatus",
   "type": "object"

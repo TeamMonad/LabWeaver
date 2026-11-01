@@ -335,7 +335,10 @@ impl KubernetesContainerExecutor {
                 .get_json(&resource.kind, &plan.namespace, &resource.name)
                 .await?
             {
-                if guarded_document.pointer("/metadata/uid").is_some_and(|uid| Some(uid) != current.pointer("/metadata/uid")) {
+                if guarded_document
+                    .pointer("/metadata/uid")
+                    .is_some_and(|uid| Some(uid) != current.pointer("/metadata/uid"))
+                {
                     return Err(rejected());
                 }
                 verify_owned_identity(
@@ -722,9 +725,15 @@ impl KubernetesContainerExecutor {
             objects: Vec::new(),
         };
         {
-            let placement = work.map_or_else(|| crate::ContainerPlacement {
-                environment_id, project_id, namespace: namespace.to_owned(), namespace_uid: None,
-            }, ContainerResourcePlan::placement);
+            let placement = work.map_or_else(
+                || crate::ContainerPlacement {
+                    environment_id,
+                    project_id,
+                    namespace: namespace.to_owned(),
+                    namespace_uid: None,
+                },
+                ContainerResourcePlan::placement,
+            );
             let mut kinds = vec![
                 ("Deployment", "runtime"),
                 ("Service", "runtime"),
@@ -733,9 +742,23 @@ impl KubernetesContainerExecutor {
                 ("PersistentVolumeClaim", "workspace"),
             ];
             if work.is_none() {
-                kinds = vec![("VirtualMachine", "runtime"), ("PersistentVolumeClaim", "rootdisk"), ("DataVolume", "rootdisk")];
-                if self.get_json("Deployment", namespace, "runtime").await?.is_some() {
-                    kinds = vec![("Deployment", "runtime"), ("Service", "runtime"), ("ServiceAccount", "runtime"), ("Secret", "registry-pull"), ("PersistentVolumeClaim", "workspace")];
+                kinds = vec![
+                    ("VirtualMachine", "runtime"),
+                    ("PersistentVolumeClaim", "rootdisk"),
+                    ("DataVolume", "rootdisk"),
+                ];
+                if self
+                    .get_json("Deployment", namespace, "runtime")
+                    .await?
+                    .is_some()
+                {
+                    kinds = vec![
+                        ("Deployment", "runtime"),
+                        ("Service", "runtime"),
+                        ("ServiceAccount", "runtime"),
+                        ("Secret", "registry-pull"),
+                        ("PersistentVolumeClaim", "workspace"),
+                    ];
                 }
             }
             for (kind, suffix) in kinds {
@@ -800,7 +823,10 @@ impl KubernetesContainerExecutor {
         }
         if target.retain_disk {
             self.delete_work_objects(fence, plan, target).await?;
-            return self.write_cleanup_evidence(fence, plan).await.map(ProviderOutcome::Completed);
+            return self
+                .write_cleanup_evidence(fence, plan)
+                .await
+                .map(ProviderOutcome::Completed);
         }
         if plan.namespace_uid.is_some() {
             self.delete_work_objects(fence, plan, target).await?;
@@ -831,7 +857,8 @@ impl KubernetesContainerExecutor {
     ) -> Result<(), ProviderFailure> {
         if target.purge_disk {
             self.wait_for_work_pods_absent(fence, plan).await?;
-            self.delete_owned_work_object(fence, plan, "PersistentVolumeClaim", "workspace", target).await
+            self.delete_owned_work_object(fence, plan, "PersistentVolumeClaim", "workspace", target)
+                .await
         } else {
             self.retire_work_compute(fence, plan, target).await
         }
@@ -939,7 +966,17 @@ impl KubernetesContainerExecutor {
     ) -> Result<(), ProviderFailure> {
         let name = plan.placement().resource_name(suffix);
         self.verify_container_namespace(plan).await?;
-        self.delete_pinned_object(plan.environment_id, plan.project_id, &plan.namespace, kind, &name, target, fence.deadline_at, None).await
+        self.delete_pinned_object(
+            plan.environment_id,
+            plan.project_id,
+            &plan.namespace,
+            kind,
+            &name,
+            target,
+            fence.deadline_at,
+            None,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -958,20 +995,17 @@ impl KubernetesContainerExecutor {
             if timestamp()?.get() >= deadline_at.get() {
                 return Err(unavailable());
             }
-            let namespace_value = self.get_api_json(&format!("/api/v1/namespaces/{namespace}")).await?.ok_or_else(rejected)?;
+            let namespace_value = self
+                .get_api_json(&format!("/api/v1/namespaces/{namespace}"))
+                .await?
+                .ok_or_else(rejected)?;
             if pointer_uuid(&namespace_value, "/metadata/uid")? != target.uid {
                 return Err(rejected());
             }
             let Some(value) = self.get_json(kind, namespace, name).await? else {
                 return Ok(());
             };
-            verify_owned_identity(
-                &value,
-                name,
-                Some(namespace),
-                environment_id,
-                project_id,
-            )?;
+            verify_owned_identity(&value, name, Some(namespace), environment_id, project_id)?;
             let uid = pointer_uuid(&value, "/metadata/uid")?;
             let (_, resource, _) = resource_path(kind)?;
             if !target.objects.iter().any(|object| {
@@ -985,7 +1019,8 @@ impl KubernetesContainerExecutor {
                 .filter(|value| !value.is_empty())
                 .ok_or_else(invalid_observation)?;
             let (prefix, plural, _) = resource_path(kind)?;
-            let url = self.namespaced_url(&format!("{prefix}/namespaces/{namespace}/{plural}/{name}"))?;
+            let url =
+                self.namespaced_url(&format!("{prefix}/namespaces/{namespace}/{plural}/{name}"))?;
             if let Some(permit) = permit {
                 check_kubevirt_permit(permit).await?;
             }
@@ -1011,15 +1046,36 @@ impl KubernetesContainerExecutor {
         }
     }
 
-    async fn ensure_disk_unmounted(&self, namespace: &str, claim: &str) -> Result<(), ProviderFailure> {
-        let list = self.get_api_json(&format!("/api/v1/namespaces/{namespace}/pods")).await?.ok_or_else(invalid_observation)?;
-        if list.pointer("/metadata/continue").is_some_and(|value| value.as_str() != Some("")) {
+    async fn ensure_disk_unmounted(
+        &self,
+        namespace: &str,
+        claim: &str,
+    ) -> Result<(), ProviderFailure> {
+        let list = self
+            .get_api_json(&format!("/api/v1/namespaces/{namespace}/pods"))
+            .await?
+            .ok_or_else(invalid_observation)?;
+        if list
+            .pointer("/metadata/continue")
+            .is_some_and(|value| value.as_str() != Some(""))
+        {
             return Err(unavailable());
         }
-        let pods = list.get("items").and_then(Value::as_array).ok_or_else(invalid_observation)?;
+        let pods = list
+            .get("items")
+            .and_then(Value::as_array)
+            .ok_or_else(invalid_observation)?;
         for pod in pods {
-            let volumes = pod.pointer("/spec/volumes").and_then(Value::as_array).ok_or_else(invalid_observation)?;
-            if volumes.iter().any(|volume| volume.pointer("/persistentVolumeClaim/claimName").and_then(Value::as_str) == Some(claim)) {
+            let volumes = pod
+                .pointer("/spec/volumes")
+                .and_then(Value::as_array)
+                .ok_or_else(invalid_observation)?;
+            if volumes.iter().any(|volume| {
+                volume
+                    .pointer("/persistentVolumeClaim/claimName")
+                    .and_then(Value::as_str)
+                    == Some(claim)
+            }) {
                 return Err(unavailable());
             }
         }
@@ -1844,26 +1900,69 @@ impl KubernetesContainerExecutor {
             return Err(rejected());
         }
         if target.retain_disk {
-            let namespace = self.owned_namespace(&plan.namespace, plan.environment_id, plan.project_id).await?.ok_or_else(rejected)?;
+            let namespace = self
+                .owned_namespace(&plan.namespace, plan.environment_id, plan.project_id)
+                .await?
+                .ok_or_else(rejected)?;
             if pointer_uuid(&namespace, "/metadata/uid")? != target.uid {
                 return Err(rejected());
             }
             if target.purge_disk {
-                self.ensure_disk_unmounted(&plan.namespace, "rootdisk").await?;
-                self.delete_pinned_object(plan.environment_id, plan.project_id, &plan.namespace, "DataVolume", "rootdisk", target, fence.deadline_at, Some(permit)).await?;
-                self.delete_pinned_object(plan.environment_id, plan.project_id, &plan.namespace, "PersistentVolumeClaim", "rootdisk", target, fence.deadline_at, Some(permit)).await?;
+                self.ensure_disk_unmounted(&plan.namespace, "rootdisk")
+                    .await?;
+                self.delete_pinned_object(
+                    plan.environment_id,
+                    plan.project_id,
+                    &plan.namespace,
+                    "DataVolume",
+                    "rootdisk",
+                    target,
+                    fence.deadline_at,
+                    Some(permit),
+                )
+                .await?;
+                self.delete_pinned_object(
+                    plan.environment_id,
+                    plan.project_id,
+                    &plan.namespace,
+                    "PersistentVolumeClaim",
+                    "rootdisk",
+                    target,
+                    fence.deadline_at,
+                    Some(permit),
+                )
+                .await?;
             } else {
                 let identities = self.kubevirt_stop_identity(plan).await?;
-                for (resource, uid) in [("virtualmachines", identities.0), ("persistentvolumeclaims", identities.1)] {
-                    if !target.objects.iter().any(|object| object.resource == resource && object.uid == uid.to_string()) {
+                for (resource, uid) in [
+                    ("virtualmachines", identities.0),
+                    ("persistentvolumeclaims", identities.1),
+                ] {
+                    if !target
+                        .objects
+                        .iter()
+                        .any(|object| object.resource == resource && object.uid == uid.to_string())
+                    {
                         return Err(rejected());
                     }
                 }
-                self.kubevirt_lifecycle_subresource(fence, &plan.namespace, "runtime", "stop", permit).await?;
-                self.observe_kubevirt_stopped(fence, plan, identities).await?;
-                self.ensure_disk_unmounted(&plan.namespace, "rootdisk").await?;
+                self.kubevirt_lifecycle_subresource(
+                    fence,
+                    &plan.namespace,
+                    "runtime",
+                    "stop",
+                    permit,
+                )
+                .await?;
+                self.observe_kubevirt_stopped(fence, plan, identities)
+                    .await?;
+                self.ensure_disk_unmounted(&plan.namespace, "rootdisk")
+                    .await?;
             }
-            return self.kubevirt_absence_evidence(fence, plan).await.map(ProviderOutcome::Completed);
+            return self
+                .kubevirt_absence_evidence(fence, plan)
+                .await
+                .map(ProviderOutcome::Completed);
         }
         self.remove_owned_namespace(
             plan.environment_id,

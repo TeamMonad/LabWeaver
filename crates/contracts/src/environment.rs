@@ -1039,11 +1039,15 @@ impl EnvironmentDiskRetention {
     pub fn validate(&self) -> Result<(), EnvironmentError> {
         if self.expires_at.get() - self.started_at.get() != time::Duration::days(7)
             || self.retired_generation == 0
-            || self.compute_retired_at.is_some_and(|at| at < self.started_at)
+            || self
+                .compute_retired_at
+                .is_some_and(|at| at < self.started_at)
             || self.purged_at.is_some_and(|at| at < self.expires_at)
             || (self.state == EnvironmentDiskState::Purged) != self.purged_at.is_some()
             || (self.state == EnvironmentDiskState::Restored) != self.restored_generation.is_some()
-            || self.restored_generation.is_some_and(|generation| generation <= self.retired_generation)
+            || self
+                .restored_generation
+                .is_some_and(|generation| generation <= self.retired_generation)
             || (self.state != EnvironmentDiskState::Retiring && self.compute_retired_at.is_none())
         {
             return Err(EnvironmentError::InvalidAggregate);
@@ -1068,7 +1072,9 @@ impl ResourceWorkCleanupStatus {
         }
         if let Some(retention) = &self.disk_retention {
             retention.validate()?;
-            if self.compute_retired != (retention.compute_retired_at.is_some() && retention.state != EnvironmentDiskState::Restored)
+            if self.compute_retired
+                != (retention.compute_retired_at.is_some()
+                    && retention.state != EnvironmentDiskState::Restored)
                 || self.storage_purged != (retention.state == EnvironmentDiskState::Purged)
             {
                 return Err(EnvironmentError::InvalidResourceHandoff);

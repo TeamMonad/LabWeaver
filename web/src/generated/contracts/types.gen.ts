@@ -2505,6 +2505,7 @@ export type EnvironmentDetailSchema = {
     connection: EnvironmentConnectionReadiness;
     courseId?: EnvironmentDetailSchemaCourseId | null;
     desiredState: DesiredEnvironmentState;
+    diskRetention?: EnvironmentDiskRetention | null;
     displayLabel: string;
     eligibilityExpiresAt: string | null;
     endpoints: Array<EnvironmentEndpoint>;
@@ -2625,6 +2626,25 @@ export type EnvironmentConnectionReadiness = {
 export type EnvironmentConnectionState = 'preparing' | 'ready' | 'unknown' | 'unavailable';
 
 /**
+ * Immutable retention window, with separately observed retirement and purge facts.
+ * Both user deletion and arrears retention are platform-paid; no compute hold funds this window.
+ */
+export type EnvironmentDiskRetention = {
+    computeRetiredAt?: EnvironmentDetailSchemaUtcTimestamp | null;
+    expiresAt: EnvironmentDetailSchemaUtcTimestamp;
+    purgedAt?: EnvironmentDetailSchemaUtcTimestamp | null;
+    restoredGeneration?: number | null;
+    retiredGeneration: number;
+    startedAt: EnvironmentDetailSchemaUtcTimestamp;
+    state: EnvironmentDiskState;
+};
+
+/**
+ * Disk lifetime is independent of retirement of a compute generation.
+ */
+export type EnvironmentDiskState = 'retiring' | 'retained' | 'restored' | 'purging' | 'purged';
+
+/**
  * Sanitized Environment-owned endpoint metadata.
  */
 export type EnvironmentEndpoint = {
@@ -2674,7 +2694,7 @@ export type EnvironmentLeaseAuthorization = {
 /**
  * Explicit operation kind; restart and destructive reset are never aliases.
  */
-export type EnvironmentOperationKind = 'create' | 'start' | 'stop' | 'restart' | 'reset' | 'retry' | 'cancel' | 'recover' | 'expire' | 'delete' | 'cleanup' | 'freeze';
+export type EnvironmentOperationKind = 'create' | 'start' | 'stop' | 'restart' | 'reset' | 'retry' | 'cancel' | 'recover' | 'expire' | 'delete' | 'cleanup' | 'restore' | 'purge' | 'freeze';
 
 /**
  * Explicit immutable target selected for one reset operation.
@@ -2976,6 +2996,7 @@ export type EnvironmentInstanceSchema = {
     cleanupEvidence?: EnvironmentInstanceSchemaArtifactRef | null;
     courseId?: EnvironmentInstanceSchemaCourseId | null;
     desiredState: EnvironmentInstanceSchemaDesiredEnvironmentState;
+    diskRetention?: EnvironmentInstanceSchemaEnvironmentDiskRetention | null;
     displayLabel: string;
     eligibilityExpiresAt: string | null;
     endpoints: Array<EnvironmentInstanceSchemaEnvironmentEndpoint>;
@@ -3100,8 +3121,32 @@ export type EnvironmentCleanupTarget = {
      * Existing-namespace Work objects; an absent entry must never be adopted later.
      */
     objects?: Array<ExecutionObjectRef>;
+    /**
+     * Only an owner-accepted expiry operation may set this flag on the pinned disk identity.
+     */
+    purgeDisk?: boolean;
+    retainDisk?: boolean;
     uid: string;
 };
+
+/**
+ * Immutable retention window, with separately observed retirement and purge facts.
+ * Both user deletion and arrears retention are platform-paid; no compute hold funds this window.
+ */
+export type EnvironmentInstanceSchemaEnvironmentDiskRetention = {
+    computeRetiredAt?: EnvironmentInstanceSchemaUtcTimestamp | null;
+    expiresAt: EnvironmentInstanceSchemaUtcTimestamp;
+    purgedAt?: EnvironmentInstanceSchemaUtcTimestamp | null;
+    restoredGeneration?: number | null;
+    retiredGeneration: number;
+    startedAt: EnvironmentInstanceSchemaUtcTimestamp;
+    state: EnvironmentInstanceSchemaEnvironmentDiskState;
+};
+
+/**
+ * Disk lifetime is independent of retirement of a compute generation.
+ */
+export type EnvironmentInstanceSchemaEnvironmentDiskState = 'retiring' | 'retained' | 'restored' | 'purging' | 'purged';
 
 /**
  * Sanitized Environment-owned endpoint metadata.
@@ -3184,7 +3229,7 @@ export type EnvironmentOperation = {
 /**
  * Explicit operation kind; restart and destructive reset are never aliases.
  */
-export type EnvironmentInstanceSchemaEnvironmentOperationKind = 'create' | 'start' | 'stop' | 'restart' | 'reset' | 'retry' | 'cancel' | 'recover' | 'expire' | 'delete' | 'cleanup' | 'freeze';
+export type EnvironmentInstanceSchemaEnvironmentOperationKind = 'create' | 'start' | 'stop' | 'restart' | 'reset' | 'retry' | 'cancel' | 'recover' | 'expire' | 'delete' | 'cleanup' | 'restore' | 'purge' | 'freeze';
 
 /**
  * Explicit immutable target selected for one reset operation.
@@ -3469,7 +3514,7 @@ export type EnvironmentOperationSnapshotSchemaEnvironmentId = string;
 /**
  * Explicit operation kind; restart and destructive reset are never aliases.
  */
-export type EnvironmentOperationSnapshotSchemaEnvironmentOperationKind = 'create' | 'start' | 'stop' | 'restart' | 'reset' | 'retry' | 'cancel' | 'recover' | 'expire' | 'delete' | 'cleanup' | 'freeze';
+export type EnvironmentOperationSnapshotSchemaEnvironmentOperationKind = 'create' | 'start' | 'stop' | 'restart' | 'reset' | 'retry' | 'cancel' | 'recover' | 'expire' | 'delete' | 'cleanup' | 'restore' | 'purge' | 'freeze';
 
 /**
  * Accepted container Work cutover. The release is desired until the operation succeeds.
@@ -6773,7 +6818,7 @@ export type EnvironmentOperationPageSchemaEnvironmentId = string;
 /**
  * Explicit operation kind; restart and destructive reset are never aliases.
  */
-export type EnvironmentOperationPageSchemaEnvironmentOperationKind = 'create' | 'start' | 'stop' | 'restart' | 'reset' | 'retry' | 'cancel' | 'recover' | 'expire' | 'delete' | 'cleanup' | 'freeze';
+export type EnvironmentOperationPageSchemaEnvironmentOperationKind = 'create' | 'start' | 'stop' | 'restart' | 'reset' | 'retry' | 'cancel' | 'recover' | 'expire' | 'delete' | 'cleanup' | 'restore' | 'purge' | 'freeze';
 
 /**
  * Safe operation representation for Public REST and SSE consumers.
@@ -6895,7 +6940,7 @@ export type EnvironmentSummaryPageSchemaEnvironmentId = string;
 /**
  * Explicit operation kind; restart and destructive reset are never aliases.
  */
-export type EnvironmentSummaryPageSchemaEnvironmentOperationKind = 'create' | 'start' | 'stop' | 'restart' | 'reset' | 'retry' | 'cancel' | 'recover' | 'expire' | 'delete' | 'cleanup' | 'freeze';
+export type EnvironmentSummaryPageSchemaEnvironmentOperationKind = 'create' | 'start' | 'stop' | 'restart' | 'reset' | 'retry' | 'cancel' | 'recover' | 'expire' | 'delete' | 'cleanup' | 'restore' | 'purge' | 'freeze';
 
 /**
  * Safe operation representation for Public REST and SSE consumers.
@@ -18027,6 +18072,77 @@ export type RestartEnvironmentResponses = {
 };
 
 export type RestartEnvironmentResponse = RestartEnvironmentResponses[keyof RestartEnvironmentResponses];
+
+export type RestoreEnvironmentData = {
+    body?: never;
+    headers: {
+        'Idempotency-Key': string;
+        'If-Match': string;
+    };
+    path: {
+        environmentId: string;
+    };
+    query?: never;
+    url: '/api/v1/environments/{environmentId}/restore';
+};
+
+export type RestoreEnvironmentErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type RestoreEnvironmentError = RestoreEnvironmentErrors[keyof RestoreEnvironmentErrors];
+
+export type RestoreEnvironmentResponses = {
+    /**
+     * Successful response
+     */
+    202: EnvironmentOperationAcceptedSchema;
+};
+
+export type RestoreEnvironmentResponse = RestoreEnvironmentResponses[keyof RestoreEnvironmentResponses];
 
 export type RetryEnvironmentData = {
     body?: never;

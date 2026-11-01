@@ -261,7 +261,10 @@ impl ReconcileWorker {
                     Err(error) => return Err(error.into()),
                 };
                 let mut updated = updated;
-                crate::disk_retention::record_disk_observation(&mut updated, self.store.current_time().await?)?;
+                crate::disk_retention::record_disk_observation(
+                    &mut updated,
+                    self.store.current_time().await?,
+                )?;
                 // A non-terminal observation must not be immediately claimed again.  The
                 // container and KubeVirt providers both return `operation_complete = false`
                 // while a resource is still converging; leaving `next_attempt_at` at the
@@ -657,7 +660,13 @@ pub fn next_action(
         (Operation::Create | Operation::Retry | Operation::Recover, State::Provisioning) => {
             Ok(ReconcileAction::Provision)
         }
-        (Operation::Start, State::Stopped) if instance.disk_retention.as_ref().is_some_and(|disk| disk.state == contracts::environment::EnvironmentDiskState::Restored) => Ok(ReconcileAction::Provision),
+        (Operation::Start, State::Stopped)
+            if instance.disk_retention.as_ref().is_some_and(|disk| {
+                disk.state == contracts::environment::EnvironmentDiskState::Restored
+            }) =>
+        {
+            Ok(ReconcileAction::Provision)
+        }
         (Operation::Start, State::Stopped) => Ok(ReconcileAction::Start),
         (Operation::Cancel, State::Stopping) if instance.operation.template_upgrade.is_some() => {
             Ok(ReconcileAction::Stop)

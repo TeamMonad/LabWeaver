@@ -136,6 +136,15 @@
           },
           "type": "array"
         },
+        "purgeDisk": {
+          "default": false,
+          "description": "Only an owner-accepted expiry operation may set this flag on the pinned disk identity.",
+          "type": "boolean"
+        },
+        "retainDisk": {
+          "default": false,
+          "type": "boolean"
+        },
         "uid": {
           "type": "string"
         }
@@ -145,6 +154,72 @@
         "uid"
       ],
       "type": "object"
+    },
+    "EnvironmentDiskRetention": {
+      "additionalProperties": false,
+      "description": "Immutable retention window, with separately observed retirement and purge facts.\nBoth user deletion and arrears retention are platform-paid; no compute hold funds this window.",
+      "properties": {
+        "computeRetiredAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expiresAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "purgedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "restoredGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retiredGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "startedAt": {
+          "$ref": "#/$defs/UtcTimestamp"
+        },
+        "state": {
+          "$ref": "#/$defs/EnvironmentDiskState"
+        }
+      },
+      "required": [
+        "state",
+        "startedAt",
+        "expiresAt",
+        "retiredGeneration"
+      ],
+      "type": "object"
+    },
+    "EnvironmentDiskState": {
+      "description": "Disk lifetime is independent of retirement of a compute generation.",
+      "enum": [
+        "retiring",
+        "retained",
+        "restored",
+        "purging",
+        "purged"
+      ],
+      "type": "string"
     },
     "EnvironmentEndpoint": {
       "additionalProperties": false,
@@ -418,6 +493,8 @@
         "expire",
         "delete",
         "cleanup",
+        "restore",
+        "purge",
         "freeze"
       ],
       "type": "string"
@@ -1117,6 +1194,16 @@
     },
     "desiredState": {
       "$ref": "#/$defs/DesiredEnvironmentState"
+    },
+    "diskRetention": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EnvironmentDiskRetention"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "displayLabel": {
       "type": "string"

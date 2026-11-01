@@ -193,9 +193,8 @@ pub fn environment_operation_action(operation: &str) -> Option<ObjectAction> {
         | "listEnvironmentEndpoints" => Some(Browse),
         "startEnvironment" | "restartEnvironment" | "upgradeEnvironmentTemplate" => Some(Start),
         "stopEnvironment" | "cancelEnvironmentOperation" => Some(Stop),
-        "resetEnvironment" | "retryEnvironment" | "recoverEnvironment" | "deleteEnvironment" | "restoreEnvironment" => {
-            Some(Edit)
-        }
+        "resetEnvironment" | "retryEnvironment" | "recoverEnvironment" | "deleteEnvironment"
+        | "restoreEnvironment" => Some(Edit),
         _ => None,
     }
 }
