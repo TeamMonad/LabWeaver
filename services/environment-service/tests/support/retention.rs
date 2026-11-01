@@ -21,6 +21,7 @@ pub fn delete_restore_and_reauthorize(
     instance.approved_resources.memory_bytes = projection.environment_spec.resources.memory_bytes;
     instance.approved_resources.storage_bytes = projection.environment_spec.resources.storage_bytes;
     let receipt = runtime_receipt(&instance, projection);
+    instance.eligibility_expires_at = Some(receipt.valid_until);
     instance.lease_id = Some(receipt.lease_authorization.lease_id);
     instance.capacity_binding = Some(receipt.lease_authorization.capacity_binding.clone());
     instance.operation.lease_authorization = Some(receipt.lease_authorization.clone());
