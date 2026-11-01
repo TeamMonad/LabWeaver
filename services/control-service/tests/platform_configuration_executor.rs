@@ -1,4 +1,4 @@
-//! Production Python executor reports through real Control HTTPS and PostgreSQL.
+//! Production Python executor reports through real Control HTTPS and `PostgreSQL`.
 use axum::{
     body::Body,
     http::{Request, StatusCode},

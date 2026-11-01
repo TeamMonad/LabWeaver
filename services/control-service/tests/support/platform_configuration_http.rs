@@ -85,7 +85,7 @@ pub(super) struct HttpFixture {
     pub other_actor: ActorId,
     issuer: AuthorityHandle,
     _access: TlsServiceHandle,
-    _temporary: tempfile::TempDir,
+    temporary: tempfile::TempDir,
     key: String,
     state: Arc<ApiState>,
 }
@@ -157,7 +157,7 @@ impl HttpFixture {
             other_actor,
             issuer,
             _access: access,
-            _temporary: temporary,
+            temporary,
             key,
             state,
         })
@@ -171,7 +171,7 @@ impl HttpFixture {
         &self,
     ) -> Result<(TlsServiceHandle, std::path::PathBuf), Box<dyn std::error::Error>> {
         let (ca, leaf, key, _) = tls_material()?;
-        let ca_path = self._temporary.path().join("executor-ca.pem");
+        let ca_path = self.temporary.path().join("executor-ca.pem");
         std::fs::write(&ca_path, ca)?;
         Ok((
             spawn_tls_service(self.router.clone(), &leaf, &key).await?,
