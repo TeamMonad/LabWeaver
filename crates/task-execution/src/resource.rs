@@ -613,10 +613,14 @@ pub fn resource_admission_diagnostic(code: &str) -> Option<&'static str> {
         "LW_RESOURCE_APPROVAL_EXPIRED" => Some("LW_RESOURCE_APPROVAL_EXPIRED"),
         "LW_RESOURCE_CAPACITY_EXHAUSTED" => Some("LW_RESOURCE_CAPACITY_EXHAUSTED"),
         "LW_RESOURCE_GPU_CAPACITY_EXHAUSTED" => Some("LW_RESOURCE_GPU_CAPACITY_EXHAUSTED"),
-        "LW_RESOURCE_GPU_CATALOG_UNCONFIGURED" => Some("LW_RESOURCE_GPU_CATALOG_UNCONFIGURED"),
+        "LW_RESOURCE_GPU_CATALOG_MISSING" => Some("LW_RESOURCE_GPU_CATALOG_MISSING"),
         "LW_RESOURCE_GPU_CATALOG_AMBIGUOUS" => Some("LW_RESOURCE_GPU_CATALOG_AMBIGUOUS"),
         "LW_RESOURCE_POLICY_INVALID" => Some("LW_RESOURCE_POLICY_INVALID"),
         "LW_RESOURCE_GATEWAY_DENIED" => Some("LW_RESOURCE_GATEWAY_DENIED"),
+        "LW_RESOURCE_REVISION_CONFLICT" => Some("LW_RESOURCE_REVISION_CONFLICT"),
+        "LW_RESOURCE_ALLOCATION_MISMATCH" => Some("LW_RESOURCE_ALLOCATION_MISMATCH"),
+        "LW_RESOURCE_CREATE_STATE_INVALID" => Some("LW_RESOURCE_CREATE_STATE_INVALID"),
+        "LW_CREDITS_INVALID" => Some("LW_CREDITS_INVALID"),
         _ => None,
     }
 }
@@ -1309,7 +1313,7 @@ mod diagnostic_tests {
             (StatusCode::CONFLICT, "LW_RESOURCE_APPROVAL_EXPIRED"),
             (StatusCode::CONFLICT, "LW_RESOURCE_CAPACITY_EXHAUSTED"),
             (StatusCode::CONFLICT, "LW_RESOURCE_GPU_CAPACITY_EXHAUSTED"),
-            (StatusCode::CONFLICT, "LW_RESOURCE_GPU_CATALOG_UNCONFIGURED"),
+            (StatusCode::CONFLICT, "LW_RESOURCE_GPU_CATALOG_MISSING"),
             (StatusCode::CONFLICT, "LW_RESOURCE_GPU_CATALOG_AMBIGUOUS"),
             (StatusCode::CONFLICT, "LW_RESOURCE_POLICY_INVALID"),
             (StatusCode::BAD_REQUEST, "LW_RESOURCE_REQUEST_INVALID"),
@@ -1319,6 +1323,13 @@ mod diagnostic_tests {
             (StatusCode::FORBIDDEN, "LW_RESOURCE_GATEWAY_DENIED"),
             (StatusCode::CONFLICT, "LW_CREDITS_CONFLICT"),
             (StatusCode::CONFLICT, "LW_IDEMPOTENCY_CONFLICT"),
+            (
+                StatusCode::PRECONDITION_FAILED,
+                "LW_RESOURCE_REVISION_CONFLICT",
+            ),
+            (StatusCode::CONFLICT, "LW_RESOURCE_ALLOCATION_MISMATCH"),
+            (StatusCode::CONFLICT, "LW_RESOURCE_CREATE_STATE_INVALID"),
+            (StatusCode::BAD_REQUEST, "LW_CREDITS_INVALID"),
         ] {
             let body = serde_json::to_vec(&contracts::ProblemDetails {
                 problem_type: "urn:labweaver:problem:test".to_owned(),
