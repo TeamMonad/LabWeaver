@@ -8,6 +8,8 @@
 //!
 //! `model_gateway_request` ledger receipts mean only that an authoring capability reached the
 //! Messages handler. They do not imply admission, upstream delivery, token usage or settlement.
+//! Signature-verified expired capabilities also leave a request receipt, but are still rejected
+//! before authorization, cost admission or forwarding. Unsigned input cannot identify an attempt.
 //! Sandbox failure diagnostics combine this exact task-generation receipt with a process exit
 //! status and an allowlisted stderr category. Missing observations due to a read failure remain
 //! `unknown`, not `not-observed`. Runs predating these receipts cannot establish non-delivery.
@@ -124,6 +126,14 @@ impl ScopedTokenIssuer {
         )
     }
     fn validate_at(&self, token: &str, now: u64) -> Result<TokenClaims, &'static str> {
+        let claims = self.verify_signature(token)?;
+        if now >= claims.expires_at {
+            return Err("LW_MODEL_GATEWAY_TOKEN_EXPIRED");
+        }
+        Ok(claims)
+    }
+
+    fn verify_signature(&self, token: &str) -> Result<TokenClaims, &'static str> {
         let (payload, signature) = token
             .split_once('.')
             .ok_or("LW_MODEL_GATEWAY_TOKEN_SCOPE")?;
@@ -145,9 +155,6 @@ impl ScopedTokenIssuer {
             .map_err(|_| "LW_MODEL_GATEWAY_TOKEN_SCOPE")?;
         let claims: TokenClaims =
             serde_json::from_slice(&bytes).map_err(|_| "LW_MODEL_GATEWAY_TOKEN_SCOPE")?;
-        if now >= claims.expires_at {
-            return Err("LW_MODEL_GATEWAY_TOKEN_EXPIRED");
-        }
         Ok(claims)
     }
 }
@@ -510,7 +517,9 @@ async fn messages(
             "gateway token required",
         );
     };
-    let claims = match state.issuer.validate(token) {
+    // Verify the signature before associating an observation with a run. Expiry is enforced
+    // below the receipt so a signed-but-expired attempt is not mislabeled as no gateway traffic.
+    let claims = match state.issuer.verify_signature(token) {
         Ok(value) => value,
         Err(code) => {
             return error_response(StatusCode::UNAUTHORIZED, code, "gateway token rejected");
@@ -526,6 +535,18 @@ async fn messages(
         {
             return error_response(StatusCode::SERVICE_UNAVAILABLE, "LW_MODEL_CALL_ID_UNAVAILABLE", "gateway request observation unavailable; no upstream request sent");
         }
+    }
+    if SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        >= claims.expires_at
+    {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "LW_MODEL_GATEWAY_TOKEN_EXPIRED",
+            "gateway token rejected",
+        );
     }
     let expected_model = match state.authorize(&claims).await {
         Ok(model) => model,

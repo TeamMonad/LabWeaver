@@ -822,3 +822,36 @@ async fn gateway_preserves_native_resource_rate_unconfigured_without_upstream_ca
     assert!(f.holds().await?.is_empty());
     Ok(())
 }
+
+#[tokio::test]
+async fn signed_expired_capability_is_observed_but_never_admitted()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = Fixture::new(Mode::Json, true).await?;
+    let receipt_exists = || {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM agent.idempotency_ledger WHERE operation='model_gateway_request')").fetch_one(&f.pool)
+    };
+    assert!(!receipt_exists().await?);
+    let expired = f.runtime.issuer.issue_for(
+        f.project,
+        f.run_id.as_uuid(),
+        f.attempt,
+        f.authority.scope.clone(),
+        Duration::ZERO,
+    );
+    let response = reqwest::Client::new()
+        .post(f.runtime.base_url.join("v1/messages")?)
+        .bearer_auth(expired)
+        .json(&json!({"model":"fixture-model"}))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body: serde_json::Value = response.json().await?;
+    assert_eq!(body["lwCode"], "LW_MODEL_GATEWAY_TOKEN_EXPIRED");
+    assert!(
+        receipt_exists().await?,
+        "expiry denial is still a gateway request, not a missing request"
+    );
+    assert_eq!(f.calls.load(Ordering::SeqCst), 0);
+    assert!(f.holds().await?.is_empty());
+    Ok(())
+}
