@@ -10,6 +10,7 @@
   ansible.builtin.set_fact:
     installation_boundary_manifest_objects: "{{ installation_boundary_objects }}"
     installation_boundary_chart_objects: []
+    installation_boundary_chart_namespace_metadata: {}
     installation_boundary_owned_objects: []
     installation_boundary_helm_post_renderer: "{{ installation_boundary_post_renderer_path }}"
 
@@ -25,11 +26,26 @@
   loop_control:
     loop_var: installation_boundary_release
 
+- name: Refuse planned infrastructure objects declaring a different installation
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.apiVersion is string
+      - item.kind is string
+      - item.metadata.name is string
+      - item.metadata.name | length > 0
+      - item.metadata.annotations['labweaver.io/installation-id'] | default(labweaver_installation_id) == labweaver_installation_id
+    fail_msg: INFRASTRUCTURE_PLANNED_INSTALLATION_CONFLICT
+  loop: "{{ installation_boundary_manifest_objects + installation_boundary_chart_objects }}"
+  no_log: true
+
 - name: Bind all infrastructure target namespaces including Helm-created namespaces
   ansible.builtin.set_fact:
     installation_boundary_namespace_names: >-
       {{ (((installation_boundary_manifest_objects + installation_boundary_chart_objects) |
            selectattr('metadata.namespace', 'defined') | map(attribute='metadata.namespace') | list) +
+          ((installation_boundary_manifest_objects + installation_boundary_chart_objects) |
+           selectattr('kind', 'equalto', 'Namespace') | map(attribute='metadata.name') | list) +
           (installation_boundary_helm_releases | map(attribute='namespace') | list)) |
          unique | difference(installation_boundary_shared_namespaces) }}
     installation_boundary_namespace_producers: >-
@@ -122,6 +138,7 @@
       {{ ((installation_boundary_manifest_objects + installation_boundary_chart_objects) |
           selectattr('kind', 'equalto', 'Namespace') | selectattr('metadata.name', 'equalto', item.item) | first |
           default({'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': item.item}})) |
+         combine({'metadata': installation_boundary_chart_namespace_metadata.get(item.item, {})}, recursive=True) |
          combine({'metadata': {'annotations': {'labweaver.io/installation-id': labweaver_installation_id}}}, recursive=True) | to_json }}
   loop: "{{ installation_boundary_namespace_observations.results }}"
   when: item.resources | length == 0

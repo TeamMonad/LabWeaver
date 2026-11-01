@@ -50,9 +50,14 @@
           enabled: true
       gatewayAPI:
         enabled: true
+        gatewayClass:
+          create: true
+      operator:
+        skipCRDCreation: true
     cluster_network_boundary_objects: >-
       {{ [lookup('template', 'host-firewall-policy.yml.j2') | from_yaml] +
-         (lookup('template', 'metallb.yml.j2') | from_yaml_all | list) }}
+         (lookup('template', 'metallb.yml.j2') | from_yaml_all | list) +
+         [{'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'name': 'metallb-memberlist', 'namespace': 'metallb-system'}}] }}
 
 - name: Assert Helm is available on the control plane
   tags: [cilium]
@@ -70,6 +75,13 @@
     - { name: metallb, url: https://metallb.github.io/metallb }
   environment: "{{ labweaver_controller_proxy_env | default({}) }}"
 
+- name: Plan the complete pinned Cilium CRD mutation inventory
+  ansible.builtin.include_tasks:
+    file: cilium-crds.yml
+    apply:
+      tags: [always]
+  tags: [always]
+
 - name: Verify every network mutation target before changing the cluster
   ansible.builtin.include_role:
     name: installation_boundary
@@ -78,10 +90,9 @@
   tags: [always]
   vars:
     installation_boundary_shared_namespaces: [kube-system]
-    installation_boundary_sources:
-      - >-
-        {{ gateway_api_crd_file | default('https://github.com/kubernetes-sigs/gateway-api/releases/download/'
-           ~ gateway_api_version ~ '/experimental-install.yaml') }}
+    installation_boundary_sources: >-
+      {{ [gateway_api_crd_file | default('https://github.com/kubernetes-sigs/gateway-api/releases/download/'
+           ~ gateway_api_version ~ '/experimental-install.yaml')] + cluster_network_cilium_crd_sources }}
     installation_boundary_objects: "{{ cluster_network_boundary_objects }}"
     installation_boundary_helm_releases:
       - name: cilium
@@ -94,11 +105,17 @@
         chart_ref: metallb/metallb
         chart_version: "{{ metallb_chart_version }}"
 
-- name: Install pinned Gateway API Standard CRDs before enabling Gateway API
+- name: Install pinned Gateway API and Cilium CRDs before installing controllers
   kubernetes.core.k8s:
     kubeconfig: /etc/kubernetes/admin.conf
     state: present
     definition: "{{ installation_boundary_owned_objects | selectattr('kind', 'equalto', 'CustomResourceDefinition') | list }}"
+
+- name: Require every planned network API schema before starting its controller
+  ansible.builtin.command:
+    argv: [kubectl, --kubeconfig, /etc/kubernetes/admin.conf, wait, "crd/{{ item.metadata.name }}", --for=condition=Established, --timeout=120s]
+  loop: "{{ installation_boundary_owned_source_objects | selectattr('kind', 'equalto', 'CustomResourceDefinition') | list }}"
+  changed_when: false
 
 - name: Install Cilium with kube-proxy replacement and Gateway API
   tags: [cilium]

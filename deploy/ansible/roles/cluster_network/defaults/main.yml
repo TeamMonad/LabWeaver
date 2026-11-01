@@ -1,2 +1,6 @@
 ---
 cluster_network_host_firewall_cluster_cidr: "10.0.0.0/8"
+
+# Air-gapped Bundles can supply the exact pinned Cilium CRD manifest locators.
+# Otherwise the role discovers them from the chart-matched upstream tag.
+cluster_network_cilium_crd_files: []

@@ -109,13 +109,17 @@ python tools/deployment_bundle.py deploy --archive .private/installation.age \
 
 `--stage all|preflight|infrastructure|identity|storage|services|route` 选择重入的阶段；入口不持久记录阶段成功事实。中断后先从目标集群核对 Helm release、身份与业务状态，再用同一个安装 ID 重试该阶段。`adopt` 不直接运行整站 `site.yml`；缺失的归属标记或发现不相符的 namespace/对象/release 时拒绝覆盖，已有但没有安装 ID 的旧实例需要人工审查与单独迁移，不会自动认领。`upgrade` 不重装基础设施或 BuildKit，也不触发清空；应用迁移仍是前向操作，回退前先检查 schema 与拟回退应用版本是否兼容。
 
-Resource 配置应用使用 Bundle 中的目标 namespace，配置对象的 namespace 必须完全相符；读取 NATS Secret 与应用 ConfigMap 都在同一目标中执行，不回退到 `labweaver-system`。基础服务的失败 revision 恢复仅处理安装 ID 相符的既定 StatefulSet，删除前核对 Pod 的 controller UID，并以 Pod UID 前置条件防止删除并发替换出的新对象。
+应用阶段先读取并校验 Bundle 输入，在受限工作目录暂存 chart/values，再用最终参数渲染完整 Helm 清单并核验每个写入目标。全部通过后才执行 SQL baseline/Access seed、NATS、MinIO、Harbor 和 Keycloak 的业务写入以及后续集群协调；最终 chart 的冲突不能留到迁移之后才发现。Resource 配置对象和 NATS Secret 始终使用 Bundle 中的准确目标 namespace，不回退到 `labweaver-system`。同一 namespace 中的平台与 Resource sibling release 分别读取准确 metadata，核对 name、namespace、安装 ID 后才将其根对象及 owner UID 子链视为本安装对象；不按 release 名前缀认领。
 
-应用阶段在修改集群前核对 portal、evaluation、authoring、data namespace 及其实际写入的 Secret、策略、ServiceAccount、Gateway/Service 和路由；Helm 使用最终 values/镜像参数先渲染目标清单，再核对所有对象（含跨 namespace 对象与集群 RBAC）。仅配置内容或 NetworkPolicy spec 相同不代表允许认领。Deployment → ReplicaSet → Pod 等控制器子对象沿已观测的 owner UID 回溯到已核验的安装根对象，不能靠名称或标签推测，父对象缺失、UID 更换或循环引用均拒绝。
+应用阶段核对 portal、evaluation、authoring、data namespace 及其实际写入的 Secret、策略、ServiceAccount、Gateway/Service 和路由；最终 Helm 清单还覆盖跨 namespace 对象与集群 RBAC。仅配置内容或 NetworkPolicy spec 相同不代表允许认领。Deployment → ReplicaSet → Pod 等控制器子对象沿已观测的 owner UID 回溯到已核验的安装根对象，不能靠名称或标签推测，父对象缺失、UID 更换或循环引用均拒绝。基础服务的失败 revision 恢复仅处理安装 ID 相符的既定 StatefulSet，并以 Pod UID 前置条件防止删除并发替换出的对象。
 
 Harbor 新 namespace 仅在 API 明确返回 NotFound 时以 `create` 写入安装 ID；已有 namespace 不补写缺失 ID。已有 Harbor Helm release 须具有准确 name/namespace，且保存的 `labweaverInstallationId` 与 Bundle 相同。Identity 同样检查 namespace、凭据、证书目标、CNPG Cluster/备份、RBAC、工作负载与配置的安装 ID；role-only provisioning 也不绕过检查。既有无 ID 的实例不会自动迁移。以上检查不替代真实集群上的首次安装、重入与升级验证。
 
-清空仅能在另行授权的维护窗口执行，必须指定目标、范围和原 Bundle 安装 ID；先完成独立备份与数据处置审批。入口仅选择安装 ID 相符的 namespace，逐个核对其资源、所有命中的 Helm release 与绑定 PV 的归属，核对失败时在任何卸载或删除前停止。PV 缺少 `labweaver.io/installation-id` 标记时不会依赖 `claimRef` 推测归属或静默删除；须先在独立审批中查清盘身份并处理，不能把再次运行清空当作授权。外国 `lw-env-*` 命名空间不因名称相似被选中；无标记的旧安装不能自动采用或清空：
+新装分支的 Cilium、MetalLB、NFS CSI、Local Path、cert-manager、KubeVirt/CDI 与 FastAPI-DLS 在首次集群变更前读取完整已配置 manifest/最终 Helm 渲染清单并核验安装归属。基础设施 Helm release 保存 `labweaverInstallationId`，post-renderer 为其根对象写入同一安装 ID；基础设施 Gateway 的生产者也写入该 ID，应用入口不为无 ID Gateway 补标。`kube-system` 等共享 namespace 只允许既定对象/字段协调，不据 namespace 名认领其内容。GPU/KubeVirt 节点标签使用独立字段归属标记及 UID/resourceVersion JSON Patch 测试；过期 GPU 标签清理不接受其他安装的布尔管理标签。旧入口对象的删除同时携带已观测 UID/resourceVersion。Sandbox 先验证 RuntimeClass/安装边界；stamp 读取错误与服务状态查询错误均不能当作缺失或已停止。
+
+清空仅能在另行授权的维护窗口执行，必须指定目标、范围和原 Bundle 安装 ID；先完成独立备份与数据处置审批。入口发现所有服务中的可删除 namespaced API 类型并完整分页读取，包括 Gateway、CDI 与其他 CR；发现/读取错误或外来对象在删除前阻断流程，不使用固定类型白名单。PV 缺少 `labweaver.io/installation-id` 时不会依赖 `claimRef` 推测归属。Helm 存储的 name/namespace、安装 ID、revision、UID/resourceVersion 与载荷指纹用于核验 release；从存储 manifest/hooks 找出命中的集群级及跨 namespace 对象，保留 Helm 通常保留的 CRD、范围外 Namespace 和 keep-policy 对象（已授权整 namespace 清空中的子对象不因 keep 标记获豁免）。wipe 不调用按名称卸载的 `helm uninstall`，每次 API DELETE 前重查范围与存储身份，并在 DELETE 上使用对象 UID/resourceVersion 前置条件；保护中的 PV 在 namespace 删除已提交后等待回收。外国 `lw-env-*` namespace 不因名称相似被选中，无标记旧安装不能自动采用或清空。
+
+Kubernetes 不提供“namespace 全部子对象快照 + namespace 删除”的跨资源事务，子对象插入不会改变 namespace 自身的 resourceVersion；上述重查与对象前置条件不能宣称消除该间隙。维护窗口必须阻止并行 Helm 升级及其他范围内写入，真实集群的中断恢复和并发控制仍需现场验收。本计划编写阶段不执行清空：
 
 ```sh
 python tools/deployment_bundle.py deploy --archive .private/installation.age \

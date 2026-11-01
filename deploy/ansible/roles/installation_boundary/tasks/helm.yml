@@ -91,9 +91,54 @@
   check_mode: false
   no_log: true
 
-- name: Retain the exact rendered infrastructure Helm targets
+- name: Parse the exact rendered infrastructure Helm documents
+  ansible.builtin.set_fact:
+    installation_boundary_release_documents: >-
+      {{ installation_boundary_release_render.stdout | from_yaml_all | reject('equalto', none) | list }}
+    installation_boundary_current_release_objects: []
+  no_log: true
+
+- name: Reject an empty infrastructure release rendering
+  ansible.builtin.assert:
+    that: installation_boundary_release_documents | length > 0
+    fail_msg: INFRASTRUCTURE_RENDERED_MANIFEST_INVALID
+
+- name: Require complete infrastructure Helm document identities
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.apiVersion is string
+      - item.kind is string
+      - item.kind != 'List' or item['items'] is sequence
+    fail_msg: INFRASTRUCTURE_RENDERED_MANIFEST_INVALID
+  loop: "{{ installation_boundary_release_documents }}"
+  no_log: true
+
+- name: Retain every exact rendered infrastructure Helm target
   ansible.builtin.set_fact:
     installation_boundary_chart_objects: >-
-      {{ installation_boundary_chart_objects +
-         (installation_boundary_release_render.stdout | from_yaml_all | select('mapping') | list) }}
+      {{ installation_boundary_chart_objects + (item['items'] if item.kind == 'List' else [item]) }}
+    installation_boundary_current_release_objects: >-
+      {{ installation_boundary_current_release_objects + (item['items'] if item.kind == 'List' else [item]) }}
+  loop: "{{ installation_boundary_release_documents }}"
   no_log: true
+
+- name: Reject two infrastructure releases claiming the same Namespace root
+  ansible.builtin.assert:
+    that:
+      - >-
+        installation_boundary_chart_namespace_metadata.get(item.metadata.name, {}) in [{},
+          {'annotations': {'meta.helm.sh/release-name': installation_boundary_release.name,
+                           'meta.helm.sh/release-namespace': installation_boundary_release.namespace},
+           'labels': {'app.kubernetes.io/managed-by': 'Helm'}}]
+    fail_msg: INFRASTRUCTURE_NAMESPACE_RELEASE_CONFLICT
+  loop: "{{ installation_boundary_current_release_objects | selectattr('kind', 'equalto', 'Namespace') | list }}"
+
+- name: Bind exact Helm ownership for verified-absent chart Namespace producers
+  ansible.builtin.set_fact:
+    installation_boundary_chart_namespace_metadata: >-
+      {{ installation_boundary_chart_namespace_metadata | combine({item.metadata.name: {
+          'annotations': {'meta.helm.sh/release-name': installation_boundary_release.name,
+                          'meta.helm.sh/release-namespace': installation_boundary_release.namespace},
+          'labels': {'app.kubernetes.io/managed-by': 'Helm'}}}) }}
+  loop: "{{ installation_boundary_current_release_objects | selectattr('kind', 'equalto', 'Namespace') | list }}"

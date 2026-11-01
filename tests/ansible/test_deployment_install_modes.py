@@ -46,6 +46,12 @@ def run_assertion(task: dict, variables: dict) -> subprocess.CompletedProcess[st
         )
 
 
+def probe_command(probe: dict, variables: dict) -> str:
+    environment = Environment()
+    environment.filters['to_json'] = json.dumps
+    return environment.from_string(probe['ansible.builtin.shell']['cmd']).render(variables)
+
+
 def sample_object(*, release: str, namespace: str, installation: str = "", managed: str = "Helm") -> dict:
     return {"kind": "ConfigMap", "metadata": {
         "name": "labweaver-object-store-ca",
@@ -78,12 +84,13 @@ class DeploymentModeTests(unittest.TestCase):
             with self.subTest(role=role):
                 source = tasks(f"deploy/ansible/roles/{role}/tasks/main.yml")
                 probe = next(t for t in source if t.get("name", "").startswith("Refuse to adopt unowned") and "objects" in t["name"].lower())
-                command = Environment().from_string(probe["ansible.builtin.shell"]["cmd"]).render({
+                command = probe_command(probe, {
                     f"{prefix}_kubectl": "/usr/bin/kubectl",
                     f"{prefix}_kubeconfig": "/tmp/synthetic-kubeconfig",
                     f"{prefix}_namespace": "science-sandbox",
                     f"{prefix}_release_name": "science-labweaver",
                     f"{prefix}_installation_id": INSTALLATION,
+                    "installation_boundary_verified_release_names": ["science-labweaver"],
                 })
                 program = command.split("jq -e ", 1)[1]
                 program = program.strip().strip("'")
@@ -203,12 +210,13 @@ class DeploymentModeTests(unittest.TestCase):
         probe = next(task for task in source if task.get("name") == "Refuse to adopt unowned Resource objects")
         reject = next(task for task in source if task.get("name") == "Reject unowned Resource objects")
         self.assertEqual(probe["register"], "resource_application_ownership_check")
-        command = Environment().from_string(probe["ansible.builtin.shell"]["cmd"]).render({
+        command = probe_command(probe, {
             "resource_application_kubectl": "/usr/bin/kubectl",
             "resource_application_kubeconfig": "/tmp/kubeconfig",
             "resource_application_namespace": "science-sandbox",
             "resource_application_release_name": "labweaver-resource",
             "resource_application_installation_id": INSTALLATION,
+            "installation_boundary_verified_release_names": ["labweaver-resource"],
         })
         program = command.split("jq -e ", 1)[1].strip().strip("'")
         healthy = sample_object(release="labweaver-resource", namespace="science-sandbox", installation=INSTALLATION)
@@ -224,12 +232,13 @@ class DeploymentModeTests(unittest.TestCase):
     def test_platform_probe_covers_foreign_cdi_datavolume_pvc_and_datasource(self) -> None:
         source = tasks("deploy/ansible/roles/platform_application/tasks/main.yml")
         probe = next(task for task in source if task.get("name") == "Refuse to adopt unowned platform objects")
-        command = Environment().from_string(probe["ansible.builtin.shell"]["cmd"]).render({
+        command = probe_command(probe, {
             "platform_application_kubectl": "/usr/bin/kubectl",
             "platform_application_kubeconfig": "/tmp/kubeconfig",
             "platform_application_namespace": "science-sandbox",
             "platform_application_release_name": "labweaver",
             "platform_application_installation_id": INSTALLATION,
+            "installation_boundary_verified_release_names": ["labweaver"],
         })
         for resource in ("datavolume", "persistentvolumeclaim", "datasource"):
             self.assertIn(resource, command)

@@ -44,10 +44,10 @@
 - name: Refuse to adopt an unowned Resource namespace
   ansible.builtin.assert:
     that:
+      - resource_application_existing_namespace.resources | length <= 1
       - resource_application_existing_namespace.resources | length == 0 or
         (
-          resource_application_existing_namespace.resources[0].metadata.labels['app.kubernetes.io/part-of'] | default('') == 'labweaver' and
-          resource_application_existing_namespace.resources[0].metadata.labels['labweaver.io/managed'] | default('') == 'true' and
+          resource_application_existing_namespace.resources[0].metadata.name == resource_application_namespace and
           resource_application_existing_namespace.resources[0].metadata.annotations['labweaver.io/installation-id']
           | default('') == resource_application_installation_id
         )

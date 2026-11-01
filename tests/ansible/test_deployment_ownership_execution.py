@@ -12,10 +12,9 @@ import tempfile
 import threading
 import unittest
 
-from jinja2 import Environment
 import yaml
 
-from test_deployment_install_modes import INSTALLATION, ROOT, named, run_assertion, sample_object, tasks
+from test_deployment_install_modes import INSTALLATION, named, probe_command, run_assertion, sample_object, tasks
 
 
 def run_tasks(entries: list[dict], variables: dict, environment: dict | None = None):
@@ -161,9 +160,10 @@ class OwnershipExecutionTests(unittest.TestCase):
         for role, prefix in (("platform_application", "platform_application"), ("resource_application", "resource_application")):
             source = tasks(f"deploy/ansible/roles/{role}/tasks/main.yml")
             probe = next(task for task in source if task.get("name", "").startswith("Refuse to adopt unowned") and "objects" in task["name"].lower())
-            command = Environment().from_string(probe["ansible.builtin.shell"]["cmd"]).render({
+            command = probe_command(probe, {
                 f"{prefix}_kubectl": "kubectl", f"{prefix}_kubeconfig": "config", f"{prefix}_namespace": "science",
                 f"{prefix}_release_name": "reviewed", f"{prefix}_installation_id": INSTALLATION,
+                "installation_boundary_verified_release_names": ["reviewed"],
             })
             program = command.split("jq -e ", 1)[1].strip().strip("'")
             root = sample_object(release="reviewed", namespace="science")
