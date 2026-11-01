@@ -22,7 +22,7 @@ async fn protocol_one_upgrade_preserves_normal_instances_and_quarantines_cleanup
     ] {
         let mut row = requested_instance();
         store
-            .create(&format!("upgrade-create-{:?}", state), &row)
+            .create(&format!("upgrade-create-{state:?}"), &row)
             .await?;
         row.observed_state = state;
         row.observed_generation = row.generation;

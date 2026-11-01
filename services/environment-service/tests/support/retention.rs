@@ -6,6 +6,10 @@ use environment_service::{
     plan_command_authorized, record_disk_observation,
 };
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one journey keeps delete, restore and fresh authorization preconditions together"
+)]
 pub fn delete_restore_and_reauthorize(
     mut instance: EnvironmentInstance,
     projection: &contracts::events::ReleasePublished,

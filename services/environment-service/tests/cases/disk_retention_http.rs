@@ -1,4 +1,4 @@
-//! HTTP recovery uses the production router, revoker, and PostgreSQL owner.
+//! HTTP recovery uses the production router, revoker, and `PostgreSQL` owner.
 use super::*;
 use contracts::environment::{
     EnvironmentCleanupTarget, EnvironmentDiskState, ObservedEnvironmentState, OperationState,

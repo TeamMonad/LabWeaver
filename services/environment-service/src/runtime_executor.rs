@@ -4965,6 +4965,10 @@ mod tests {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the external Kubernetes fixture keeps delayed shutdown and mutation preconditions in one handler"
+    )]
     async fn lifecycle_kubernetes_response(
         fixture: &mut LifecycleKubernetes,
         request: Request<Body>,
