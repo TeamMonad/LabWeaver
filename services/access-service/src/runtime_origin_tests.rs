@@ -19,6 +19,8 @@ use tokio_tungstenite::{
 type TestWebSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+static FLOOD_CHUNK: [u8; 65_536] = [b'x'; 65_536];
+
 struct RuntimeFixture {
     state: Arc<AppState>,
     client: reqwest::Client,
@@ -280,6 +282,9 @@ impl RuntimeFixture {
         cookie: &str,
         protocols: &str,
     ) -> Result<tungstenite::handshake::client::Request, Box<dyn Error>> {
+        if origin != self.runtime && origin != self.runtime_b {
+            return Err("unknown runtime fixture origin".into());
+        }
         let mut request = format!("{origin}/connect/{grant}/ws?session_id=a%2Fb&token=x+y")
             .replace("https://", "wss://")
             .into_client_request()?;
@@ -518,7 +523,7 @@ async fn upstream_ws(
                     loop {
                         if sender
                             .send(axum::extract::ws::Message::Binary(Bytes::from_static(
-                                &[b'x'; 65_536],
+                                &FLOOD_CHUNK,
                             )))
                             .await
                             .is_err()
@@ -550,7 +555,7 @@ impl Stream for FloodProbe {
     type Item = Result<Bytes, std::io::Error>;
 
     fn poll_next(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Ready(Some(Ok(Bytes::from_static(&[b'x'; 65_536]))))
+        Poll::Ready(Some(Ok(Bytes::from_static(&FLOOD_CHUNK))))
     }
 }
 
