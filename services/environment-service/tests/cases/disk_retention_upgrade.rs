@@ -29,6 +29,9 @@ async fn protocol_one_upgrade_preserves_normal_instances_and_quarantines_cleanup
         row.operation.state = OperationState::Succeeded;
         if state == ObservedEnvironmentState::Ready {
             row.endpoints = support::ready_instance().endpoints;
+            for endpoint in &mut row.endpoints {
+                endpoint.revision = row.revision;
+            }
         } else {
             row.operation.access_revocation_revision = Some(row.revision);
             row.operation.kind = EnvironmentOperationKind::Stop;
