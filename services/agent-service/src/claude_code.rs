@@ -3034,7 +3034,7 @@ impl ClaudeCodeRuntime {
             event = "agent.authoring.runtime.failed",
             track = ?track,
             error_kind = ?error,
-            diagnostic_code = error.diagnostic_code(),
+            diagnostic_code = primary_error.diagnostic_code(),
             "authoring runtime refused the attempt",
         );
         let audit = self.audit(AuditContext {
