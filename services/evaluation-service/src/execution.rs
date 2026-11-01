@@ -488,6 +488,8 @@ impl From<TaskResourceError> for ExecutionError {
 /// The shared lifecycle reports neutral `LW_TASK_RESOURCE_*` codes; Evaluation keeps its
 /// published `LW_EVALUATION_*` diagnostics for the operations and runbook evidence that predate
 /// the extraction.
+/// Resource-owned admission diagnostics keep their original stable code rather than being
+/// replaced by an Evaluation transport or provider failure.
 #[derive(Debug)]
 pub struct TaskResourceFailure(pub TaskResourceError);
 
@@ -522,6 +524,7 @@ impl std::fmt::Display for TaskResourceFailure {
                 ResourceClientError::Conflict => "LW_EVALUATION_RESOURCE_CONFLICT",
                 ResourceClientError::Rejected => "LW_EVALUATION_RESOURCE_REJECTED",
                 ResourceClientError::Unavailable => "LW_EVALUATION_RESOURCE_UNAVAILABLE",
+                ResourceClientError::Admission(code) => code,
             },
         })
     }
@@ -539,6 +542,21 @@ mod tests {
     use contracts::evaluation::{
         APPROVED_PROGRAM_PROFILE_SCHEMA_VERSION, ApprovedProgramProfile, ProgramPhase,
     };
+
+    #[test]
+    fn resource_admission_diagnostic_is_preserved_by_execution_error() {
+        for code in [
+            "LW_RESOURCE_RATE_UNCONFIGURED",
+            "LW_RESOURCE_RATE_CURRENCY_CONFLICT",
+            "LW_CREDITS_INSUFFICIENT",
+            "LW_RESOURCE_CAPACITY_EXHAUSTED",
+        ] {
+            let error = ExecutionError::from(super::TaskResourceError::Client(
+                super::ResourceClientError::Admission(code),
+            ));
+            assert_eq!(error.to_string(), code);
+        }
+    }
 
     #[test]
     fn profile_expansion_is_direct_and_closed() -> Result<(), Box<dyn std::error::Error>> {
