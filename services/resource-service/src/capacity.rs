@@ -262,7 +262,12 @@ struct KubernetesObservationCache {
 }
 
 impl KubernetesObservationCache {
-    fn new(client: KubeClient, max_nodes: usize, max_pods: usize) -> Self {
+    fn new(
+        client: KubeClient,
+        max_nodes: usize,
+        max_pods: usize,
+        provider_binding: String,
+    ) -> Self {
         let (stop, _) = watch::channel(false);
         let nodes = Arc::new(tokio::sync::RwLock::new(Vec::new()));
         let pods = Arc::new(tokio::sync::RwLock::new(Vec::new()));
@@ -275,6 +280,7 @@ impl KubernetesObservationCache {
             max_nodes,
             stop.subscribe(),
             "node watch disconnected",
+            provider_binding.clone(),
         ));
         let pod_task = tokio::spawn(run_reflector(
             Api::<Pod>::all(client),
@@ -283,6 +289,7 @@ impl KubernetesObservationCache {
             max_pods,
             stop.subscribe(),
             "pod watch disconnected",
+            provider_binding,
         ));
         Self {
             nodes,
@@ -313,6 +320,7 @@ async fn run_reflector<K>(
     max_items: usize,
     mut stop: watch::Receiver<bool>,
     disconnect_reason: &'static str,
+    provider_binding: String,
 ) where
     K: kube::Resource
         + Clone
@@ -325,6 +333,8 @@ async fn run_reflector<K>(
     K::DynamicType: Default + Eq + std::hash::Hash + Clone,
 {
     let page_size = u32::try_from(max_items).unwrap_or(u32::MAX);
+    let dynamic_type = K::DynamicType::default();
+    let stream_kind = K::kind(&dynamic_type);
     loop {
         if *stop.borrow() {
             return;
@@ -337,12 +347,22 @@ async fn run_reflector<K>(
                 return;
             },
             result = reflect_session(&api, &target, &freshness, max_items, page_size) => {
+                let reason = match &result {
+                    Err(error) if error.is::<InitialWatchSyncError>() => "initial-events bookmark missing",
+                    Err(error) => match error.downcast_ref::<CapacityProviderError>() {
+                        Some(CapacityProviderError::ObservationStale(reason)) => *reason,
+                        _ => disconnect_reason,
+                    },
+                    Ok(()) => disconnect_reason,
+                };
+                freshness.mark_stale(reason).await;
                 if let Err(error) = result {
-                    tracing::warn!(event = "resource.gpu_capacity.watch_failed", error = %error);
+                    tracing::warn!(event = "resource.gpu_capacity.watch_failed", provider_binding,
+                        stream = %stream_kind, diagnostic_code = "LW_RESOURCE_GPU_OBSERVATION_STALE",
+                        reason, error = %error);
                 }
             }
         }
-        freshness.mark_stale(disconnect_reason).await;
         // Api::watch exposes EOF, unlike watcher(), which internally reconnects without
         // yielding. Apply the same cancellable bound to HTTP errors AND successful empty EOF.
         tokio::select! {
@@ -351,6 +371,10 @@ async fn run_reflector<K>(
         }
     }
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("LW_RESOURCE_GPU_OBSERVATION_STALE: initial-events bookmark missing: {0}")]
+struct InitialWatchSyncError(#[source] kube::Error);
 
 async fn reflect_session<K>(
     api: &Api<K>,
@@ -370,8 +394,6 @@ where
         + 'static,
     K::DynamicType: Default + Eq + std::hash::Hash + Clone,
 {
-    let (reader, mut writer) = reflector::store::<K>();
-    writer.apply_watcher_event(&watcher::Event::Init);
     let mut params = ListParams::default().limit(page_size);
     let mut listed = 0_usize;
     let resource_version = loop {
@@ -380,11 +402,6 @@ where
         if listed > max_items {
             return Err("observation item bound exceeded".into());
         }
-        for object in page.items {
-            writer.apply_watcher_event(&watcher::Event::InitApply(object));
-        }
-        // The reflector's init buffer is not visible through reader.len(). Bound the
-        // paginated list separately, before storing further pages.
         if let Some(token) = page.metadata.continue_.filter(|token| !token.is_empty()) {
             params = params.continue_token(&token);
         } else {
@@ -394,10 +411,6 @@ where
                 .ok_or("list has no resourceVersion")?;
         }
     };
-    writer.apply_watcher_event(&watcher::Event::InitDone);
-    if reader.len() > max_items {
-        return Err("observation item bound exceeded".into());
-    }
     // A completed list is NOT a synchronization barrier. Request the Kubernetes
     // streaming-initial-events barrier at least as new as the paginated list RV.
     // Fail closed on servers that cannot supply this explicit sync acknowledgement.
@@ -405,16 +418,38 @@ where
         send_initial_events: true,
         ..WatchParams::default().timeout(10)
     };
-    let stream = api.watch(&params, &resource_version).await?;
+    let stream = api
+        .watch(&params, &resource_version)
+        .await
+        .map_err(InitialWatchSyncError)?;
     let mut stream = Box::pin(stream);
     let mut synced = false;
+    let (reader, mut writer) = reflector::store::<K>();
     writer.apply_watcher_event(&watcher::Event::Init);
     let mut initial_count = 0_usize;
-    while let Some(event) = stream.next().await {
+    let sync_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let next = if synced {
+            stream.next().await
+        } else {
+            tokio::time::timeout_at(sync_deadline, stream.next())
+                .await
+                .map_err(|_| {
+                    CapacityProviderError::ObservationStale("initial-events bookmark missing")
+                })?
+        };
+        let Some(event) = next else {
+            break;
+        };
+        let event = match event {
+            Ok(event) => event,
+            Err(error) if !synced => return Err(InitialWatchSyncError(error).into()),
+            Err(error) => return Err(error.into()),
+        };
         if synced {
             freshness.mark_stale("watch update in progress").await;
         }
-        match event? {
+        match event {
             WatchEvent::Added(object) | WatchEvent::Modified(object) => {
                 if kube::ResourceExt::resource_version(&object).is_none() {
                     return Err("watch object has no resourceVersion".into());
@@ -458,6 +493,11 @@ where
             *target.write().await = snapshot;
             freshness.mark_fresh().await;
         }
+    }
+    if !synced {
+        return Err(
+            CapacityProviderError::ObservationStale("initial-events bookmark missing").into(),
+        );
     }
     Ok(())
 }
@@ -511,6 +551,7 @@ impl KubernetesGpuCapacityObserver {
             client,
             configuration.max_nodes as usize,
             configuration.max_pods as usize,
+            configuration.provider_binding.clone(),
         );
         Ok(Self {
             provider_binding: configuration.provider_binding,
@@ -1485,6 +1526,7 @@ impl CapacityReconcileWorker {
                         event = "resource.gpu_capacity.observation_failed",
                         provider_binding,
                         diagnostic_code = error.diagnostic(),
+                        reason = %error,
                     );
                 }
             }
@@ -1978,6 +2020,8 @@ mod tests {
     const HEALTH_CHANGE: u8 = 4;
     const SYNC_PENDING: u8 = 5;
     const EMPTY_WATCH: u8 = 6;
+    const NO_BARRIER: u8 = 8;
+    const NO_BARRIER_OPEN: u8 = 9;
     const WATCH_ERROR: u8 = 7;
 
     #[derive(Clone)]
@@ -2032,7 +2076,9 @@ mod tests {
             .into_iter()
             .map(|object| json!({"type":"ADDED", "object":object}))
             .collect::<std::collections::VecDeque<_>>();
-        initial.push_back(json!({"type":"BOOKMARK", "object":{"apiVersion":"v1", "kind":"PartialObjectMetadata", "metadata":{"resourceVersion":"2", "annotations":{"k8s.io/initial-events-end":"true"}}}}));
+        if !matches!(state.mode, NO_BARRIER | NO_BARRIER_OPEN) {
+            initial.push_back(json!({"type":"BOOKMARK", "object":{"apiVersion":"v1", "kind":"PartialObjectMetadata", "metadata":{"resourceVersion":"2", "annotations":{"k8s.io/initial-events-end":"true"}}}}));
+        }
         let events = if is_node {
             state.node_events.subscribe()
         } else {
@@ -2048,6 +2094,8 @@ mod tests {
                         state.gate.notified().await;
                     }
                     event
+                } else if state.mode == NO_BARRIER {
+                    return None;
                 } else {
                     events.recv().await.ok()?
                 };
@@ -2446,7 +2494,7 @@ mod tests {
     async fn reflector_initial_list_paginates_all_objects() -> Result<(), Box<dyn std::error::Error>>
     {
         let (state, client, server) = start_fake_api(PAGINATED).await?;
-        let cache = KubernetesObservationCache::new(client, 10, 10);
+        let cache = KubernetesObservationCache::new(client, 10, 10, "test-provider".into());
         wait_for_fresh(&cache).await?;
         let node_snapshot = cache.nodes.read().await;
         let names = node_snapshot
@@ -2465,7 +2513,7 @@ mod tests {
     async fn gone_watch_relists_and_removes_object_from_cache()
     -> Result<(), Box<dyn std::error::Error>> {
         let (state, client, server) = start_fake_api(GONE_RELIST).await?;
-        let cache = KubernetesObservationCache::new(client, 10, 10);
+        let cache = KubernetesObservationCache::new(client, 10, 10, "test-provider".into());
         wait_for_fresh(&cache).await?;
         let node_snapshot = cache.nodes.read().await;
         let names = node_snapshot
@@ -2493,7 +2541,7 @@ mod tests {
     async fn watch_disconnect_is_stale_until_relist_completes()
     -> Result<(), Box<dyn std::error::Error>> {
         let (state, client, server) = start_fake_api(DISCONNECT).await?;
-        let cache = KubernetesObservationCache::new(client, 10, 10);
+        let cache = KubernetesObservationCache::new(client, 10, 10, "test-provider".into());
         tokio::time::timeout(Duration::from_secs(1), async {
             while state.node_watches.load(Ordering::SeqCst) == 0 {
                 tokio::task::yield_now().await;
@@ -2554,7 +2602,7 @@ mod tests {
     async fn repeated_capacity_queries_do_not_repeat_control_plane_reads()
     -> Result<(), Box<dyn std::error::Error>> {
         let (state, client, server) = start_fake_api(PAGINATED).await?;
-        let cache = KubernetesObservationCache::new(client, 10, 10);
+        let cache = KubernetesObservationCache::new(client, 10, 10, "test-provider".into());
         wait_for_fresh(&cache).await?;
         let observer = KubernetesGpuCapacityObserver {
             provider_binding: "test-provider".into(),
@@ -2591,7 +2639,7 @@ mod tests {
     async fn node_health_change_removes_capacity_from_sale()
     -> Result<(), Box<dyn std::error::Error>> {
         let (state, client, server) = start_fake_api(HEALTH_CHANGE).await?;
-        let cache = KubernetesObservationCache::new(client, 10, 10);
+        let cache = KubernetesObservationCache::new(client, 10, 10, "test-provider".into());
         wait_for_fresh(&cache).await?;
         state
             .node_events
@@ -2640,7 +2688,7 @@ mod tests {
     #[tokio::test]
     async fn observer_shutdown_stops_reconnect_tasks() -> Result<(), Box<dyn std::error::Error>> {
         let (state, client, server) = start_fake_api(PAGINATED).await?;
-        let cache = KubernetesObservationCache::new(client, 10, 10);
+        let cache = KubernetesObservationCache::new(client, 10, 10, "test-provider".into());
         wait_for_fresh(&cache).await?;
         let before = (
             state.node_lists.load(Ordering::SeqCst),

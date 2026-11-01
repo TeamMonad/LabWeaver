@@ -127,7 +127,12 @@ async fn wait_for_units(
 async fn incremental_apply_delete_updates_nodes_and_external_pods_without_relist()
 -> Result<(), Box<dyn std::error::Error>> {
     let (state, client, server) = start_fake_api(HEALTH_CHANGE).await?;
-    let observer = test_observer(KubernetesObservationCache::new(client, 10, 10));
+    let observer = test_observer(KubernetesObservationCache::new(
+        client,
+        10,
+        10,
+        "test-provider".into(),
+    ));
     wait_for_fresh(&observer.cache).await?;
     let entry = entry()?;
     let pod = json!({"apiVersion":"v1", "kind":"Pod", "metadata":{"name":"outside", "namespace":"other", "uid":"external-pod", "resourceVersion":"4"},
@@ -161,7 +166,12 @@ async fn incremental_apply_delete_updates_nodes_and_external_pods_without_relist
 async fn empty_successful_watch_eof_is_stale_and_rate_bounded()
 -> Result<(), Box<dyn std::error::Error>> {
     let (state, client, server) = start_fake_api(EMPTY_WATCH).await?;
-    let observer = test_observer(KubernetesObservationCache::new(client, 10, 10));
+    let observer = test_observer(KubernetesObservationCache::new(
+        client,
+        10,
+        10,
+        "test-provider".into(),
+    ));
     tokio::time::sleep(Duration::from_millis(450)).await;
     let requests = state.node_watches.load(Ordering::SeqCst);
     assert!(
@@ -269,7 +279,12 @@ async fn sync_barrier_blocks_postgres_admission_before_initial_bookmark()
         )
         .await?;
     let (state, client, server) = start_fake_api(SYNC_PENDING).await?;
-    let observer = test_observer(KubernetesObservationCache::new(client, 10, 10));
+    let observer = test_observer(KubernetesObservationCache::new(
+        client,
+        10,
+        10,
+        "test-provider".into(),
+    ));
     store.register_gpu_observer("test-provider".into(), observer.clone())?;
     tokio::time::timeout(Duration::from_secs(2), async {
         while state.active_watches.load(Ordering::SeqCst) != 2 {
@@ -315,7 +330,12 @@ async fn source_deadline_epoch_disconnect_and_restart_fence_postgres_admission()
         .create_gpu_catalog_entry("epoch-catalog", &entry)
         .await?;
     let (state, client, server) = start_fake_api(WATCH_ERROR).await?;
-    let observer = test_observer(KubernetesObservationCache::new(client, 10, 10));
+    let observer = test_observer(KubernetesObservationCache::new(
+        client,
+        10,
+        10,
+        "test-provider".into(),
+    ));
     store.register_gpu_observer("test-provider".into(), observer.clone())?;
     wait_for_fresh(&observer.cache).await?;
     let first = persist_snapshot(&store, &observer, &entry).await?;
@@ -406,5 +426,410 @@ async fn source_deadline_epoch_disconnect_and_restart_fence_postgres_admission()
         "shutdown must revoke the still-valid database observation"
     );
     server.abort();
+    Ok(())
+}
+
+async fn suspend_activation(
+    store: &crate::store::PgResourceStore,
+    activation: &contracts::environment::ActivateEnvironmentResourceReservationRequest,
+    generation: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let result = store
+        .suspend_environment_resource_reservation(
+            &contracts::environment::SuspendEnvironmentResourceReservationRequest {
+                version: 1,
+                environment_id: activation.environment_id,
+                project_id: activation.project_id,
+                owner_actor_id: activation.owner_actor_id,
+                operation_id: contracts::OperationId::new(),
+                environment_generation: generation,
+                trace_id: "cache-suspend".into(),
+            },
+        )
+        .await?;
+    assert!(result.applied);
+    assert_eq!(
+        result.state,
+        contracts::environment::EnvironmentResourceReservationState::Suspended
+    );
+    Ok(())
+}
+
+async fn suspended_gpu(
+    store: &crate::store::PgResourceStore,
+    observer: &KubernetesGpuCapacityObserver,
+    entry: &GpuCatalogEntry,
+) -> Result<
+    contracts::environment::ActivateEnvironmentResourceReservationRequest,
+    Box<dyn std::error::Error>,
+> {
+    store
+        .create_gpu_catalog_entry("restore-catalog", entry)
+        .await?;
+    wait_for_fresh(&observer.cache).await?;
+    persist_snapshot(store, observer, entry).await?;
+    let request = admission_request();
+    let reserved = store
+        .resolve_environment_resource_reservation(&request)
+        .await?;
+    let activation = contracts::environment::ActivateEnvironmentResourceReservationRequest {
+        version: 1,
+        environment_id: request.environment_id,
+        project_id: request.project_id,
+        course_id: request.course_id,
+        owner_actor_id: request.owner_actor_id,
+        provider_binding: request.provider_binding,
+        approved_resources: request.approved_resources,
+        gpu: request.gpu,
+        expected_allocation: reserved.allocation,
+        operation_id: contracts::OperationId::new(),
+        environment_generation: 3,
+        trace_id: "cache-restore".into(),
+    };
+    suspend_activation(store, &activation, 2).await?;
+    Ok(activation)
+}
+
+#[tokio::test]
+async fn suspended_restore_requires_live_revision_and_reconnected_observer()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, store) = admission_store().await?;
+    let entry = entry()?;
+    let (state, client, server) = start_fake_api(WATCH_ERROR).await?;
+    let observer = test_observer(KubernetesObservationCache::new(
+        client,
+        10,
+        10,
+        "test-provider".into(),
+    ));
+    store.register_gpu_observer("test-provider".into(), observer.clone())?;
+    let mut activation = suspended_gpu(&store, &observer, &entry).await?;
+    state
+        .node_events
+        .send(json!({"type":"MODIFIED", "object":node("gpu-a", false, false, &json!("0"))}))?;
+    wait_for_units(&observer, &entry, 0).await?;
+    assert!(
+        matches!(
+            store
+                .activate_environment_resource_reservation(&activation)
+                .await,
+            Err(crate::store::ResourceStoreError::GpuObservationStale)
+        ),
+        "restore must fence an unpersisted watch revision"
+    );
+    persist_snapshot(&store, &observer, &entry).await?;
+    assert!(matches!(
+        store
+            .activate_environment_resource_reservation(&activation)
+            .await,
+        Err(crate::store::ResourceStoreError::GpuCapacityExhausted)
+    ));
+    state
+        .node_events
+        .send(json!({"type":"MODIFIED", "object":node("gpu-a", true, false, &json!("1"))}))?;
+    wait_for_units(&observer, &entry, 1).await?;
+    persist_snapshot(&store, &observer, &entry).await?;
+    assert!(
+        store
+            .activate_environment_resource_reservation(&activation)
+            .await?
+            .applied
+    );
+    suspend_activation(&store, &activation, 4).await?;
+    activation.environment_generation = 5;
+    activation.operation_id = contracts::OperationId::new();
+    state.node_events.send(json!({"type":"ERROR", "object":{"apiVersion":"v1", "kind":"Status", "status":"Failure", "reason":"Gone", "code":410}}))?;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state.node_lists.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert!(
+        matches!(
+            store
+                .activate_environment_resource_reservation(&activation)
+                .await,
+            Err(crate::store::ResourceStoreError::GpuObservationStale)
+        ),
+        "disconnect must block suspended restore despite durable TTL"
+    );
+    state.relist_gate.notify_one();
+    wait_for_fresh(&observer.cache).await?;
+    persist_snapshot(&store, &observer, &entry).await?;
+    assert!(
+        store
+            .activate_environment_resource_reservation(&activation)
+            .await?
+            .applied
+    );
+    observer.shutdown();
+    observer.cache.join().await;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn suspended_restore_after_restart_requires_new_generation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, store) = admission_store().await?;
+    let entry = entry()?;
+    let (_, client, server) = start_fake_api(HEALTH_CHANGE).await?;
+    let observer = test_observer(KubernetesObservationCache::new(
+        client,
+        10,
+        10,
+        "test-provider".into(),
+    ));
+    store.register_gpu_observer("test-provider".into(), observer.clone())?;
+    let activation = suspended_gpu(&store, &observer, &entry).await?;
+    observer.shutdown();
+    observer.cache.join().await;
+    let restarted = crate::store::PgResourceStore::new(store.pool());
+    assert!(
+        matches!(
+            restarted
+                .activate_environment_resource_reservation(&activation)
+                .await,
+            Err(crate::store::ResourceStoreError::GpuObservationStale)
+        ),
+        "restore cannot reuse a previous process generation"
+    );
+    let (_, client, restarted_server) = start_fake_api(HEALTH_CHANGE).await?;
+    let restarted_observer = test_observer(KubernetesObservationCache::new(
+        client,
+        10,
+        10,
+        "test-provider".into(),
+    ));
+    restarted.register_gpu_observer("test-provider".into(), restarted_observer.clone())?;
+    wait_for_fresh(&restarted_observer.cache).await?;
+    assert!(
+        matches!(
+            restarted
+                .activate_environment_resource_reservation(&activation)
+                .await,
+            Err(crate::store::ResourceStoreError::GpuObservationStale)
+        ),
+        "sync alone cannot bypass observation persistence"
+    );
+    persist_snapshot(&restarted, &restarted_observer, &entry).await?;
+    assert!(
+        restarted
+            .activate_environment_resource_reservation(&activation)
+            .await?
+            .applied
+    );
+    restarted_observer.shutdown();
+    restarted_observer.cache.join().await;
+    server.abort();
+    restarted_server.abort();
+    Ok(())
+}
+
+async fn refresh_both_streams(
+    state: &FakeApi,
+    observer: &KubernetesGpuCapacityObserver,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let node_revision = observer
+        .cache
+        .node_freshness
+        .revision
+        .load(Ordering::Acquire);
+    let pod_revision = observer
+        .cache
+        .pod_freshness
+        .revision
+        .load(Ordering::Acquire);
+    let bookmark = json!({"type":"BOOKMARK", "object":{"apiVersion":"v1", "kind":"PartialObjectMetadata", "metadata":{"resourceVersion":"10"}}});
+    state.node_events.send(bookmark.clone())?;
+    state.pod_events.send(bookmark)?;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while observer
+            .cache
+            .node_freshness
+            .revision
+            .load(Ordering::Acquire)
+            == node_revision
+            || observer
+                .cache
+                .pod_freshness
+                .revision
+                .load(Ordering::Acquire)
+                == pod_revision
+            || observer.source().await.is_err()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn replica_generations_coexist_at_equal_millisecond_and_share_reservations()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, store_a) = admission_store().await?;
+    let store_b = crate::store::PgResourceStore::new(store_a.pool());
+    let mut entry = entry()?;
+    entry.capacity_units = 2;
+    store_a
+        .create_gpu_catalog_entry("replica-catalog", &entry)
+        .await?;
+    let (api_a, client_a, server_a) = start_fake_api(PAGINATED).await?;
+    let (api_b, client_b, server_b) = start_fake_api(PAGINATED).await?;
+    let observer_a = test_observer(KubernetesObservationCache::new(
+        client_a,
+        10,
+        10,
+        "test-provider".into(),
+    ));
+    let observer_b = test_observer(KubernetesObservationCache::new(
+        client_b,
+        10,
+        10,
+        "test-provider".into(),
+    ));
+    store_a.register_gpu_observer("test-provider".into(), observer_a.clone())?;
+    store_b.register_gpu_observer("test-provider".into(), observer_b.clone())?;
+    wait_for_fresh(&observer_a.cache).await?;
+    wait_for_fresh(&observer_b.cache).await?;
+    // Force equal SOURCE clock milliseconds, retaining independently observed real API snapshots.
+    let equal = store_a.current_time().await?;
+    for observer in [&observer_a, &observer_b] {
+        *observer.cache.node_freshness.observed_at.write().await = Some(equal.get());
+        *observer.cache.pod_freshness.observed_at.write().await = Some(equal.get());
+    }
+    persist_snapshot(&store_a, &observer_a, &entry).await?;
+    persist_snapshot(&store_b, &observer_b, &entry).await?;
+    let generations: i64 = sqlx::query_scalar("SELECT count(DISTINCT observer_generation) FROM resource.gpu_capacity_observations WHERE entry_id=$1 AND observed_at=$2")
+        .bind(entry.id.as_uuid()).bind(equal.get()).fetch_one(&store_a.pool()).await?;
+    assert_eq!(
+        generations, 2,
+        "equal-millisecond replicas must not overwrite one another"
+    );
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    refresh_both_streams(&api_b, &observer_b).await?;
+    persist_snapshot(&store_b, &observer_b, &entry).await?;
+    let request_a = admission_request();
+    assert!(
+        store_a
+            .resolve_environment_resource_reservation(&request_a)
+            .await
+            .is_ok(),
+        "A must select its own row even when B wrote a newer observation"
+    );
+    assert!(
+        store_b
+            .resolve_environment_resource_reservation(&admission_request())
+            .await
+            .is_ok()
+    );
+    refresh_both_streams(&api_a, &observer_a).await?;
+    persist_snapshot(&store_a, &observer_a, &entry).await?;
+    for store in [&store_a, &store_b] {
+        assert!(
+            matches!(
+                store
+                    .resolve_environment_resource_reservation(&admission_request())
+                    .await,
+                Err(crate::store::ResourceStoreError::GpuCapacityExhausted)
+            ),
+            "both replicas must count all shared reservations"
+        );
+    }
+    let restarted = crate::store::PgResourceStore::new(store_a.pool());
+    assert!(matches!(
+        restarted
+            .resolve_environment_resource_reservation(&admission_request())
+            .await,
+        Err(crate::store::ResourceStoreError::GpuObservationStale)
+    ));
+    store_a
+        .release_environment_resource_reservation(
+            &contracts::environment::ReleaseEnvironmentResourceReservationRequest {
+                version: 1,
+                environment_id: request_a.environment_id,
+                project_id: request_a.project_id,
+                owner_actor_id: request_a.owner_actor_id,
+                operation_id: contracts::OperationId::new(),
+                environment_generation: 2,
+                trace_id: "replica-release".into(),
+            },
+        )
+        .await?;
+    let (_, client_c, server_c) = start_fake_api(PAGINATED).await?;
+    let observer_c = test_observer(KubernetesObservationCache::new(
+        client_c,
+        10,
+        10,
+        "test-provider".into(),
+    ));
+    restarted.register_gpu_observer("test-provider".into(), observer_c.clone())?;
+    wait_for_fresh(&observer_c.cache).await?;
+    persist_snapshot(&restarted, &observer_c, &entry).await?;
+    assert!(
+        restarted
+            .resolve_environment_resource_reservation(&admission_request())
+            .await
+            .is_ok()
+    );
+    assert!(
+        matches!(
+            store_b
+                .resolve_environment_resource_reservation(&admission_request())
+                .await,
+            Err(crate::store::ResourceStoreError::GpuCapacityExhausted)
+        ),
+        "a peer remains usable after another replica restarts and writes"
+    );
+    for observer in [&observer_a, &observer_b, &observer_c] {
+        observer.shutdown();
+        observer.cache.join().await;
+    }
+    server_a.abort();
+    server_b.abort();
+    server_c.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn missing_initial_bookmark_reports_specific_stale_reason_on_eof_and_timeout()
+-> Result<(), Box<dyn std::error::Error>> {
+    for mode in [NO_BARRIER, NO_BARRIER_OPEN] {
+        let (_, client, server) = start_fake_api(mode).await?;
+        let nodes = tokio::sync::RwLock::new(Vec::new());
+        let pods = tokio::sync::RwLock::new(Vec::new());
+        let node_freshness = ObservationFreshness::new();
+        let pod_freshness = ObservationFreshness::new();
+        let node_api = Api::<Node>::all(client.clone());
+        let pod_api = Api::<Pod>::all(client);
+        let (node_result, pod_result) = tokio::join!(
+            reflect_session(&node_api, &nodes, &node_freshness, 10, 10),
+            reflect_session(&pod_api, &pods, &pod_freshness, 10, 10)
+        );
+        for (kind, result) in [("Node", node_result), ("Pod", pod_result)] {
+            let error = result.expect_err(
+                "watch without an initial-events bookmark must report the missing barrier",
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("LW_RESOURCE_GPU_OBSERVATION_STALE"),
+                "{kind}: {error}"
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("initial-events bookmark missing"),
+                "{kind}: {error}"
+            );
+        }
+        assert!(nodes.read().await.is_empty());
+        assert!(pods.read().await.is_empty());
+        assert!(node_freshness.check(Duration::from_secs(30)).await.is_err());
+        assert!(pod_freshness.check(Duration::from_secs(30)).await.is_err());
+        server.abort();
+    }
     Ok(())
 }

@@ -311,3 +311,6 @@ domains:
       - id: 24
         file: resource/0024_resource_list_ordinals.sql
         sha256: 94357e47b18a1f8e0a20f4cf3a603288f232ac2750fb0152b56f822ba1d7d6a9
+      - id: 25
+        file: resource/0025_gpu_observation_generations.sql
+        sha256: c9d2d8dcfc7f2bb42fb14b879f69ec1044fbfd9250a3dd6a8a75c7a37b25dcc0
