@@ -189,8 +189,16 @@ def inspect(client: Kubernetes, installation: str, reviewed: dict) -> dict:
                     raise WipeError("PLATFORM_WIPE_LIST_FAILED")
                 uid, _revision = identity(obj)
                 path = object_path(collection, obj["metadata"]["name"])
-                if uid in objects and objects[uid] != obj:
-                    raise WipeError("PLATFORM_WIPE_LIST_CHANGED")
+                if uid in objects:
+                    previous = objects[uid]
+                    if (identity(previous) != identity(obj) or previous['kind'] != obj['kind'] or
+                        previous['metadata']['name'] != obj['metadata']['name'] or
+                        previous['metadata']['namespace'] != obj['metadata']['namespace'] or
+                        (previous['apiVersion'] == obj['apiVersion'] and previous != obj)):
+                        raise WipeError('PLATFORM_WIPE_LIST_CHANGED')
+                    # Core Events and events.k8s.io expose the same immutable
+                    # object through different wire representations.
+                    continue
                 objects[uid], locations[uid] = obj, path
 
     storage, releases, fingerprints = {}, [], []
@@ -250,33 +258,42 @@ def inspect(client: Kubernetes, installation: str, reviewed: dict) -> dict:
         and obj.get('automountServiceAccountToken') is None
     }
 
-    def owned(uid: str, visiting: frozenset = frozenset()) -> bool:
-        if uid in visiting or uid not in objects:
-            return False
-        obj = objects[uid]
-        metadata = obj["metadata"]
-        annotations = metadata.get("annotations", {})
-        if uid in storage or uid in default_accounts or annotations.get("labweaver.io/installation-id") == installation:
-            return True
-        if (locations[uid], annotations.get("meta.helm.sh/release-name"), annotations.get("meta.helm.sh/release-namespace")) in release_roots and metadata.get("labels", {}).get("app.kubernetes.io/managed-by") == "Helm":
-            return True
-        return any(owned(parent.get("uid"), visiting | {uid}) for parent in metadata.get("ownerReferences", []))
-
-    root_ca = None
+    public_bundles, root_ca = set(), None
     for uid, obj in objects.items():
-        metadata = obj["metadata"]
-        if owned(uid):
-            continue
-        # Verify the Kubernetes-injected public trust bundle against the actual
-        # cluster CA. Extra payload/foreign ownership metadata is never exempt.
+        metadata = obj['metadata']
         if (obj['kind'] == 'ConfigMap' and metadata['name'] == 'kube-root-ca.crt' and
             metadata.get('namespace') in namespaces and not metadata.get('labels') and
             set(metadata.get('annotations', {})) <= {'kubernetes.io/description'}):
             if root_ca is None:
                 root_ca = client.request('/api/v1/namespaces/kube-system/configmaps/kube-root-ca.crt')
             if root_ca is not None and obj.get('data') == root_ca.get('data') and set(obj.get('data', {})) == {'ca.crt'} and not obj.get('binaryData'):
-                continue
-        raise WipeError('PLATFORM_WIPE_OBJECT_OWNERSHIP_CONFLICT')
+                public_bundles.add(uid)
+    namespace_uids = {identity(namespace)[0] for namespace in namespaces.values()}
+
+    def owned(uid: str, visiting: frozenset = frozenset()) -> bool:
+        if uid in visiting or uid not in objects:
+            return False
+        obj = objects[uid]
+        metadata = obj["metadata"]
+        annotations = metadata.get("annotations", {})
+        if uid in storage or uid in default_accounts or uid in public_bundles or annotations.get("labweaver.io/installation-id") == installation:
+            return True
+        if (locations[uid], annotations.get("meta.helm.sh/release-name"), annotations.get("meta.helm.sh/release-namespace")) in release_roots and metadata.get("labels", {}).get("app.kubernetes.io/managed-by") == "Helm":
+            return True
+        # Events refer to their subject by UID rather than ownerReferences.
+        # Names and labels are not authority; the subject must resolve to the
+        # exact reviewed namespace or an independently verified owned root.
+        if obj['kind'] == 'Event':
+            reference = (obj.get('involvedObject', {}) if obj['apiVersion'] == 'v1' else
+                         obj.get('regarding', {}) if obj['apiVersion'].startswith('events.k8s.io/') else {})
+            subject_uid = reference.get('uid')
+            if subject_uid in namespace_uids or owned(subject_uid, visiting | {uid}):
+                return True
+        return any(owned(parent.get("uid"), visiting | {uid}) for parent in metadata.get("ownerReferences", []))
+
+    for uid in objects:
+        if not owned(uid):
+            raise WipeError('PLATFORM_WIPE_OBJECT_OWNERSHIP_CONFLICT')
 
     volumes = client.listing("/api/v1/persistentvolumes")
     for volume in volumes:

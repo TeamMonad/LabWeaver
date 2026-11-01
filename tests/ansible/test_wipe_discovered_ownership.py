@@ -31,8 +31,9 @@ SPEC.loader.exec_module(WIPE)
 RESOURCES = {
     "v1": [("Namespace", "namespaces", False), ("PersistentVolume", "persistentvolumes", False),
            ("Pod", "pods", True), ("ConfigMap", "configmaps", True), ("Secret", "secrets", True),
-           ("ServiceAccount", "serviceaccounts", True)],
+           ("ServiceAccount", "serviceaccounts", True), ('Event', 'events', True)],
     "apps/v1": [("Deployment", "deployments", True), ("ReplicaSet", "replicasets", True), ("DaemonSet", "daemonsets", True)],
+    'events.k8s.io/v1': [('Event', 'events', True)],
     "gateway.networking.k8s.io/v1": [("Gateway", "gateways", True), ("HTTPRoute", "httproutes", True), ("TLSRoute", "tlsroutes", True)],
     "cdi.kubevirt.io/v1beta1": [("DataVolume", "datavolumes", True), ("DataSource", "datasources", True)],
     "foreign.example/v1": [("PreviouslyUnknown", "previouslyunknowns", True)],
@@ -217,6 +218,32 @@ class DiscoveredWipeOwnershipTests(unittest.TestCase):
             with self.assertRaisesRegex(WIPE.WipeError, "PLATFORM_WIPE_OBJECT_OWNERSHIP_CONFLICT"):
                 WIPE.wipe(api, INSTALLATION, [namespace], 1)
             self.assertEqual(api.attempts, [])
+
+    def test_events_follow_subject_uid_and_mirrored_apis_not_subject_name(self):
+        namespace = obj('Namespace', 'labweaver-system')
+        deployment = obj('Deployment', 'same-name')
+        for version, field in (('v1', 'involvedObject'), ('events.k8s.io/v1', 'regarding')):
+            for subject, accepted in ((deployment['metadata']['uid'], True), (namespace['metadata']['uid'], True),
+                                      ('replaced-controller-uid', False), ('event-self-cycle', False)):
+                with self.subTest(version=version, subject=subject):
+                    event = obj('Event', 'event', installation=None)
+                    event['apiVersion'] = version
+                    event['metadata']['uid'] = 'event-self-cycle'
+                    event[field] = {'name': 'same-name', 'uid': subject}
+                    api = KubernetesAPI([namespace, deployment, event])
+                    if accepted:
+                        self.assertEqual(WIPE.wipe(api, INSTALLATION, [namespace], 1)['deleted'], [path_for(namespace)])
+                    else:
+                        with self.assertRaisesRegex(WIPE.WipeError, 'PLATFORM_WIPE_OBJECT_OWNERSHIP_CONFLICT'):
+                            WIPE.wipe(api, INSTALLATION, [namespace], 1)
+                        self.assertEqual(api.attempts, [])
+        core = obj('Event', 'mirrored', installation=None)
+        core['involvedObject'] = {'uid': deployment['metadata']['uid']}
+        mirrored = copy.deepcopy(core)
+        mirrored['apiVersion'] = 'events.k8s.io/v1'
+        mirrored['regarding'] = mirrored.pop('involvedObject')
+        api = KubernetesAPI([namespace, deployment, core, mirrored])
+        self.assertEqual(WIPE.wipe(api, INSTALLATION, [namespace], 1)['deleted'], [path_for(namespace)])
 
     def test_release_labels_without_verified_storage_or_manifest_identity_are_not_authority(self):
         namespace = obj("Namespace", "labweaver-system")
