@@ -1815,8 +1815,7 @@ pub(super) async fn forward_runtime_websocket(
         .await
         .map_err(|_| ApiError::unavailable("LW_ACCESS_RUNTIME_UNAVAILABLE"))?
         .map_err(|_| ApiError::unavailable("LW_ACCESS_RUNTIME_UNAVAILABLE"))?;
-    let mut protocols = Vec::new();
-    if let Some(selected) = response.headers().get(header::SEC_WEBSOCKET_PROTOCOL) {
+    let protocol = if let Some(selected) = response.headers().get(header::SEC_WEBSOCKET_PROTOCOL) {
         let selected = selected
             .to_str()
             .map_err(|_| ApiError::unavailable("LW_ACCESS_RUNTIME_RESPONSE_INVALID"))?;
@@ -1829,8 +1828,10 @@ pub(super) async fn forward_runtime_websocket(
         if !offered || selected.contains(',') {
             return Err(ApiError::unavailable("LW_ACCESS_RUNTIME_RESPONSE_INVALID"));
         }
-        protocols.push(selected.to_owned());
-    }
+        Some(selected.to_owned())
+    } else {
+        None
+    };
     let admission = RuntimeAdmission {
         uri,
         headers,
@@ -1840,7 +1841,7 @@ pub(super) async fn forward_runtime_websocket(
     Ok(upgrade
         .max_frame_size(16 * 1024 * 1024)
         .max_message_size(16 * 1024 * 1024)
-        .protocols(protocols)
+        .protocols(protocol)
         .on_upgrade(move |browser| async move {
             tokio::select! {
                 result = bridge_runtime_websocket(browser, upstream) => {
