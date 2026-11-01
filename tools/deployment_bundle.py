@@ -1054,7 +1054,7 @@ def load_bundle(
     if MODEL_FILE not in files:
         raise BundleError("LW_BUNDLE_MODEL_MISSING")
     document = _document(files[MODEL_FILE])
-    optional = {"resource", "configurationMode", "infrastructure", "notifications"}
+    optional = {"resource", "configurationMode", "infrastructure", "notifications", "configurationExecutor"}
     model = _exact(
         document,
         {
@@ -1159,6 +1159,11 @@ def load_bundle(
     if "infrastructure" in model:
         _infrastructure_model(model, files, references)
     _notifications(model, files, references)
+    if "configurationExecutor" in model:
+        executor = _exact(model["configurationExecutor"], {"clientId", "clientSecretFile"})
+        if executor["clientId"] != "labweaver-deployment-executor":
+            raise BundleError("LW_BUNDLE_CONFIGURATION_EXECUTOR_INVALID")
+        references.add(_relative(executor["clientSecretFile"], "secrets"))
     if set(files) != references:
         raise BundleError("LW_BUNDLE_INVENTORY_MISMATCH")
     _configuration_policy(_settings(model, files))
@@ -1269,6 +1274,13 @@ def derive_bundle(
     workload_inputs, executor_configs, executor_authority = (
         environment_executor_bindings(model, files, _workload_inputs(application, manifest))
     )
+    if "configurationExecutor" in model:
+        control_env = workload_inputs["control-service"]["env"]
+        callers = control_env["LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS"].split(",")
+        if "labweaver-deployment-executor" not in callers:
+            control_env["LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS"] = ",".join(
+                [*callers, "labweaver-deployment-executor"]
+            )
     notification = _notifications(model, files, set())
     version = _settings(model, files)
     notification["expiryReminderSeconds"] = version["configuration"]["lifecycle"]["expiryReminderSeconds"]
@@ -1761,7 +1773,7 @@ def opened_bundle(
                 stdin=ciphertext,
                 stdout=plaintext,
             )
-        ciphertext_path.unlink()
+        # Retain the authenticated ciphertext snapshot for the executor's exact binding.
         if archive_path.stat().st_size > MAX_ARCHIVE_BYTES:
             raise BundleError("LW_BUNDLE_LIMIT_EXCEEDED")
         root = temporary_root / "bundle"
@@ -1784,15 +1796,24 @@ def _interrupt(signum: int, _frame: Any) -> None:
 
 def _consume(command: list[str], environment: dict[str, str]) -> None:
     # Keep descendants in one process group. They must stop before plaintext disappears.
-    with subprocess.Popen(
+    with tempfile.TemporaryFile() as errors, subprocess.Popen(
         command,
         env=environment,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=errors,
         start_new_session=True,
     ) as process:
         try:
             if process.wait():
+                errors.seek(0, os.SEEK_END)
+                errors.seek(max(0, errors.tell() - 4096))
+                diagnostic = re.search(
+                    rb"(?:LW_PLATFORM_CONFIGURATION_[A-Z_]+|LW_CONTROL_REPLICA_OBSERVATION_FAILED)"
+                    rb":(?:identity|intent-binding|ciphertext-binding|control-api|prepare|apply|verify|verifying|release-ownership|control-unreachable|replica-roster|inputs-or-transport|transport)(?![a-z-])",
+                    errors.read(4096),
+                )
+                if diagnostic:
+                    raise BundleError(diagnostic[0].decode())
                 raise BundleError("LW_BUNDLE_COMMAND_FAILED")
         finally:
             try:
@@ -1908,6 +1929,7 @@ def main() -> int:
                         os.environ,
                         LW_BUNDLE_ROOT=str(root),
                         LW_BUNDLE_RENDERED_ROOT=str(rendered),
+                        LW_BUNDLE_CIPHERTEXT_FILE=str(root.parent / "source.age"),
                         LABWEAVER_APPLICATION_VARS_FILE=str(
                             rendered / "ansible-vars.yaml"
                         ),

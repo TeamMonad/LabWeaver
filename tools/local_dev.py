@@ -7,6 +7,8 @@ import base64
 import hashlib
 import ipaddress
 import importlib.util
+from html.parser import HTMLParser
+from http.cookiejar import CookieJar
 import json
 import math
 import os
@@ -16,6 +18,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import ssl
 import tarfile
 import time
 import tomllib
@@ -23,8 +26,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.error import HTTPError, URLError
-from urllib.parse import SplitResult, urlsplit
-from urllib.request import Request, urlopen
+from urllib.parse import SplitResult, urlencode, urljoin, urlsplit
+from urllib.request import HTTPCookieProcessor, HTTPSHandler, HTTPRedirectHandler, Request, build_opener, urlopen
 
 import local_dev_build
 
@@ -2783,7 +2786,7 @@ def start_foundation(kubeconfig: Path, foundation: Path, work: Path,
         fail("identity defaults do not contain the service client contract")
     client_ids = [item.get("client_id") for item in service_clients if isinstance(item, dict)]
     expected_client_ids = [f"labweaver-{name}" for name in
-                           ("access", "agent", "control", "environment", "evaluation", "resource")]
+                           ("access", "agent", "control", "environment", "evaluation", "resource", "deployment-executor")]
     if client_ids != expected_client_ids:
         fail("local Keycloak clients do not match identity defaults")
     client_secrets = {"web": secrets.token_urlsafe(32),
@@ -3355,9 +3358,11 @@ def derive_local_executor_authority(root: Path, manifest: dict[str, Any], issuer
     return {
         "environmentExecutorAuthority": authority,
         "workloads": {
-            name: {"env": inputs[name]["env"]}
-            for name in ("container-executor", "kubevirt-executor")
-            if local.get(name, {}).get("enabled", defaults[name]["enabled"])
+            "control-service": {"env": {"LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS":
+                defaults["control-service"]["env"]["LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS"] + ",labweaver-deployment-executor"}},
+            **{name: {"env": inputs[name]["env"]}
+               for name in ("container-executor", "kubevirt-executor")
+               if local.get(name, {}).get("enabled", defaults[name]["enabled"])},
         },
     }
 
@@ -3749,6 +3754,7 @@ def deploy(kubeconfig: Path, images: dict[str,str], bundle: Path, resource_bundl
     kubectl(kubeconfig,["apply","-f",str(resource_bundle)])
     args=["helm","upgrade","--install","labweaver-local","deploy/helm/labweaver",
           "--namespace",NAMESPACE,"--create-namespace","--kubeconfig",str(kubeconfig),
+          "--description", "labweaver-installation:" + str(uuid.uuid5(uuid.NAMESPACE_URL, "labweaver-local:" + RUN_ID)),
           "--values","deploy/helm/labweaver/values.local-kind.yaml",
           "--values", str(bundle.parent / "environment-executor-values.yaml"),
           "--set-string",f"deploymentIdentity.configurationBundleSha256=sha256:{bundle_sha}",
@@ -3928,6 +3934,188 @@ def deploy_local_portal(kubeconfig: Path, work: Path, images: dict[str, str],
     apply(kubeconfig, objects)
     wait_rollout(kubeconfig, "deployment", "local-dev-portal", NAMESPACE)
 
+def prepare_local_managed_bundle(work: Path, images: dict[str, str], version: dict) -> tuple[Path, Path, Path]:
+    """Seal the actual local application inputs and the administrator-saved version."""
+    import deployment_bundle as encrypted
+
+    root = work / "managed-bundle"
+    manifest_file = work / "local-platform-bundle-manifest.json"
+    manifest = json.loads(manifest_file.read_bytes())
+    base = load_yaml(ROOT / "deploy/helm/labweaver/values.yaml")["workloads"]
+    profile = load_yaml(ROOT / "deploy/helm/labweaver/values.local-kind.yaml")
+    workloads = {}
+    inputs = {}
+    for name, configuration in base.items():
+        overlay = profile.get("workloads", {}).get(name, {})
+        enabled = overlay.get("enabled", configuration["enabled"])
+        if name == "build-executor":
+            enabled = "build-executor-config" in manifest["configMaps"]
+        if name == "resource-service":
+            enabled = False  # Resource keeps its existing separately rendered inputs.
+        workloads[name] = {"enabled": enabled}
+        env = dict(configuration.get("env", {}), **overlay.get("env", {})) if enabled else {}
+        if enabled and "LABWEAVER_SERVICE_OIDC_ISSUER" in env:
+            env["LABWEAVER_SERVICE_OIDC_ISSUER"] = f"https://127.0.0.1.nip.io:{PORTAL_PORT}/identity/realms/workloads"
+        inputs[name] = {"env": env, "secretEnv": {
+            key: {"secret": reference.get("secret", configuration["secret"]), "key": reference["key"]}
+            for key, reference in configuration.get("secretEnv", {}).items()
+        } if enabled else {}}
+    application = {"configMaps": {}, "secrets": {}, "helmValues": {"workloads": workloads},
+                   "ansibleVariables": {}, "workloadInputs": inputs}
+    seen_secrets = {}
+    for group, directory, prefix in (("configMaps", "configmaps", "config/runtime"), ("secrets", "secrets", "secrets")):
+        for name, keys in manifest[group].items():
+            application[group][name] = {}
+            for key in keys:
+                content = (work / "app-input" / directory / name / key).read_bytes()
+                reference = f"{prefix}/{name}/{key}"
+                if group == "secrets" and content in seen_secrets:
+                    reference = seen_secrets[content]
+                else:
+                    encrypted._write(root / reference, content)
+                    if group == "secrets":
+                        seen_secrets[content] = reference
+                application[group][name][key] = reference
+    clients = json.loads((work / "client-secrets.json").read_bytes())
+    encrypted._write(root / "secrets/deployment-executor-client-secret", clients["deployment-executor"].encode())
+    encrypted._write(root / "config/platform-configuration.json", json.dumps(version).encode())
+    encrypted._write(root / "versions/lock.yaml", (ROOT / "deploy/versions.lock.yml").read_bytes())
+    encrypted._write(root / "versions/package.json", json.dumps({"images": [
+        {"component": name.replace("_", "-"), "reference": reference}
+        for name, reference in images.items()
+    ]}).encode())
+    encrypted._write(root / "docs/operations.md", b"Disposable local application input; Resource uses its own existing profile.\n")
+    model = {"apiVersion": encrypted.API_VERSION, "revision": version["revision"],
+             "configurationFile": "config/platform-configuration.json",
+             "target": {"namespace": NAMESPACE, "releaseName": "labweaver-local",
+                        "installationId": str(uuid.uuid5(uuid.NAMESPACE_URL, "labweaver-local:" + RUN_ID))},
+             "versions": {"lockFile": "versions/lock.yaml", "packageFile": "versions/package.json"},
+             "docs": {"operationsFile": "docs/operations.md"}, "application": application,
+             "configurationExecutor": {"clientId": "labweaver-deployment-executor", "clientSecretFile": "secrets/deployment-executor-client-secret"}}
+    encrypted._write(root / encrypted.MODEL_FILE, yaml.safe_dump(model).encode())
+    identity = work / "managed-bundle-age-key"
+    generated = run(["age-keygen", "-o", str(identity)], capture=True, check=False)
+    if generated.returncode:
+        fail("LW_LOCAL_PLATFORM_CONFIGURATION_AGE_IDENTITY_FAILED")
+    recipient = run(["age-keygen", "-y", str(identity)], capture=True).stdout.strip()
+    archive = work / "managed-configuration.age"
+    encrypted.seal_bundle(root, archive, [recipient], work / "bundle-runtime", manifest_file)
+    return archive, identity, manifest_file
+
+
+class LocalAdministrator:
+    """Real Keycloak authorization-code login and the browser BFF boundary."""
+
+    def __init__(self, origin: str, ca_file: Path):
+        self.origin = origin
+        class LocalRedirect(HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                target = urlsplit(newurl)
+                if target.scheme != "https" or target.netloc != urlsplit(origin).netloc:
+                    fail("LW_LOCAL_PLATFORM_CONFIGURATION_LOGIN_ORIGIN_INVALID")
+                return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+        self.opener = build_opener(
+            HTTPCookieProcessor(CookieJar()),
+            LocalRedirect(),
+            HTTPSHandler(context=ssl.create_default_context(cafile=str(ca_file))),
+        )
+
+    def login(self) -> None:
+        class LoginForm(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.action = None
+                self.fields = {}
+
+            def handle_starttag(self, tag, attrs):
+                attributes = dict(attrs)
+                if tag == "form" and attributes.get("id") == "kc-form-login":
+                    self.action = attributes.get("action")
+                if tag == "input" and attributes.get("name"):
+                    self.fields[attributes["name"]] = attributes.get("value", "")
+
+        with self.opener.open(self.origin + "/auth/login?return_to=%2F", timeout=30) as response:
+            login_url = response.url
+            payload = response.read(1048577)
+        form = LoginForm()
+        form.feed(payload.decode())
+        if len(payload) > 1048576 or not form.action:
+            fail("LW_LOCAL_PLATFORM_CONFIGURATION_LOGIN_FAILED")
+        action = urljoin(login_url, form.action)
+        if urlsplit(action).scheme != "https" or urlsplit(action).netloc != urlsplit(self.origin).netloc:
+            fail("LW_LOCAL_PLATFORM_CONFIGURATION_LOGIN_ORIGIN_INVALID")
+        form.fields.update(username="platform-admin", password="local-platform-admin", credentialId="")
+        request = Request(action, data=urlencode(form.fields).encode(), headers={
+            "Content-Type": "application/x-www-form-urlencoded", "Origin": self.origin,
+        })
+        with self.opener.open(request, timeout=30) as response:
+            response.read(1048577)
+        session = self.request("GET", "/api/v1/auth/session")
+        if "platform_admin" not in session.get("actor", {}).get("roles", []):
+            fail("LW_LOCAL_PLATFORM_CONFIGURATION_ADMIN_REQUIRED")
+
+    def request(self, method, path, payload=None, *, revision=None, key=None, ciphertext=None):
+        headers = {"Content-Type": "application/json"}
+        if method != "GET":
+            csrf = self.request("GET", "/api/v1/auth/csrf")
+            headers.update({"Origin": self.origin, "X-CSRF-Token": csrf["csrfToken"]})
+        if revision is not None:
+            headers["If-Match"] = f'"rev-{revision}"'
+        if key:
+            headers["Idempotency-Key"] = key
+        body = None if payload is None else json.dumps(payload).encode()
+        if ciphertext is not None:
+            body = ciphertext
+            headers["Content-Type"] = "application/octet-stream"
+        with self.opener.open(Request(self.origin + path, data=body, method=method, headers=headers), timeout=60) as response:
+            body = response.read(1048577)
+            if len(body) > 1048576:
+                fail("LW_LOCAL_PLATFORM_CONFIGURATION_RESPONSE_LIMIT")
+            return json.loads(body)
+
+
+def apply_local_platform_configuration(kubeconfig: Path, work: Path, foundation: Path, images: dict[str, str]) -> None:
+    """Admin-authorize through the real BFF, then invoke the unified executor."""
+    import deployment_bundle as encrypted
+
+    try:
+        administrator = LocalAdministrator(f"https://127.0.0.1.nip.io:{PORTAL_PORT}", foundation / "authority/ca.crt")
+        administrator.login()
+        path = "/api/v1/admin/platform-configuration"
+        status = administrator.request("GET", path)
+        if status["revision"] != 0 or status["desired"] is not None:
+            fail("LW_LOCAL_PLATFORM_CONFIGURATION_ALREADY_CONFIGURED")
+        initial = encrypted._configuration_version(b"", defaults=True)["request"]
+        status = administrator.request("PATCH", path, initial, revision=0, key=f"local-{RUN_ID}-desired")
+        version = status["desired"]
+        archive, identity, manifest_file = prepare_local_managed_bundle(work, images, version)
+        ciphertext = archive.read_bytes()
+        registered = administrator.request("POST", path + f'/versions/{version["revision"]}/bundle?' + urlencode({
+            "expectedRevision": status["revision"], "configurationSha256": version["configurationSha256"],
+        }), revision=status["revision"], key=f"local-{RUN_ID}-bundle", ciphertext=ciphertext)
+        requested = administrator.request("POST", path + "/applies", {
+            "expectedRevision": registered["revision"], "desiredRevision": version["revision"],
+        }, revision=registered["revision"], key=f"local-{RUN_ID}-apply")
+        apply_id = requested["latestApply"]["id"]
+        with encrypted.opened_bundle(archive, identity, work / "bundle-runtime", manifest_file) as (root, rendered, _metadata):
+            environment = dict(os.environ, KUBECONFIG=str(kubeconfig), LW_BUNDLE_ROOT=str(root),
+                               LW_BUNDLE_RENDERED_ROOT=str(rendered), LW_BUNDLE_CIPHERTEXT_FILE=str(root.parent / "source.age"),
+                               LW_BUNDLE_MANIFEST_FILE=str(manifest_file),
+                               LABWEAVER_PLATFORM_CONFIGURATION_APPLY_ID=apply_id)
+            target = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+            tool = Path(os.environ.get("LABWEAVER_BUNDLE_CONFIGURATION_TOOL", target / "debug/xtask"))
+            encrypted._consume([str(tool), "deploy", "--env", "local", "--stage", "configuration", "--yes"], environment)
+        applied = administrator.request("GET", path)
+        if (applied["appliedState"] != "verified" or applied["latestApply"]["id"] != apply_id
+                or applied["latestApply"]["stage"] != "succeeded"
+                or applied["appliedBundleSha256"] != hashlib.sha256(ciphertext).hexdigest()):
+            fail("LW_LOCAL_PLATFORM_CONFIGURATION_NOT_VERIFIED")
+    except (HTTPError, URLError, OSError, ValueError, KeyError, encrypted.BundleError) as error:
+        diagnostic = str(error) if isinstance(error, encrypted.BundleError) else "LW_LOCAL_PLATFORM_CONFIGURATION_BOOTSTRAP_FAILED"
+        raise LocalDevError(diagnostic) from error
+
+
 def up(
     *,
     external_fixtures: bool = False,
@@ -3941,11 +4129,13 @@ def up(
     )
     if authoring_buildkit_sidecar and external_fixtures:
         fail("--authoring-buildkit-sidecar requires the real Harbor and BuildKit provider")
-    need_tools(["docker","kind","kubectl","helm","openssl","ssh-keygen"])
+    need_tools(["docker","kind","kubectl","helm","openssl","ssh-keygen","age","age-keygen"])
     require_psutil()
     verify_loopback_nip_io()
     if STATE_FILE.exists(): fail("local development stack already has state; run status or down first")
-    STATE_DIR.mkdir(parents=True,exist_ok=True); PRIVATE_DIR.mkdir(parents=True,exist_ok=True)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    PRIVATE_DIR.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    PRIVATE_DIR.mkdir(mode=0o700, exist_ok=True)
     RUN_ID=uuid.uuid4().hex[:12]
     CLUSTER=f"labweaver-local-{RUN_ID}"
     REGISTRY=f"labweaver-local-registry-{RUN_ID}"
@@ -3953,7 +4143,7 @@ def up(
     PORTAL_PORT=free_port()
     ACCESS_PORT=free_port()
     WEB_PORT=free_port()
-    work=PRIVATE_DIR/RUN_ID; work.mkdir(parents=True)
+    work=PRIVATE_DIR/RUN_ID; work.mkdir(mode=0o700, parents=True)
     kubeconfig=STATE_DIR/"kubeconfig"
     profile = "external-fixtures" if external_fixtures else "default"
     real_build_provider: local_dev_build.RealBuildProvider | None = None
@@ -4059,6 +4249,7 @@ def up(
             real_build_provider,
             real_build_values,
         )
+        apply_local_platform_configuration(kubeconfig, work, foundation, images)
         access_forward = start_owned_process(
             [kubectl_path, "--kubeconfig", str(kubeconfig), "-n", NAMESPACE,
              "port-forward", "svc/access-service", f"{ACCESS_PORT}:8080"],

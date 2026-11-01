@@ -13,7 +13,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{get, post},
 };
 use contracts::http::IdempotencyKey;
 use contracts::platform_configuration::{
@@ -55,7 +55,7 @@ pub(super) fn internal_routes(state: Arc<ApiState>, verifier: Arc<ServiceTokenVe
         .route("/internal/v1/platform-configuration/loaded", get(loaded))
         .route(
             "/internal/v1/platform-configuration/applies/{apply_id}",
-            put(report),
+            get(read_intent).put(report),
         )
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .with_state(state)
@@ -85,6 +85,22 @@ async fn loaded(State(state): State<Arc<ApiState>>) -> Result<Response, ApiError
     response
         .headers_mut()
         .insert("Cache-Control", HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
+async fn read_intent(
+    State(state): State<Arc<ApiState>>,
+    Extension(executor): Extension<Executor>,
+    Path(id): Path<OperationId>,
+) -> Result<Response, ApiError> {
+    let value = configuration::get(&state.control.pool).await?;
+    let attempt = value.latest_apply.as_ref().ok_or(ConfigurationError::NotFound)?;
+    if attempt.id != id || attempt.executor_client_id.as_deref().is_some_and(|client| client != executor.0) {
+        return Err(ConfigurationError::ApplyConflict.into());
+    }
+    let revision = value.revision;
+    let mut response = response(value, revision, StatusCode::OK)?;
+    response.headers_mut().insert("Cache-Control", HeaderValue::from_static("no-store"));
     Ok(response)
 }
 

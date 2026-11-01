@@ -109,11 +109,20 @@ python tools/deployment_bundle.py deploy --archive .private/installation.age \
 
 `--stage all|preflight|infrastructure|identity|storage|services|route` 选择重入的阶段；入口不持久记录阶段成功事实。中断后先从目标集群核对 Helm release、身份与业务状态，再用同一个安装 ID 重试该阶段。`adopt` 不直接运行整站 `site.yml`；缺失的归属标记或发现不相符的 namespace/对象/release 时拒绝覆盖，已有但没有安装 ID 的旧实例需要人工审查与单独迁移，不会自动认领。`upgrade` 不重装基础设施或 BuildKit，也不触发清空；应用迁移仍是前向操作，回退前先检查 schema 与拟回退应用版本是否兼容。
 
+首装 `configurationMode: initial_settings` 分两步完成：
+
+1. 运行 `--mode install`，入口部署基础设施及初始服务后，在配置阶段明确返回 `LW_PLATFORM_CONFIGURATION_ADMIN_INITIALIZATION_REQUIRED`。这不是安装回滚，也不是已应用或已验证；Work 准入保持失败关闭。不要重置数据库或把该诊断改成成功。
+2. 真实平台管理员从门户登录并通过原 API 保存零 revision 的设置，导出 Control 创建的真实版本，以 `managed_version` 重建并重新加密相同安装 ID 的 Bundle，登记该实际密文并提交 apply。把返回的 attempt ID 设为 `LABWEAVER_PLATFORM_CONFIGURATION_APPLY_ID`，在该归档的 `exec` 中运行 `cargo xtask deploy --env v1 --stage configuration --yes`。只有原 attempt 完整观察成功才得到 verified applied。没有服务账户管理员初始化入口；执行器不会替管理员提交 desired/登记/apply。
+
 应用阶段先读取并校验 Bundle 输入，在受限工作目录暂存 chart/values，再用最终参数渲染完整 Helm 清单并核验每个写入目标。全部通过后才执行 SQL baseline/Access seed、NATS、MinIO、Harbor 和 Keycloak 的业务写入以及后续集群协调；最终 chart 的冲突不能留到迁移之后才发现。Resource 配置对象和 NATS Secret 始终使用 Bundle 中的准确目标 namespace，不回退到 `labweaver-system`。同一 namespace 中的平台与 Resource sibling release 分别读取准确 metadata，核对 name、namespace、安装 ID 后才将其根对象及 owner UID 子链视为本安装对象；不按 release 名前缀认领。
 
 应用阶段核对 portal、evaluation、authoring、data namespace 及其实际写入的 Secret、策略、ServiceAccount、Gateway/Service 和路由；最终 Helm 清单还覆盖跨 namespace 对象与集群 RBAC。仅配置内容或 NetworkPolicy spec 相同不代表允许认领。Deployment → ReplicaSet → Pod 等控制器子对象沿已观测的 owner UID 回溯到已核验的安装根对象，不能靠名称或标签推测，父对象缺失、UID 更换或循环引用均拒绝。基础服务的失败 revision 恢复仅处理安装 ID 相符的既定 StatefulSet，并以 Pod UID 前置条件防止删除并发替换出的对象。
 
 Harbor 新 namespace 仅在 API 明确返回 NotFound 时以 `create` 写入安装 ID；已有 namespace 不补写缺失 ID。已有 Harbor Helm release 须具有准确 name/namespace，且保存的 `labweaverInstallationId` 与 Bundle 相同。Identity 同样检查 namespace、凭据、证书目标、CNPG Cluster/备份、RBAC、工作负载与配置的安装 ID；role-only provisioning 也不绕过检查。既有无 ID 的实例不会自动迁移。以上检查不替代真实集群上的首次安装、重入与升级验证。
+
+应用阶段还运行平台配置的真实执行器，不能仅凭 Helm 就绪宣布平台配置生效。先由平台管理员保存 desired、导出并加密对应管理 Bundle、登记实际密文并提交 apply intent。Bundle 的 `configurationExecutor` 引用同一归档中的 `labweaver-deployment-executor` Secret；身份 foundation 的该服务账户只获得 Control 的 `control.platform_configuration.apply` 角色。必须确认既有 Control caller allowlist 接受该客户端，且操作者 kubeconfig 可以读取 Deployment/ReplicaSet/Pod 并对准确的 Control Pod 做 port-forward。未配置身份、没有真实 intent、版本/两摘要不一致或任一副本不可达时，执行器失败关闭；不授予它管理员或网关转发角色来解决授权错误。
+
+`all`/`services` 在既有服务部署前报告 validating/applying，部署后报告 verifying，并用 Control 的真实 loaded endpoint 观察完整稳定副本集合后才报告 succeeded。单独重入 `configuration` 阶段使用 `cargo xtask deploy --env <环境> --stage configuration --yes`，在同一认证 Bundle `exec` 内运行；它只通过现有 chart 更新管理配置投影，不重装基础层。失败的阶段错误保留稳定诊断码；部署失败或观察不完整时保留 unverified 和最后验证版本。先查询原 attempt 和真实集群结果，再对同一版本决定重新请求应用；不要修改数据库的 applied 字段、复制摘要冒充 loaded，或关闭 TLS/副本校验。
 
 新装分支的 Cilium、MetalLB、NFS CSI、Local Path、cert-manager、KubeVirt/CDI 与 FastAPI-DLS 在首次集群变更前读取完整已配置 manifest/最终 Helm 渲染清单并核验安装归属。基础设施 Helm release 保存 `labweaverInstallationId`，post-renderer 为其根对象写入同一安装 ID；基础设施 Gateway 的生产者也写入该 ID，应用入口不为无 ID Gateway 补标。`kube-system` 等共享 namespace 只允许既定对象/字段协调，不据 namespace 名认领其内容。GPU/KubeVirt 节点标签使用独立字段归属标记及 UID/resourceVersion JSON Patch 测试；过期 GPU 标签清理不接受其他安装的布尔管理标签。旧入口对象的删除同时携带已观测 UID/resourceVersion。Sandbox 先验证 RuntimeClass/安装边界；stamp 读取错误与服务状态查询错误均不能当作缺失或已停止。
 

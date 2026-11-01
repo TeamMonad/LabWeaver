@@ -14,7 +14,10 @@
       - identity_run_id is match('^infra-[a-z0-9-]+$')
       - identity_hostname is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$')
       - identity_realm == 'workloads'
-      - identity_service_clients | length == 6
+      - >-
+        (identity_service_clients | map(attribute='client_id') | list | sort) ==
+        (['labweaver-access', 'labweaver-agent', 'labweaver-control', 'labweaver-environment',
+          'labweaver-evaluation', 'labweaver-resource', 'labweaver-deployment-executor'] | sort)
       - (identity_service_clients | map(attribute='client_id') | list | unique | length) == (identity_service_clients | length)
       - (identity_service_clients | map(attribute='audience') | list | unique | length) == (identity_service_clients | length)
       - (identity_service_clients | map(attribute='client_id') | list) == (identity_service_clients | map(attribute='audience') | list)

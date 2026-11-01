@@ -378,11 +378,12 @@ Cluster network、identity、verify、admin tools、foundation、Harbor、sandbo
 2. 如需自定义设置，改用 `--settings-file .private/initial/settings.yaml`，文件只包含完整 configuration 的三个设置组。
 3. 将模型设置为 `configurationMode: initial_settings`、`revision: 1`，引用该请求文件。
 4. 准备现有应用与 Resource 的完整安装输入，再验证和加密同一目录。
-5. 在单独获准安装窗口恢复归档，并使用既有安装入口部署。
-6. Control 可用后，由真实管理员提交恢复的零 revision 请求、`If-Match: "rev-0"` 和稳定幂等键。
-7. 读取 Control 创建的真实 desired 版本，后续导出使用 `managed_version`。
+5. 在获准窗口通过统一 `deploy --mode install` 部署初始服务。配置阶段返回 `LW_PLATFORM_CONFIGURATION_ADMIN_INITIALIZATION_REQUIRED`，不会报告 applied/verified；这不表示已经回滚服务部署。
+6. Control 可用后，由真实平台管理员通过门户 BFF 提交恢复的零 revision 请求、`If-Match: "rev-0"` 和稳定幂等键。执行服务账户没有管理员初始化权限。
+7. 导出 Control 创建的真实 desired 版本，将同一安装 ID 的 Bundle 改为 `managed_version` 并重新加密到新文件，登记实际密文并请求 apply。
+8. 设置管理员返回的 `LABWEAVER_PLATFORM_CONFIGURATION_APPLY_ID`，在该管理归档的 `exec` 中运行 `cargo xtask deploy --env <环境> --stage configuration --yes`。执行器部署管理投影，完成真实副本 loaded 核对后才报告 verified applied。首次未初始化不会自动跳过该阶段或返回成功。
 
-本地 revision 1 仅表示首装 Bundle 格式中的版本。Control 在提交前仍为未配置，工具不制造 Actor、版本时间或 applied。若目标已经保存新设置，零 revision 更新会冲突，不能把首装当作升级或重置。工具也不会初始化身份、写费率、清空账本或代替用户批准密文/目的地。
+本地 revision 1 仅表示首装 Bundle 格式中的版本。Control 在管理员提交前仍为未配置，工具不制造 Actor、版本时间或 applied。若目标已经保存新设置，零 revision 更新会冲突，不能把首装当作升级或重置。工具也不会初始化身份、写费率、清空账本或代替用户批准密文/目的地。`local_dev.py up` 在自己的全新一次性栈中，通过真实 Keycloak 管理员 OIDC 登录自动完成上述管理员步骤，再调用同一执行阶段；生产不使用本地测试账户。
 
 ## 解密、恢复和使用
 
@@ -501,6 +502,27 @@ Control 的本地进程入口读取 `LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FI
 Kubernetes [AtomicWriter](https://github.com/kubernetes/kubernetes/blob/v1.35.0/pkg/volume/util/atomic_writer.go) 用同一代次目录和符号链接发布投影。因此初始化命令固定一个 `..data` 代次，校验字节checksum后写入普通0600文件，保留加载器原有的链接拒绝。主进程的身份来自 [Downward API](https://kubernetes.io/docs/concepts/workloads/pods/downward-api/)；挂载文件改变不会替换已经加载的进程快照。
 
 Control副本数在原Bundle的 `application.helmValues.workloads.control-service.replicas` 配置为1到16，默认1。Source及chart必须一致。不要手改派生值、加载环境路径、Downward身份或ConfigMap数据。任一来源、摘要或必需字段错误会明确失败。
+
+### 统一入口的配置执行器
+
+`cargo xtask deploy` 的应用服务阶段使用 `tools/verified_apply.py` 执行原 apply/report 状态机。管理 Bundle 可包含：
+
+```yaml
+configurationExecutor:
+  clientId: labweaver-deployment-executor
+  clientSecretFile: secrets/deployment-executor-client-secret
+```
+
+管理员提交 apply 后，将返回的真实 attempt ID 设置为 `LABWEAVER_PLATFORM_CONFIGURATION_APPLY_ID`，再运行同一归档的部署消费者。执行器通过现有内部 apply 路径的只读 GET 查询该准确 attempt；错误/过期 ID、其他执行客户端已接管的 attempt 或摘要不符均拒绝。该只读方法与 report 共用既有 apply 服务权限，不开放管理员保存、Bundle 登记或请求应用的内部写入口。生产的 desired/登记/apply 仍由真实平台管理员经现有 BFF API 完成；不能把执行账户加入管理员组。
+
+凭据文件纳入同一受限目录和 age 归档；Control 的 caller allowlist 由该声明派生。身份 foundation 中该客户端仅获得 Control 的 `control.platform_configuration.apply` client role，不获得 Access 网关转发、用户管理、realm 管理或平台管理员角色。该业务权限不是 OAuth scope；执行器向真实 Keycloak 发送 client-credentials 请求，Control 继续验证服务 JWT 的 issuer、audience、签名、期限、client allowlist 和权限。部署前必须通过既有身份入口准备真实客户端 Secret 和 assignment；工具不会从测试身份推导生产权限。
+
+执行器只读取本次 age 解密认证所使用的密文快照，核对原 desired revision、管理设置摘要及密文摘要。它按 `validating → applying → verifying → succeeded` 报告；只有真实 Control 全副本 loaded 观察与该版本及密文一致时才报告 succeeded。服务部署失败报告 external_result_unknown；副本不匹配或不可达报告 verification_failed，并保留 unverified 和最后验证的 applied，不会直接写数据库或跳过观察。
+
+观察仍复用下述 Deployment→ReplicaSet→Pod roster 与进程快照检查。统一执行器使用已有 kubectl 对准确的 Pod 做临时回环 port-forward；HTTPS 始终校验 Control Service DNS 与 Bundle 内的 CA，不依赖控制器能直连 Pod CIDR，不使用 Pod exec 或关闭 TLS。端口转发退出后必定回收。
+
+`cargo xtask deploy --env <环境> --stage configuration --yes` 是同一执行器的配置投影阶段：在 prepare 与 finish 之间，使用现有 Helm chart 将实际管理版本、来源和策略挂载到已有 release，等待升级完成。它不初始化其他基础设施或替换其权限。该阶段仍要求已经登记且请求应用的真实 intent；没有 bypass 旗标，命令退出成功也不能代替 loaded 观察。
+
 
 完成已获准部署后，原执行者在 `verifying` 阶段收集一次实际观察：
 

@@ -61,8 +61,9 @@ impl Drop for AuthorityHandle {
         self.task.abort();
     }
 }
-struct TlsServiceHandle {
-    base_url: reqwest::Url,
+#[allow(dead_code, reason = "only the executor integration target starts a TCP listener")]
+pub(super) struct TlsServiceHandle {
+    pub(super) base_url: reqwest::Url,
     shutdown: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -116,6 +117,7 @@ impl HttpFixture {
                     &issuer.issuer,
                     "labweaver-control".to_owned(),
                     BTreeSet::from([
+                        "labweaver-deployment-executor".to_owned(),
                         "labweaver-access".to_owned(),
                         "synthetic-executor".to_owned(),
                     ]),
@@ -158,6 +160,15 @@ impl HttpFixture {
         })
     }
 
+    #[allow(dead_code, reason = "only the executor integration target starts a TCP listener")]
+    pub async fn serve_executor(
+        &self,
+    ) -> Result<(TlsServiceHandle, std::path::PathBuf), Box<dyn std::error::Error>> {
+        let (ca, leaf, key, _) = tls_material()?;
+        let ca_path = self._temporary.path().join("executor-ca.pem");
+        std::fs::write(&ca_path, ca)?;
+        Ok((spawn_tls_service(self.router.clone(), &leaf, &key).await?, ca_path))
+    }
     #[allow(
         dead_code,
         reason = "only replica integration targets fork the shared fixture"
