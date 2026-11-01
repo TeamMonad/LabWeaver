@@ -381,7 +381,9 @@ fn tls_config(
 fn tls_material() -> Result<(String, String, String, Value), Box<dyn std::error::Error>> {
     let ca_key = KeyPair::generate()?;
     let mut ca_parameters = CertificateParams::new(Vec::<String>::new())?;
-    ca_parameters.distinguished_name.push(rcgen::DnType::CommonName, "Synthetic configuration root");
+    ca_parameters
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "Synthetic configuration root");
     ca_parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     ca_parameters.key_usages = vec![
         KeyUsagePurpose::DigitalSignature,
@@ -390,7 +392,9 @@ fn tls_material() -> Result<(String, String, String, Value), Box<dyn std::error:
     ];
     let ca = CertifiedIssuer::self_signed(ca_parameters, ca_key)?;
     let mut leaf_parameters = CertificateParams::new(vec!["localhost".to_owned()])?;
-    leaf_parameters.distinguished_name.push(rcgen::DnType::CommonName, "localhost");
+    leaf_parameters
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "localhost");
     leaf_parameters.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     leaf_parameters.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     let leaf_key = KeyPair::generate()?;
