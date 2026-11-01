@@ -1,4 +1,8 @@
 //! OpenSSH authorization and fixed-session helper for the Sprint 2 gateway.
+//!
+//! Heartbeats bound token acquisition and authority requests with one deadline, then
+//! kill and reap the target on failure. Tests involving real targets use a live
+//! clock: virtual-time advancement does not wait for OS process-exit notifications.
 
 use std::collections::BTreeSet;
 use std::env;
@@ -1705,6 +1709,9 @@ mod tests {
             .kill_on_drop(true)
             .spawn()
             .map_err(|_| GatewayError::Target)?;
+        // Child::wait closes child.stdin. Keep the writer outside Child so an EOF cannot
+        // masquerade as heartbeat-driven termination before the token request starts.
+        let _stdin = child.stdin.take();
         let mut signals = GatewaySignals::new()?;
         let outcome = {
             let run = run_target(
@@ -1716,21 +1723,32 @@ mod tests {
                 Duration::from_secs(15),
             );
             tokio::pin!(run);
+            // This is a real-process integration test: both the heartbeat deadline and
+            // SIGCHLD/reaping must use real time. A paused clock can auto-advance the
+            // guard while an already-killed child is still awaiting OS notification.
+            // Keep the original 5s request budget plus 1s for scheduling and reaping;
+            // the guard also bounds the wait for the token request to start.
+            let started = Instant::now();
+            let guard = tokio::time::sleep(ACCESS_REQUEST_TIMEOUT + Duration::from_secs(1));
+            tokio::pin!(guard);
             tokio::select! {
                 () = authority.state.token_started.notified() => {},
                 _ = &mut run => return Err(GatewayError::Authority),
+                () = &mut guard => return Err(GatewayError::Transport),
             }
-            tokio::time::pause();
-            tokio::time::advance(Duration::from_secs(5)).await;
-            // Guard only: legacy code has no deadline and must fail instead of hanging the test.
-            tokio::time::timeout(Duration::from_secs(1), &mut run).await
+            let outcome = tokio::select! {
+                result = &mut run => Ok(result),
+                () = &mut guard => Err(GatewayError::Transport),
+            };
+            assert!(started.elapsed() >= ACCESS_REQUEST_TIMEOUT);
+            outcome
         };
         if outcome.is_err() {
             stop_target(&mut child).await?;
         }
         assert!(
             outcome.is_ok(),
-            "stalled token fetch outlived the heartbeat deadline; target stayed running"
+            "stalled token fetch did not stop and reap the target within the real heartbeat budget"
         );
         let (result, stopped) = outcome.map_err(|_| GatewayError::Authority)?;
         assert!(matches!(result, Err(GatewayError::Transport)));
@@ -1738,11 +1756,19 @@ mod tests {
             stopped,
             "heartbeat timeout must enter the real target-stop path"
         );
+        let status = child
+            .try_wait()
+            .map_err(|_| GatewayError::Target)?
+            .ok_or(GatewayError::Target)?;
         assert!(
-            child
-                .try_wait()
-                .map_err(|_| GatewayError::Target)?
-                .is_some()
+            !status.success(),
+            "the target must not exit normally on EOF"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status),
+            Some(nix::sys::signal::Signal::SIGKILL as i32),
+            "the heartbeat failure must kill the real target"
         );
         assert!(authority.close_requests().await.is_empty());
         Ok(())
