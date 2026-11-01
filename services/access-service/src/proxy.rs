@@ -57,6 +57,8 @@ pub(super) struct RuntimeGatewayProxy {
     pub(super) max_request_bytes: usize,
     pub(super) max_response_bytes: usize,
     #[cfg(test)]
+    pub(super) http_base: Option<Url>,
+    #[cfg(test)]
     pub(super) websocket_base: Option<Url>,
 }
 
@@ -273,17 +275,23 @@ impl ResourceGatewayProxy {
 impl RuntimeGatewayProxy {
     pub(super) fn new(config: &ControlGatewayFileConfig) -> Result<Self, ControlGatewayError> {
         Ok(Self {
-            client: Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(Duration::from_secs(3))
-                .timeout(Duration::from_millis(config.timeout_milliseconds))
+            client: Self::client_builder(config)
                 .build()
                 .map_err(|_| ControlGatewayError::Config)?,
             max_request_bytes: config.max_request_bytes,
             max_response_bytes: config.max_response_bytes,
             #[cfg(test)]
+            http_base: None,
+            #[cfg(test)]
             websocket_base: None,
         })
+    }
+
+    pub(super) fn client_builder(config: &ControlGatewayFileConfig) -> reqwest::ClientBuilder {
+        Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(3))
+            .read_timeout(Duration::from_millis(config.timeout_milliseconds))
     }
 }
 
@@ -1617,22 +1625,21 @@ pub(super) async fn forward_runtime(
     let (endpoint_grant_id, runtime_path) = parse_runtime_path(uri.path())?;
     let session =
         super::runtime::authenticated_capability(&state, &uri, &headers, endpoint_grant_id).await?;
-    let target = authorize_runtime(
-        &state,
-        session.actor_id,
-        endpoint_grant_id,
-        if matches!(method, Method::GET | Method::HEAD | Method::OPTIONS) {
-            contracts::object_authorization::ObjectAction::Browse
-        } else {
-            contracts::object_authorization::ObjectAction::Edit
-        },
-    )
-    .await?;
+    let action = if matches!(method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        contracts::object_authorization::ObjectAction::Browse
+    } else {
+        contracts::object_authorization::ObjectAction::Edit
+    };
+    let target = authorize_runtime(&state, session.actor_id, endpoint_grant_id, action).await?;
     let mut upstream = Url::parse(&format!(
         "http://{}.{}.svc.cluster.local:8080/",
         target.service.service_name, target.service.namespace
     ))
     .map_err(|_| ApiError::internal("LW_ACCESS_RUNTIME_TARGET_INVALID"))?;
+    #[cfg(test)]
+    if let Some(base) = &state.runtime_proxy.http_base {
+        upstream = base.clone();
+    }
     upstream.set_path(&runtime_path);
     upstream.set_query(uri.query());
     let request = state
@@ -1641,21 +1648,25 @@ pub(super) async fn forward_runtime(
         .request(method.clone(), upstream)
         .body(body);
 
-    let response = copy_runtime_request_headers(request, &headers)
-        .send()
-        .await
-        .map_err(|_error| {
-            tracing::warn!(
-                event = "access.runtime_proxy.unavailable",
-                diagnostic_code = "LW_ACCESS_RUNTIME_UNAVAILABLE",
-                environment_id = %target.environment_id,
-                endpoint_grant_id = %endpoint_grant_id,
-                error_kind = "upstream_transport",
-                failure_stage = "runtime_request",
-                retryable = true
-            );
-            ApiError::unavailable("LW_ACCESS_RUNTIME_UNAVAILABLE")
-        })?;
+    let response = copy_runtime_request_headers(
+        request,
+        &headers,
+        &state.deployment.browser.session_cookie_name,
+    )?
+    .send()
+    .await
+    .map_err(|_error| {
+        tracing::warn!(
+            event = "access.runtime_proxy.unavailable",
+            diagnostic_code = "LW_ACCESS_RUNTIME_UNAVAILABLE",
+            environment_id = %target.environment_id,
+            endpoint_grant_id = %endpoint_grant_id,
+            error_kind = "upstream_transport",
+            failure_stage = "runtime_request",
+            retryable = true
+        );
+        ApiError::unavailable("LW_ACCESS_RUNTIME_UNAVAILABLE")
+    })?;
     let status = response.status();
     if response.content_length().is_some_and(|length| {
         length > u64::try_from(state.runtime_proxy.max_response_bytes).unwrap_or(u64::MAX)
@@ -1666,38 +1677,53 @@ pub(super) async fn forward_runtime(
     }
     let response_headers = response.headers().clone();
     let max_response_bytes = state.runtime_proxy.max_response_bytes;
-    let actor_id = session.actor_id;
-    let response_stream = Box::pin(response.bytes_stream());
+    let admission = RuntimeAdmission {
+        uri,
+        headers,
+        endpoint_grant_id,
+        action,
+    };
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let body_cancellation = cancellation.clone();
+    let task = tokio::spawn(async move {
+        let forward = async {
+            let mut upstream = response.bytes_stream();
+            let mut received = 0_usize;
+            while let Some(chunk) = upstream.next().await {
+                let chunk = chunk.map_err(io::Error::other).and_then(|chunk| {
+                    received = received.saturating_add(chunk.len());
+                    if received > max_response_bytes {
+                        Err(io::Error::other("LW_ACCESS_RUNTIME_RESPONSE_TOO_LARGE"))
+                    } else {
+                        Ok(chunk)
+                    }
+                });
+                let failed = chunk.is_err();
+                if sender.send(chunk).await.is_err() || failed {
+                    break;
+                }
+            }
+        };
+        tokio::select! {
+            () = forward => {},
+            diagnostic = admission.supervise(&state) => {
+                tracing::debug!(event = "access.runtime_proxy.stream_closed", diagnostic_code = diagnostic);
+                cancellation.cancel();
+            }
+        }
+    });
     let body_stream = futures_util::stream::unfold(
         (
-            response_stream,
-            tokio::time::interval(Duration::from_secs(5)),
-            state,
-            actor_id,
-            endpoint_grant_id,
-            0_usize,
+            receiver,
+            tokio_util::task::AbortOnDropHandle::new(task),
+            body_cancellation,
         ),
-        move |(mut upstream, mut recheck, state, actor_id, endpoint_grant_id, mut received)| async move {
-            loop {
-                tokio::select! {
-                    chunk = upstream.next() => {
-                        let chunk = chunk?;
-                        let chunk = chunk.map_err(io::Error::other).and_then(|chunk| {
-                            received = received.saturating_add(chunk.len());
-                            if received > max_response_bytes {
-                                Err(io::Error::other("LW_ACCESS_RUNTIME_RESPONSE_TOO_LARGE"))
-                            } else {
-                                Ok(chunk)
-                            }
-                        });
-                        return Some((chunk, (upstream, recheck, state, actor_id, endpoint_grant_id, received)));
-                    }
-                    _ = recheck.tick() => {
-                        if authorize_runtime(&state, actor_id, endpoint_grant_id, contracts::object_authorization::ObjectAction::Browse).await.is_err() {
-                            return None;
-                        }
-                    }
-                }
+        |(mut receiver, task, cancellation)| async move {
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => None,
+                chunk = receiver.recv() => chunk.map(|chunk| (chunk, (receiver, task, cancellation))),
             }
         },
     );
@@ -1721,7 +1747,10 @@ pub(super) async fn forward_runtime(
         }
     }
     for cookie in response_headers.get_all(header::SET_COOKIE) {
-        downstream = downstream.header(header::SET_COOKIE, strip_cookie_domain(cookie)?);
+        downstream = downstream.header(
+            header::SET_COOKIE,
+            rewrite_runtime_cookie(cookie, endpoint_grant_id, &runtime_path)?,
+        );
     }
     if let Some(location) = response_headers.get(header::LOCATION) {
         downstream = downstream.header(
@@ -1753,106 +1782,158 @@ pub(super) async fn forward_runtime_websocket(
     let (endpoint_grant_id, runtime_path) = parse_runtime_path(uri.path())?;
     let session =
         super::runtime::authenticated_capability(&state, &uri, &headers, endpoint_grant_id).await?;
-    let target = authorize_runtime(
-        &state,
-        session.actor_id,
+    let action = contracts::object_authorization::ObjectAction::Edit;
+    let target = authorize_runtime(&state, session.actor_id, endpoint_grant_id, action).await?;
+    let mut upstream_url = Url::parse(&format!(
+        "ws://{}.{}.svc.cluster.local:8080/",
+        target.service.service_name, target.service.namespace
+    ))
+    .map_err(|_| ApiError::internal("LW_ACCESS_RUNTIME_TARGET_INVALID"))?;
+    #[cfg(test)]
+    if let Some(base) = &state.runtime_proxy.websocket_base {
+        upstream_url = base.clone();
+    }
+    upstream_url.set_path(&runtime_path);
+    upstream_url.set_query(uri.query());
+    let mut request = upstream_url
+        .as_str()
+        .into_client_request()
+        .map_err(|_| ApiError::internal("LW_ACCESS_RUNTIME_TARGET_INVALID"))?;
+    for protocol in headers.get_all(header::SEC_WEBSOCKET_PROTOCOL) {
+        request
+            .headers_mut()
+            .append(header::SEC_WEBSOCKET_PROTOCOL, protocol.clone());
+    }
+    if let Some(cookie) =
+        runtime_app_cookies(&headers, &state.deployment.browser.session_cookie_name)?
+    {
+        request.headers_mut().insert(header::COOKIE, cookie);
+    }
+    // Complete the upstream handshake before committing the browser's 101 response.
+    let (upstream, response) = tokio::time::timeout(Duration::from_secs(3), connect_async(request))
+        .await
+        .map_err(|_| ApiError::unavailable("LW_ACCESS_RUNTIME_UNAVAILABLE"))?
+        .map_err(|_| ApiError::unavailable("LW_ACCESS_RUNTIME_UNAVAILABLE"))?;
+    let mut protocols = Vec::new();
+    if let Some(selected) = response.headers().get(header::SEC_WEBSOCKET_PROTOCOL) {
+        let selected = selected
+            .to_str()
+            .map_err(|_| ApiError::unavailable("LW_ACCESS_RUNTIME_RESPONSE_INVALID"))?;
+        let offered = headers
+            .get_all(header::SEC_WEBSOCKET_PROTOCOL)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .any(|value| value.trim() == selected);
+        if !offered || selected.contains(',') {
+            return Err(ApiError::unavailable("LW_ACCESS_RUNTIME_RESPONSE_INVALID"));
+        }
+        protocols.push(selected.to_owned());
+    }
+    let admission = RuntimeAdmission {
+        uri,
+        headers,
         endpoint_grant_id,
-        contracts::object_authorization::ObjectAction::Browse,
-    )
-    .await?;
-    let upstream_url = {
-        #[cfg(test)]
-        if let Some(base) = &state.runtime_proxy.websocket_base {
-            format!("{}{runtime_path}", base.as_str().trim_end_matches('/'))
-        } else {
-            format!(
-                "ws://{}.{}.svc.cluster.local:8080{}",
-                target.service.service_name, target.service.namespace, runtime_path
-            )
-        }
-        #[cfg(not(test))]
-        {
-            format!(
-                "ws://{}.{}.svc.cluster.local:8080{}",
-                target.service.service_name, target.service.namespace, runtime_path
-            )
-        }
+        action,
     };
-    let protocol = headers.get(header::SEC_WEBSOCKET_PROTOCOL).cloned();
     Ok(upgrade
         .max_frame_size(16 * 1024 * 1024)
         .max_message_size(16 * 1024 * 1024)
-        .protocols(
-            protocol
-                .iter()
-                .filter_map(|value| value.to_str().ok())
-                .map(str::to_owned),
-        )
+        .protocols(protocols)
         .on_upgrade(move |browser| async move {
-            if let Err(error) = bridge_runtime_websocket(
-                state,
-                browser,
-                upstream_url,
-                protocol,
-                endpoint_grant_id,
-                session.actor_id,
-            )
-            .await
-            {
-                tracing::debug!(event = "access.runtime_proxy.websocket_closed", error);
+            tokio::select! {
+                result = bridge_runtime_websocket(browser, upstream) => {
+                    if let Err(diagnostic) = result {
+                        tracing::debug!(event = "access.runtime_proxy.websocket_closed", diagnostic_code = diagnostic);
+                    }
+                }
+                diagnostic = admission.supervise(&state) => {
+                    tracing::debug!(event = "access.runtime_proxy.websocket_closed", diagnostic_code = diagnostic);
+                }
             }
         })
         .into_response())
 }
 
-async fn bridge_runtime_websocket(
-    state: std::sync::Arc<AppState>,
-    mut browser: WebSocket,
-    upstream_url: String,
-    protocol: Option<HeaderValue>,
+/// Keep the admitted capability, not just its actor: logout and capability expiry
+/// must be checked through the same entry point as a new request.
+struct RuntimeAdmission {
+    uri: Uri,
+    headers: HeaderMap,
     endpoint_grant_id: contracts::EndpointGrantId,
-    actor_id: uuid::Uuid,
-) -> Result<(), &'static str> {
-    let mut request = upstream_url
-        .into_client_request()
-        .map_err(|_| "LW_ACCESS_RUNTIME_TARGET_INVALID")?;
-    if let Some(protocol) = protocol {
-        request
-            .headers_mut()
-            .insert(header::SEC_WEBSOCKET_PROTOCOL, protocol);
-    }
-    let (mut upstream, _) = connect_async(request)
-        .await
-        .map_err(|_| "LW_ACCESS_RUNTIME_UNAVAILABLE")?;
-    let mut recheck = tokio::time::interval(Duration::from_secs(5));
-    loop {
-        tokio::select! {
-            message = browser.recv() => {
-                let Some(Ok(message)) = message else { return Ok(()); };
-                let message = match message {
-                    BrowserMessage::Text(text) => UpstreamMessage::Text(text.to_string().into()),
-                    BrowserMessage::Binary(bytes) => UpstreamMessage::Binary(bytes.to_vec().into()),
-                    BrowserMessage::Close(_) => return Ok(()),
-                    BrowserMessage::Ping(bytes) => UpstreamMessage::Ping(bytes.to_vec().into()),
-                    BrowserMessage::Pong(bytes) => UpstreamMessage::Pong(bytes.to_vec().into()),
-                };
-                upstream.send(message).await.map_err(|_| "LW_ACCESS_RUNTIME_UNAVAILABLE")?;
-            }
-            message = upstream.next() => {
-                let Some(Ok(message)) = message else { return Ok(()); };
-                match message {
-                    UpstreamMessage::Text(text) => browser.send(BrowserMessage::Text(text.to_string().into())).await.map_err(|_| "LW_ACCESS_RUNTIME_UNAVAILABLE")?,
-                    UpstreamMessage::Binary(bytes) => browser.send(BrowserMessage::Binary(bytes.to_vec().into())).await.map_err(|_| "LW_ACCESS_RUNTIME_UNAVAILABLE")?,
-                    UpstreamMessage::Ping(bytes) => browser.send(BrowserMessage::Ping(bytes.to_vec().into())).await.map_err(|_| "LW_ACCESS_RUNTIME_UNAVAILABLE")?,
-                    UpstreamMessage::Pong(bytes) => browser.send(BrowserMessage::Pong(bytes.to_vec().into())).await.map_err(|_| "LW_ACCESS_RUNTIME_UNAVAILABLE")?,
-                    UpstreamMessage::Close(_) => return Ok(()),
-                    UpstreamMessage::Frame(_) => {}
-                }
-            }
-            _ = recheck.tick() => {
-                authorize_runtime(&state, actor_id, endpoint_grant_id, contracts::object_authorization::ObjectAction::Browse).await.map_err(|_| "LW_ACCESS_RUNTIME_REVOKED")?;
+    action: contracts::object_authorization::ObjectAction,
+}
+
+impl RuntimeAdmission {
+    async fn supervise(&self, state: &AppState) -> &'static str {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let recheck = async {
+                let session = super::runtime::authenticated_capability(
+                    state,
+                    &self.uri,
+                    &self.headers,
+                    self.endpoint_grant_id,
+                )
+                .await?;
+                authorize_runtime(state, session.actor_id, self.endpoint_grant_id, self.action)
+                    .await
+            };
+            match tokio::time::timeout(Duration::from_secs(2), recheck).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => return error.diagnostic,
+                Err(_) => return "LW_ACCESS_RUNTIME_UNAVAILABLE",
             }
         }
+    }
+}
+
+async fn bridge_runtime_websocket(
+    browser: WebSocket,
+    upstream: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> Result<(), &'static str> {
+    let (mut browser_tx, mut browser_rx) = browser.split();
+    let (mut upstream_tx, mut upstream_rx) = upstream.split();
+    let to_upstream = async {
+        while let Some(message) = browser_rx.next().await {
+            let message = match message.map_err(|_| "LW_ACCESS_RUNTIME_UNAVAILABLE")? {
+                BrowserMessage::Text(text) => UpstreamMessage::Text(text.to_string().into()),
+                BrowserMessage::Binary(bytes) => UpstreamMessage::Binary(bytes),
+                BrowserMessage::Close(_) => return Ok(()),
+                BrowserMessage::Ping(bytes) => UpstreamMessage::Ping(bytes),
+                BrowserMessage::Pong(bytes) => UpstreamMessage::Pong(bytes),
+            };
+            upstream_tx
+                .send(message)
+                .await
+                .map_err(|_| "LW_ACCESS_RUNTIME_UNAVAILABLE")?;
+        }
+        Ok(())
+    };
+    let to_browser = async {
+        while let Some(message) = upstream_rx.next().await {
+            let message = match message.map_err(|_| "LW_ACCESS_RUNTIME_UNAVAILABLE")? {
+                UpstreamMessage::Text(text) => BrowserMessage::Text(text.to_string().into()),
+                UpstreamMessage::Binary(bytes) => BrowserMessage::Binary(bytes),
+                UpstreamMessage::Ping(bytes) => BrowserMessage::Ping(bytes),
+                UpstreamMessage::Pong(bytes) => BrowserMessage::Pong(bytes),
+                UpstreamMessage::Close(_) => return Ok(()),
+                UpstreamMessage::Frame(_) => continue,
+            };
+            browser_tx
+                .send(message)
+                .await
+                .map_err(|_| "LW_ACCESS_RUNTIME_UNAVAILABLE")?;
+        }
+        Ok(())
+    };
+    tokio::select! {
+        result = to_upstream => result,
+        result = to_browser => result,
     }
 }
 
@@ -2492,7 +2573,8 @@ fn copy_request_headers(
 fn copy_runtime_request_headers(
     mut request: reqwest::RequestBuilder,
     headers: &HeaderMap,
-) -> reqwest::RequestBuilder {
+    session_cookie_name: &str,
+) -> Result<reqwest::RequestBuilder, ApiError> {
     for name in [
         header::ACCEPT.as_str(),
         header::ACCEPT_ENCODING.as_str(),
@@ -2511,7 +2593,46 @@ fn copy_runtime_request_headers(
             request = request.header(name, value);
         }
     }
-    request
+    if let Some(cookie) = runtime_app_cookies(headers, session_cookie_name)? {
+        request = request.header(header::COOKIE, cookie);
+    }
+    Ok(request)
+}
+
+fn runtime_app_cookies(
+    headers: &HeaderMap,
+    session_cookie_name: &str,
+) -> Result<Option<HeaderValue>, ApiError> {
+    let mut cookies = String::new();
+    for header in headers.get_all(header::COOKIE) {
+        let value = header
+            .to_str()
+            .map_err(|_| ApiError::bad_request("LW_ACCESS_RUNTIME_PATH_REJECTED"))?;
+        for part in value.split(';').map(str::trim) {
+            let Some((name, _)) = part.split_once('=') else {
+                continue;
+            };
+            if name == session_cookie_name
+                || name.starts_with("__Host-labweaver_")
+                || name.starts_with("__Secure-labweaver_")
+                || name == "labweaver_console_handoff"
+            {
+                continue;
+            }
+            if !cookies.is_empty() {
+                cookies.push_str("; ");
+            }
+            cookies.push_str(part);
+        }
+    }
+    if cookies.is_empty() {
+        Ok(None)
+    } else {
+        cookies
+            .parse()
+            .map(Some)
+            .map_err(|_| ApiError::bad_request("LW_ACCESS_RUNTIME_PATH_REJECTED"))
+    }
 }
 
 pub(super) fn parse_runtime_path(
@@ -2547,21 +2668,45 @@ fn rewrite_runtime_location(
         .map_err(|_| ApiError::unavailable("LW_ACCESS_RUNTIME_RESPONSE_INVALID"))
 }
 
-fn strip_cookie_domain(cookie: &reqwest::header::HeaderValue) -> Result<HeaderValue, ApiError> {
+fn rewrite_runtime_cookie(
+    cookie: &reqwest::header::HeaderValue,
+    endpoint_grant_id: contracts::EndpointGrantId,
+    runtime_path: &str,
+) -> Result<HeaderValue, ApiError> {
     let value = cookie
         .to_str()
         .map_err(|_| ApiError::unavailable("LW_ACCESS_RUNTIME_RESPONSE_INVALID"))?;
-    let sanitized = value
-        .split(';')
-        .filter(|part| {
-            !part
-                .trim_start()
-                .to_ascii_lowercase()
-                .starts_with("domain=")
-        })
-        .map(str::trim)
-        .collect::<Vec<_>>()
-        .join("; ");
+    let mut parts = value.split(';');
+    let pair = parts
+        .next()
+        .ok_or_else(|| ApiError::unavailable("LW_ACCESS_RUNTIME_RESPONSE_INVALID"))?
+        .trim();
+    let mut sanitized = pair.to_owned();
+    for part in parts {
+        let (name, attribute) = part
+            .split_once('=')
+            .map_or((part, ""), |(name, value)| (name, value.trim()));
+        // Cookie user agents trim both ends of attribute names, including tabs.
+        // Inspect every attribute, not just the first Domain occurrence.
+        if name.trim().eq_ignore_ascii_case("domain") {
+            continue;
+        }
+        sanitized.push_str("; ");
+        if name.trim().eq_ignore_ascii_case("path") && !pair.starts_with("__Host-") {
+            let path = if attribute.starts_with('/') {
+                attribute
+            } else {
+                runtime_path.rsplit_once('/').map_or("/", |(directory, _)| {
+                    if directory.is_empty() { "/" } else { directory }
+                })
+            };
+            use std::fmt::Write as _;
+            write!(sanitized, "Path=/connect/{endpoint_grant_id}{path}")
+                .map_err(|_| ApiError::unavailable("LW_ACCESS_RUNTIME_RESPONSE_INVALID"))?;
+        } else {
+            sanitized.push_str(part.trim());
+        }
+    }
     sanitized
         .parse()
         .map_err(|_| ApiError::unavailable("LW_ACCESS_RUNTIME_RESPONSE_INVALID"))
@@ -2865,8 +3010,8 @@ mod tests {
 
     use super::{
         ApiError, GatewayAuthority, authorize_resource_actor, forward_service_response,
-        parse_runtime_path, strip_cookie_domain, valid_control_path, valid_evaluation_path,
-        valid_resource_path,
+        parse_runtime_path, rewrite_runtime_cookie, runtime_app_cookies, valid_control_path,
+        valid_evaluation_path, valid_resource_path,
     };
 
     fn timestamp(value: &str) -> UtcTimestamp {
@@ -3187,14 +3332,136 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn runtime_client_uses_idle_not_total_response_timeout()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use futures_util::StreamExt as _;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let router = axum::Router::new()
+            .route(
+                "/active",
+                axum::routing::get(|| async {
+                    let chunks = futures_util::stream::unfold(0_u8, |index| async move {
+                        if index == 20 {
+                            return None;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                        Some((
+                            Ok::<_, std::io::Error>(axum::body::Bytes::from_static(
+                                b"data: alive\n\n",
+                            )),
+                            index + 1,
+                        ))
+                    });
+                    axum::body::Body::from_stream(chunks)
+                }),
+            )
+            .route(
+                "/idle",
+                axum::routing::get(|| async {
+                    let first = futures_util::stream::once(async {
+                        Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"first"))
+                    });
+                    axum::body::Body::from_stream(first.chain(futures_util::stream::pending()))
+                }),
+            );
+        let _server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            axum::serve(listener, router).await
+        }));
+        let config = auth::ControlGatewayFileConfig {
+            base_uri: format!("http://{address}"),
+            ca_certificate_locator: String::new(),
+            allowed_server_sans: Vec::new(),
+            timeout_milliseconds: 150,
+            max_request_bytes: 1024,
+            max_response_bytes: 1024,
+        };
+        let client = super::RuntimeGatewayProxy::client_builder(&config)
+            .no_proxy()
+            .build()?;
+        let start = std::time::Instant::now();
+        let response = client
+            .get(format!("http://{address}/active"))
+            .send()
+            .await?
+            .bytes()
+            .await?;
+        assert_eq!(response.len(), 20 * b"data: alive\n\n".len());
+        assert!(start.elapsed() > std::time::Duration::from_millis(config.timeout_milliseconds));
+        let mut idle = client
+            .get(format!("http://{address}/idle"))
+            .send()
+            .await?
+            .bytes_stream();
+        assert_eq!(
+            idle.next()
+                .await
+                .ok_or("idle stream ended before first chunk")??,
+            "first"
+        );
+        let error = idle
+            .next()
+            .await
+            .ok_or("idle stream ended without enforcing idle timeout")?;
+        assert!(error.is_err(), "inactive upstream did not time out");
+        Ok(())
+    }
+
     #[test]
-    fn runtime_cookie_domain_is_removed_without_changing_host_scope() -> Result<(), ApiError> {
-        let cookie =
-            HeaderValue::from_static("session=abc; Domain=.runtime.example; Path=/; Secure");
-        let sanitized = strip_cookie_domain(&cookie)?;
-        assert_eq!(sanitized, "session=abc; Path=/; Secure");
-        let host_only = HeaderValue::from_static("session=abc; Path=/connect/g; Secure");
-        assert_eq!(strip_cookie_domain(&host_only)?, host_only);
+    fn runtime_cookie_domain_is_removed_without_changing_host_scope()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use reqwest::cookie::{CookieStore, Jar};
+        let grant = contracts::EndpointGrantId::new();
+        let runtime = reqwest::Url::parse("https://g.runtime.example.test/")?;
+        let portal = reqwest::Url::parse("https://portal.example.test/")?;
+        for attributes in [
+            "Domain=.example.test",
+            "Domain = .example.test",
+            "dOmAiN\t=\t.example.test",
+            "Domain=.invalid.test; Domain \t= .example.test",
+            "Domain \t= .example.test; Domain=.example.test",
+        ] {
+            let cookie: HeaderValue =
+                format!("app=1; {attributes}; Path=/; Secure; SameSite=None").parse()?;
+            let sanitized = rewrite_runtime_cookie(&cookie, grant, "/")?;
+            let jar = Jar::default();
+            jar.add_cookie_str(sanitized.to_str()?, &runtime);
+            let app =
+                reqwest::Url::parse(&format!("https://g.runtime.example.test/connect/{grant}/"))?;
+            assert!(
+                jar.cookies(&app).is_some(),
+                "application cookie must remain usable"
+            );
+            assert!(
+                jar.cookies(&portal).is_none(),
+                "runtime cookie leaked onto platform origin: {attributes}"
+            );
+        }
+        let host_only = HeaderValue::from_static("__Host-app=abc; Path=/; Secure; SameSite=Strict");
+        assert_eq!(rewrite_runtime_cookie(&host_only, grant, "/")?, host_only);
+        let path_cookie = HeaderValue::from_static("app=abc; Path=/api; Secure; SameSite=Lax");
+        assert_eq!(
+            rewrite_runtime_cookie(&path_cookie, grant, "/")?,
+            format!("app=abc; Path=/connect/{grant}/api; Secure; SameSite=Lax")
+        );
+        let mut headers = axum::http::HeaderMap::new();
+        headers.append(
+            axum::http::header::COOKIE,
+            HeaderValue::from_static(
+                "app=1; __Host-labweaver_session=secret; __Secure-labweaver_runtime=capability",
+            ),
+        );
+        headers.append(
+            axum::http::header::COOKIE,
+            HeaderValue::from_static(
+                "__Host-labweaver_runtime_binding=binding; custom_session=secret; __Host-app=abc",
+            ),
+        );
+        assert_eq!(
+            runtime_app_cookies(&headers, "custom_session")?,
+            Some(HeaderValue::from_static("app=1; __Host-app=abc"))
+        );
         Ok(())
     }
     #[test]
