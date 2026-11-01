@@ -197,29 +197,6 @@ class DeploymentModeTests(unittest.TestCase):
                      "platform_clean_redeploy_owned_namespaces": ["labweaver-system"],
                      "platform_clean_redeploy_persistent_volumes": {"resources": [foreign_pv]}}
         self.assertNotEqual(run_assertion(check, variables).returncode, 0)
-        inventory_check = named(source, "Reject namespaces containing unowned resources")
-        inventory_program = inventory_check["ansible.builtin.command"]["argv"][-1]
-        for object_installation, accepted in (("foreign", False), (INSTALLATION, True)):
-            candidate = sample_object(release="labweaver", namespace="labweaver-system",
-                                      installation=object_installation, managed="outside")
-            checked = subprocess.run(
-                ["jq", "-e", "--arg", "installation", INSTALLATION,
-                 "--arg", "scope", "labweaver-system", "--argjson", "releases", '["labweaver"]', inventory_program],
-                input=json.dumps({"items": [candidate]}), capture_output=True, text=True, check=False,
-            )
-            self.assertEqual(checked.returncode == 0, accepted, checked.stderr)
-        owner = sample_object(release="labweaver", namespace="labweaver-system",
-                              installation=INSTALLATION, managed="ansible")
-        owner["metadata"]["uid"] = "owned-uid"
-        child = {"kind": "Pod", "metadata": {"name": "controller-child", "ownerReferences": [{"uid": "owned-uid"}]}}
-        for parent_uid, accepted in (("owned-uid", True), ("foreign-uid", False)):
-            child["metadata"]["ownerReferences"][0]["uid"] = parent_uid
-            checked = subprocess.run(
-                ["jq", "-e", "--arg", "installation", INSTALLATION,
-                 "--arg", "scope", "labweaver-system", "--argjson", "releases", '["labweaver"]', inventory_program],
-                input=json.dumps({"items": [owner, child]}), capture_output=True, text=True, check=False,
-            )
-            self.assertEqual(checked.returncode == 0, accepted, checked.stderr)
 
     def test_resource_probe_registers_and_rejects_healthy_foreign_and_read_errors(self) -> None:
         source = tasks("deploy/ansible/roles/resource_application/tasks/main.yml")
@@ -288,14 +265,6 @@ class DeploymentModeTests(unittest.TestCase):
         namespace_read = named(source, "Read existing Harbor namespace")
         self.assertIn("not search", namespace_read["failed_when"])
         self.assertIn("not found", namespace_read["failed_when"])
-
-    def test_wipe_uses_uid_preconditions_for_pv_and_namespace(self) -> None:
-        source = tasks("deploy/ansible/playbooks/94-platform-clean-redeploy.yml")[-1]["tasks"]
-        pv = named(source, "Delete only installation-owned persistent volumes")["kubernetes.core.k8s"]
-        namespace = named(source, "Delete only installation-owned namespaces")["kubernetes.core.k8s"]
-        self.assertEqual(pv["delete_options"]["preconditions"]["uid"], "{{ item.metadata.uid }}")
-        self.assertEqual(namespace["delete_options"]["preconditions"]["uid"], "{{ item.metadata.uid }}")
-
 
     def test_wipe_runs_full_preflight_before_destructive_playbook(self) -> None:
         source = (ROOT / "xtask/src/main.rs").read_text()

@@ -161,106 +161,14 @@
       loop: "{{ platform_clean_redeploy_release_metadata.results }}"
       changed_when: false
 
-    - name: Verify namespace resources before namespace deletion
-      ansible.builtin.command:
-        argv:
-          - "{{ platform_clean_redeploy_kubectl }}"
-          - --kubeconfig
-          - "{{ platform_clean_redeploy_kubeconfig }}"
-          - --namespace
-          - "{{ item }}"
-          - get
-          - all,configmap,secret,serviceaccount,role,rolebinding,pvc,networkpolicy
-          - --output
-          - json
-      loop: "{{ platform_clean_redeploy_owned_namespaces }}"
-      register: platform_clean_redeploy_object_inventory
-      changed_when: false
-      no_log: true
-
-    - name: Reject namespaces containing unowned resources
-      ansible.builtin.command:
-        argv:
-          - /usr/bin/jq
-          - --exit-status
-          - --arg
-          - installation
-          - "{{ labweaver_installation_id }}"
-          - --arg
-          - scope
-          - "{{ item.item }}"
-          - --argjson
-          - releases
-          - "{{ (platform_clean_redeploy_release_metadata.results | map(attribute='item.name') | list) | to_json }}"
-          - >-
-            .items as $all |
-            def owned($object):
-              (($object.metadata.annotations["labweaver.io/installation-id"] // "") == $installation)
-              or (
-                (($object.metadata.annotations["meta.helm.sh/release-name"] // "") as $release |
-                  $releases | index($release)) != null and
-                ($object.metadata.annotations["meta.helm.sh/release-namespace"] // "") == $scope and
-                ($object.metadata.labels["app.kubernetes.io/managed-by"] // "") == "Helm"
-              )
-              or any($object.metadata.ownerReferences[]?.uid;
-                . as $uid | any($all[]; $uid != null and .metadata.uid == $uid and owned(.)));
-            [$all[] | select(.kind != "ServiceAccount" or .metadata.name != "default") |
-              select(owned(.) | not)] | length == 0
-        stdin: "{{ item.stdout }}"
-      loop: "{{ platform_clean_redeploy_object_inventory.results }}"
-      changed_when: false
-      no_log: true
-
-    - name: Uninstall only proven Helm releases
-      ansible.builtin.command:
-        argv:
-          - "{{ platform_clean_redeploy_helm }}"
-          - --kubeconfig
-          - "{{ platform_clean_redeploy_kubeconfig }}"
-          - uninstall
-          - "{{ item.item.name }}"
-          - --namespace
-          - labweaver-system
-          - --wait
-          - "--timeout={{ platform_clean_redeploy_rollout_timeout }}"
-      loop: "{{ platform_clean_redeploy_release_metadata.results }}"
-      changed_when: true
-
-    - name: Delete only installation-owned persistent volumes
-      kubernetes.core.k8s:
+    - name: Delete only the reviewed installation scope with discovered ownership and UID preconditions
+      labweaver_owned_scope_wipe:
+        kubectl: "{{ platform_clean_redeploy_kubectl }}"
         kubeconfig: "{{ platform_clean_redeploy_kubeconfig }}"
-        api_version: v1
-        kind: PersistentVolume
-        name: "{{ item.metadata.name }}"
-        state: absent
-        delete_options:
-          preconditions:
-            uid: "{{ item.metadata.uid }}"
-        wait: true
+        installation_id: "{{ labweaver_installation_id }}"
+        namespaces: "{{ platform_clean_redeploy_owned_namespace_objects }}"
         wait_timeout: 300
-      loop: >-
-        {{ platform_clean_redeploy_persistent_volumes.resources
-           | selectattr('spec.claimRef.namespace', 'defined')
-           | selectattr('spec.claimRef.namespace', 'in', platform_clean_redeploy_owned_namespaces)
-           | list }}
-      loop_control:
-        label: "{{ item.metadata.name }}"
-
-    - name: Delete only installation-owned namespaces
-      kubernetes.core.k8s:
-        kubeconfig: "{{ platform_clean_redeploy_kubeconfig }}"
-        api_version: v1
-        kind: Namespace
-        name: "{{ item.metadata.name }}"
-        state: absent
-        delete_options:
-          preconditions:
-            uid: "{{ item.metadata.uid }}"
-        wait: true
-        wait_timeout: 300
-      loop: "{{ platform_clean_redeploy_owned_namespace_objects }}"
-      loop_control:
-        label: "{{ item.metadata.name }}"
+      register: platform_clean_redeploy_wipe
 
     - name: Read remaining namespaces
       kubernetes.core.k8s_info:
