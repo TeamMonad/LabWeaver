@@ -63,6 +63,7 @@ ENVIRONMENT_EXECUTOR_SHARED = (
 RESOURCE_RESERVED = {
     "resource_application_namespace",
     "resource_application_release_name",
+    "resource_application_installation_id",
     "resource_application_configuration_bundle",
     "resource_application_configuration_manifest",
     "resource_application_values_file",
@@ -76,6 +77,7 @@ RESOURCE_RESERVED = {
 RESERVED_VARIABLES = {
     "platform_application_namespace",
     "platform_application_release_name",
+    "platform_application_installation_id",
     "platform_application_configuration_bundle",
     "platform_application_configuration_manifest",
     "platform_application_values_files",
@@ -910,7 +912,7 @@ def _resource_model(
         for v in target.values()
     ):
         raise BundleError("LW_BUNDLE_TARGET_INVALID")
-    if target == model["target"]:
+    if all(target[key] == model["target"][key] for key in ("namespace", "releaseName")):
         raise BundleError("LW_BUNDLE_PROFILE_OWNERSHIP_CONFLICT")
     if not isinstance(profile["natsIssuer"], str) or not re.fullmatch(
         r"A[A-Z2-7]{55}", profile["natsIssuer"]
@@ -1072,10 +1074,22 @@ def load_bundle(
         or not 1 <= model["revision"] <= 2**63 - 1
     ):
         raise BundleError("LW_BUNDLE_VERSION_INVALID")
-    target = _exact(model["target"], {"namespace", "releaseName"})
+    raw_target = model["target"]
+    if not isinstance(raw_target, dict):
+        raise BundleError("LW_BUNDLE_TARGET_INVALID")
+    target = _exact(
+        raw_target,
+        {"namespace", "releaseName"} | ({"installationId"} if "installationId" in raw_target else set()),
+    )
     if any(
-        not isinstance(v, str) or not objects.DNS_LABEL.fullmatch(v)
-        for v in target.values()
+        not isinstance(target[key], str) or not objects.DNS_LABEL.fullmatch(target[key])
+        for key in ("namespace", "releaseName")
+    ) or (
+        "installationId" in target
+        and (
+            not isinstance(target["installationId"], str)
+            or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", target["installationId"])
+        )
     ):
         raise BundleError("LW_BUNDLE_TARGET_INVALID")
     versions = _exact(model["versions"], {"lockFile", "packageFile"})
@@ -1228,6 +1242,16 @@ def _resolve_values(value: Any, root: Path, files: dict[str, bytes]) -> Any:
     return value
 
 
+def _stamp_objects(payload: bytes, installation_id: str | None) -> bytes:
+    """Bind derived Kubernetes objects to one installation, preserving source data."""
+    if not installation_id:
+        return payload
+    documents = list(yaml.safe_load_all(payload))
+    for document in documents:
+        document["metadata"].setdefault("annotations", {})["labweaver.io/installation-id"] = installation_id
+    return yaml.safe_dump_all(documents, sort_keys=True).encode()
+
+
 def derive_bundle(
     root: Path,
     output: Path,
@@ -1268,7 +1292,7 @@ def derive_bundle(
     if notification["smtp"]:
         for field, key in (("passwordFile", "smtp-password"), ("caFile", "smtp-ca.pem")):
             _write(inputs / "secrets/control-service-secrets" / key, files[model["notifications"]["smtp"][field]])
-    payload = objects.render_bundle(manifest_output, inputs)
+    payload = _stamp_objects(objects.render_bundle(manifest_output, inputs), model["target"].get("installationId"))
     object_output = output / "application.yaml"
     _write(object_output, payload)
     # The object inputs are derived scratch, never a second editable configuration.
@@ -1316,7 +1340,7 @@ def derive_bundle(
             "desiredRevision": model["revision"],
             "configurationSha256": version["configurationSha256"],
             "encryptedBundleSha256": _authenticated_ciphertext_sha256,
-            "installation": model["target"],
+            "installation": {key: model["target"][key] for key in ("namespace", "releaseName")},
             "expectedControlReplicas": application["helmValues"]
             .get("workloads", {})
             .get("control-service", {})
@@ -1345,6 +1369,7 @@ def derive_bundle(
         {
             "platform_application_namespace": model["target"]["namespace"],
             "platform_application_release_name": model["target"]["releaseName"],
+            "platform_application_installation_id": model["target"].get("installationId", ""),
             "platform_application_versions_lock_file": str(
                 root / model["versions"]["lockFile"]
             ),
@@ -1368,6 +1393,7 @@ def derive_bundle(
         inventory = _resolve_values(source_inventory, root, files)
         _derive_controller_locators(source_inventory, inventory, files, output)
         variables = inventory["all"].setdefault("vars", {})
+        variables["labweaver_installation_id"] = model["target"].get("installationId", "")
         identity_ha = _identity_ha_configuration(model, files)
         if identity_ha is not None:
             variables["identity_foundation_ha"] = identity_ha
@@ -1430,7 +1456,7 @@ def _derive_resource(
                 if _ha_configuration(model, files) is not None and group == "secrets" and key == "database-url":
                     content = ha_foundation.database_url(content)
                 _write(inputs / directory / name / key, content)
-    payload = resource_objects.render(manifest_output, inputs, profile["natsIssuer"])
+    payload = _stamp_objects(resource_objects.render(manifest_output, inputs, profile["natsIssuer"]), model["target"].get("installationId"))
     bundle_output = output / "application.yaml"
     _write(bundle_output, payload)
     shutil.rmtree(inputs)
@@ -1471,6 +1497,7 @@ def _derive_resource(
         {
             "resource_application_namespace": profile["target"]["namespace"],
             "resource_application_release_name": profile["target"]["releaseName"],
+            "resource_application_installation_id": model["target"].get("installationId", ""),
             "resource_application_versions_lock_file": str(
                 root / model["versions"]["lockFile"]
             ),
@@ -1794,6 +1821,15 @@ def main() -> int:
     seal.add_argument("--bundle", type=Path, required=True)
     seal.add_argument("--recipient", action="append", required=True)
     seal.add_argument("--output", type=Path, required=True)
+    deploy = subcommands.add_parser("deploy")
+    deploy.add_argument("--archive", type=Path, required=True)
+    deploy.add_argument("--identity", type=Path, required=True)
+    deploy.add_argument("--env", required=True)
+    deploy.add_argument("--mode", choices=("install", "adopt", "upgrade", "wipe"), required=True)
+    deploy.add_argument("--stage", choices=("all", "preflight", "infrastructure", "identity", "storage", "services", "route"), default="all")
+    deploy.add_argument("--target")
+    deploy.add_argument("--scope")
+    deploy.add_argument("--yes", action="store_true")
     use = subcommands.add_parser("exec")
     use.add_argument("--archive", type=Path, required=True)
     use.add_argument("--identity", type=Path, required=True)
@@ -1848,7 +1884,23 @@ def main() -> int:
             with opened_bundle(
                 arguments.archive, arguments.identity, arguments.runtime
             ) as (root, rendered, metadata):
-                command = arguments.command
+                command = []
+                if arguments.operation == "deploy":
+                    if not arguments.yes:
+                        raise BundleError("LW_BUNDLE_DEPLOY_CONFIRMATION_REQUIRED")
+                    if arguments.mode == "wipe" and (not arguments.target or not arguments.scope):
+                        raise BundleError("LW_BUNDLE_WIPE_TARGET_SCOPE_REQUIRED")
+                    if arguments.mode != "wipe" and (arguments.target or arguments.scope):
+                        raise BundleError("LW_BUNDLE_WIPE_TARGET_SCOPE_UNEXPECTED")
+                    command = [
+                        "cargo", "xtask", "deploy", "--env", arguments.env,
+                        "--infra", "--yes", "--mode", arguments.mode,
+                        "--stage", arguments.stage,
+                    ]
+                    if arguments.mode == "wipe":
+                        command.extend(("--target", arguments.target, "--scope", arguments.scope))
+                else:
+                    command = arguments.command
                 if command[:1] == ["--"]:
                     command = command[1:]
                 if command:
@@ -1897,6 +1949,16 @@ def main() -> int:
                             rendered / "resource/ansible-vars.yaml"
                         )
                     model, _ = load_bundle(root)
+                    if arguments.operation == "deploy":
+                        if "infrastructure" not in model or not model["target"].get("installationId"):
+                            raise BundleError("LW_BUNDLE_INSTALLATION_ID_REQUIRED")
+                        environment["LW_BUNDLE_INSTALLATION_ID"] = model["target"]["installationId"]
+                        if arguments.mode != "wipe":
+                            command.extend(("--package-manifest", str(root / model["versions"]["packageFile"])))
+                            resource_profile = model.get("resource")
+                            if resource_profile is None:
+                                raise BundleError("LW_BUNDLE_RESOURCE_PROFILE_REQUIRED")
+                            command.extend(("--resource-package-manifest", str(root / resource_profile["packageFile"])))
                     if "infrastructure" in model:
                         infrastructure = model["infrastructure"]
                         environment["ANSIBLE_CONFIG"] = str(

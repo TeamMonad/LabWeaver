@@ -10,6 +10,29 @@
       {{ lookup('ansible.builtin.file', labweaver_versions_lock_file | default(playbook_dir ~ '/../../versions.lock.yml'))
          | from_yaml }}
 
+- name: Require verified sandbox installation identity
+  ansible.builtin.assert:
+    that:
+      - labweaver_installation_id | default('') is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - labweaver_installation_id == lookup('ansible.builtin.env', 'LW_BUNDLE_INSTALLATION_ID')
+    fail_msg: SANDBOX_RUNTIME_INSTALLATION_ID_REQUIRED
+
+- name: Inspect the sandbox RuntimeClass before any runtime mutation
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ sandbox_runtime_kubeconfig }}"
+    api_version: node.k8s.io/v1
+    kind: RuntimeClass
+    name: "{{ sandbox_runtime_name }}"
+  delegate_to: "{{ groups['control_plane'][0] }}"
+  register: sandbox_runtime_existing_runtimeclass
+
+- name: Refuse a foreign sandbox RuntimeClass
+  ansible.builtin.assert:
+    that:
+      - sandbox_runtime_existing_runtimeclass.resources | length == 0 or
+        sandbox_runtime_existing_runtimeclass.resources[0].metadata.annotations['labweaver.io/installation-id'] | default('') == labweaver_installation_id
+    fail_msg: SANDBOX_RUNTIME_OBJECT_OWNERSHIP_CONFLICT
+
 - name: Require the sandbox runtime inputs
   ansible.builtin.assert:
     that:
@@ -186,11 +209,16 @@
           - sandbox_runtime_lock.containerd.runc_version | regex_replace('^v', '') in sandbox_runtime_runc_version.stdout
         fail_msg: SANDBOX_RUNTIME_RUNC_VERSION_MISMATCH
 
+    - name: Inspect whether a gVisor release stamp exists
+      ansible.builtin.stat:
+        path: "{{ sandbox_runtime_install_dir }}/.gvisor-version"
+      register: sandbox_runtime_stamp_stat
+
     - name: Read the installed gVisor release stamp
       ansible.builtin.slurp:
         src: "{{ sandbox_runtime_install_dir }}/.gvisor-version"
       register: sandbox_runtime_stamp
-      failed_when: false
+      when: sandbox_runtime_stamp_stat.stat.exists
 
     - name: Inspect the installed gVisor runtime members
       ansible.builtin.stat:
@@ -201,8 +229,8 @@
     - name: Decide whether the locked gVisor release must be installed
       ansible.builtin.set_fact:
         sandbox_runtime_needs_install: >-
-          {{ (sandbox_runtime_stamp.content | default('') | b64decode | trim)
-             != sandbox_runtime_lock.gvisor.version
+          {{ not sandbox_runtime_stamp_stat.stat.exists
+             or (sandbox_runtime_stamp.content | b64decode | trim) != sandbox_runtime_lock.gvisor.version
              or sandbox_runtime_installed.results
                 | map(attribute='stat.exists') | select('equalto', false) | list | length > 0 }}
 
@@ -402,15 +430,22 @@
         - kubelet
         - "{{ sandbox_runtime_superseded_service }}"
       changed_when: false
-      failed_when: false
+      failed_when: >-
+        (item == sandbox_runtime_superseded_service and
+         (sandbox_runtime_service_states.rc != 3 or sandbox_runtime_service_states.stdout | trim != 'inactive')) or
+        (item != sandbox_runtime_superseded_service and
+         (sandbox_runtime_service_states.rc != 0 or sandbox_runtime_service_states.stdout | trim != 'active'))
       register: sandbox_runtime_service_states
 
     - name: Require the container runtime and kubelet to be the active runtimes
       ansible.builtin.assert:
         that:
+          - sandbox_runtime_service_states.results[0].rc == 0
+          - sandbox_runtime_service_states.results[1].rc == 0
+          - sandbox_runtime_service_states.results[2].rc == 3
           - sandbox_runtime_service_states.results[0].stdout | trim == 'active'
           - sandbox_runtime_service_states.results[1].stdout | trim == 'active'
-          - sandbox_runtime_service_states.results[2].stdout | trim != 'active'
+          - sandbox_runtime_service_states.results[2].stdout | trim == 'inactive'
         fail_msg: SANDBOX_RUNTIME_SERVICE_STATE_INVALID
 
     - name: Read back the kubelet container endpoint and process bound
@@ -439,6 +474,8 @@
           kind: RuntimeClass
           metadata:
             name: "{{ sandbox_runtime_name }}"
+            annotations:
+              labweaver.io/installation-id: "{{ labweaver_installation_id }}"
             labels:
               app.kubernetes.io/part-of: labweaver-infrastructure
           handler: "{{ sandbox_runtime_name }}"

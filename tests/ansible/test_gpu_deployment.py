@@ -1,5 +1,6 @@
 """Rendered checks for the opt-in GPU deployment roles."""
 
+import json
 from pathlib import Path
 import unittest
 
@@ -12,6 +13,9 @@ try:
 except (ImportError, ModuleNotFoundError):
     DataLoader = None
     Templar = None
+
+
+from test_deployment_install_modes import INSTALLATION
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,6 +34,7 @@ def render_file(path: Path, **values):
         loader=FileSystemLoader(str(path.parent)),
         undefined=StrictUndefined,
     )
+    environment.filters['quote'] = json.dumps
     return environment.get_template(path.name).render(**values)
 
 
@@ -72,6 +77,7 @@ class GpuDeploymentTests(unittest.TestCase):
             / "deploy/ansible/roles/gpu_device_plugin/templates/device-plugin-daemonset.yml.j2",
             gpu_device_plugin_mode="exclusive",
             gpu_device_plugin_namespace="kube-system",
+            labweaver_installation_id='019fa9d0-0000-7000-8000-000000000142',
             gpu_device_plugin_node_label="labweaver.io/gpu-mode",
             gpu_device_plugin_config_name="nvidia-gpu-device-plugin-exclusive-config",
             gpu_device_plugin_image=defaults["gpu_device_plugin_image"],
@@ -120,41 +126,31 @@ class GpuDeploymentTests(unittest.TestCase):
         self.assertNotIn("readOnly", mounts["cdi"])
         self.assertNotIn("privileged", container["securityContext"])
 
-        cleanup = task_named(tasks, "Remove stale GPU mode labels owned by this role")
-        cleanup_patch = cleanup["kubernetes.core.k8s_json_patch"]["patch"]
-        read_managed = task_named(tasks, "Read nodes previously labelled by this GPU device-plugin role")
-        self.assertEqual(
-            read_managed["kubernetes.core.k8s_info"]["label_selectors"],
-            ["labweaver.io/gpu-plugin-managed=true"],
+        ownership = load_yaml(ROOT / 'deploy/ansible/roles/gpu_device_plugin/tasks/ownership.yml')
+        cleanup = task_named(tasks, 'Remove stale GPU mode labels owned by this role')
+        node = {'metadata': {'name': 'gpu-worker', 'uid': 'node-uid', 'resourceVersion': '17',
+                            'labels': {'labweaver.io/gpu-mode': 'shared', 'unrelated': 'preserved'},
+                            'annotations': {'labweaver.io/gpu-plugin-installation-id': 'installation'}}}
+        cleanup_patch = render_ansible_value(
+            cleanup['kubernetes.core.k8s_json_patch']['patch'], item=node,
+            gpu_device_plugin_node_label='labweaver.io/gpu-mode', labweaver_installation_id='installation',
         )
-        self.assertEqual(
-            cleanup_patch[1]["path"],
-            "/metadata/labels/labweaver.io~1gpu-plugin-managed",
-        )
-        exclusive = task_named(tasks, "Label nodes selected for exclusive GPU allocation")
-        shared = task_named(tasks, "Label nodes selected for shared GPU allocation")
-        exclusive_labels = render_ansible_value(
-            exclusive["kubernetes.core.k8s"]["definition"]["metadata"]["labels"],
-            gpu_device_plugin_node_label="labweaver.io/gpu-mode",
-        )
-        shared_labels = render_ansible_value(
-            shared["kubernetes.core.k8s"]["definition"]["metadata"]["labels"],
-            gpu_device_plugin_node_label="labweaver.io/gpu-mode",
-        )
-        self.assertEqual(
-            exclusive_labels,
-            {
-                "labweaver.io/gpu-mode": "exclusive",
-                "labweaver.io/gpu-plugin-managed": "true",
-            },
-        )
-        self.assertEqual(
-            shared_labels,
-            {
-                "labweaver.io/gpu-mode": "shared",
-                "labweaver.io/gpu-plugin-managed": "true",
-            },
-        )
+        read_managed = task_named(ownership, 'Read nodes previously labelled by this GPU device-plugin role')
+        self.assertEqual(read_managed['kubernetes.core.k8s_info']['label_selectors'],
+                         ['labweaver.io/gpu-plugin-managed=true'])
+        self.assertEqual([operation['op'] for operation in cleanup_patch[:3]], ['test', 'test', 'test'])
+        self.assertEqual(cleanup_patch[-2]['path'], '/metadata/labels/labweaver.io~1gpu-plugin-managed')
+        self.assertEqual(cleanup_patch[-1]['path'], '/metadata/annotations/labweaver.io~1gpu-plugin-installation-id')
+        for mode in ('exclusive', 'shared'):
+            task = task_named(tasks, f'Label nodes selected for {mode} GPU allocation')
+            patch = render_definition(task['kubernetes.core.k8s_json_patch']['patch'],
+                                      item={'resources': [node]}, gpu_device_plugin_node_label='labweaver.io/gpu-mode',
+                                      labweaver_installation_id='installation')
+            self.assertEqual(patch[0], {'op': 'test', 'path': '/metadata/uid', 'value': 'node-uid'})
+            self.assertEqual(patch[1], {'op': 'test', 'path': '/metadata/resourceVersion', 'value': '17'})
+            self.assertEqual(patch[2]['value'], {'labweaver.io/gpu-mode': mode,
+                                              'labweaver.io/gpu-plugin-managed': 'true', 'unrelated': 'preserved'})
+            self.assertEqual(patch[3]['value']['labweaver.io/gpu-plugin-installation-id'], 'installation')
 
     def test_device_plugin_shared_config_renders_time_slicing(self) -> None:
         tasks = load_yaml(ROOT / "deploy/ansible/roles/gpu_device_plugin/tasks/main.yml")
@@ -186,6 +182,7 @@ class GpuDeploymentTests(unittest.TestCase):
         definition = configure["kubernetes.core.k8s"]["definition"]
         payload = render_definition(
             definition,
+            labweaver_installation_id=INSTALLATION,
             kubevirt_permitted_mediated_devices=[
                 {
                     "mdevNameSelector": "nvidia-195",
@@ -201,6 +198,7 @@ class GpuDeploymentTests(unittest.TestCase):
                 }
             ],
         )
+        self.assertEqual(payload['metadata']['annotations']['labweaver.io/installation-id'], INSTALLATION)
         configuration = payload["spec"]["configuration"]
 
         self.assertEqual(defaults["kubevirt_permitted_mediated_devices"], [])

@@ -1,0 +1,56 @@
+---
+- name: Require an authenticated installation identity for release observations
+  ansible.builtin.assert:
+    that:
+      - labweaver_installation_id | default('') is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - labweaver_installation_id == lookup('ansible.builtin.env', 'LW_BUNDLE_INSTALLATION_ID')
+    fail_msg: INSTALLATION_RELEASE_ID_REQUIRED
+
+- name: List all exact release identities in the inspected namespace
+  ansible.builtin.command:
+    argv:
+      - "{{ installation_boundary_helm }}"
+      - --kubeconfig
+      - "{{ installation_boundary_kubeconfig }}"
+      - list
+      - --all
+      - --namespace
+      - "{{ installation_boundary_release_namespace }}"
+      - --output
+      - json
+  register: installation_boundary_namespace_release_list
+  changed_when: false
+  check_mode: false
+
+- name: Read every sibling release installation independently
+  ansible.builtin.command:
+    argv:
+      - "{{ installation_boundary_helm }}"
+      - --kubeconfig
+      - "{{ installation_boundary_kubeconfig }}"
+      - get
+      - metadata
+      - "{{ item.name }}"
+      - --namespace
+      - "{{ installation_boundary_release_namespace }}"
+      - --output
+      - json
+  loop: "{{ installation_boundary_namespace_release_list.stdout | from_json }}"
+  register: installation_boundary_namespace_release_metadata
+  changed_when: false
+  check_mode: false
+
+- name: Reject sibling releases from another installation
+  ansible.builtin.assert:
+    that:
+      - (item.stdout | from_json).name == item.item.name
+      - (item.stdout | from_json).namespace == installation_boundary_release_namespace
+      - (item.stdout | from_json).description == 'labweaver-installation:' ~ labweaver_installation_id
+    fail_msg: INSTALLATION_SIBLING_RELEASE_OWNERSHIP_CONFLICT
+  loop: "{{ installation_boundary_namespace_release_metadata.results }}"
+
+- name: Bind only independently verified sibling release names
+  ansible.builtin.set_fact:
+    installation_boundary_verified_release_names: >-
+      {{ installation_boundary_namespace_release_metadata.results | map(attribute='stdout') |
+         map('from_json') | map(attribute='name') | list }}

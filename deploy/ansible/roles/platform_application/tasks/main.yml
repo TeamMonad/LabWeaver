@@ -13,6 +13,127 @@
   when: platform_application_reviewed_vars is defined
   no_log: true
 
+- name: Require verified platform installation identity before probing targets
+  ansible.builtin.assert:
+    that:
+      - platform_application_installation_id | default('') is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - platform_application_installation_id == lookup('ansible.builtin.env', 'LW_BUNDLE_INSTALLATION_ID')
+    fail_msg: PLATFORM_APPLICATION_INSTALLATION_ID_REQUIRED
+  changed_when: false
+- name: Read the existing application namespace before mutation
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ platform_application_kubeconfig }}"
+    api_version: v1
+    kind: Namespace
+    name: "{{ platform_application_namespace }}"
+  register: platform_application_existing_namespace
+  changed_when: false
+
+- name: Refuse to adopt an unowned application namespace
+  ansible.builtin.assert:
+    that:
+      - platform_application_existing_namespace.resources | length <= 1
+      - platform_application_existing_namespace.resources | length == 0 or
+        (
+          platform_application_existing_namespace.resources[0].metadata.name == platform_application_namespace and
+          platform_application_existing_namespace.resources[0].metadata.annotations['labweaver.io/installation-id']
+          | default('') == platform_application_installation_id
+        )
+    fail_msg: PLATFORM_APPLICATION_NAMESPACE_OWNERSHIP_CONFLICT
+  changed_when: false
+
+- name: Verify sibling release installation identities before probing namespace objects
+  ansible.builtin.include_role:
+    name: installation_boundary
+    tasks_from: releases
+  vars:
+    installation_boundary_helm: "{{ platform_application_helm }}"
+    installation_boundary_kubeconfig: "{{ platform_application_kubeconfig }}"
+    installation_boundary_release_namespace: "{{ platform_application_namespace }}"
+
+- name: Refuse to adopt unowned platform objects
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      {{ platform_application_kubectl }} --kubeconfig {{ platform_application_kubeconfig }}
+      --namespace {{ platform_application_namespace }} get {{ 'all,configmap,secret,serviceaccount,role,rolebinding,' ~
+        'datavolume,persistentvolumeclaim,datasource,networkpolicy,ciliumnetworkpolicy,referencegrant' }}
+      --output json |
+      jq -e '.items as $all | {{ installation_boundary_verified_release_names | to_json }} as $releases |
+        def owned($object; $seen):
+          ((($object.metadata.annotations["meta.helm.sh/release-name"] // "") as $release | $releases | index($release)) != null
+            and ($object.metadata.annotations["meta.helm.sh/release-namespace"] // "") == "{{ platform_application_namespace }}"
+            and ($object.metadata.labels["app.kubernetes.io/managed-by"] // "") == "Helm")
+          or (($object.metadata.annotations["labweaver.io/installation-id"] // "") == "{{ platform_application_installation_id }}"
+            and ($object.metadata.labels["app.kubernetes.io/part-of"] // "") == "labweaver")
+          or any($object.metadata.ownerReferences[]?.uid;
+            . as $uid | $uid != null and ($seen | index($uid)) == null and
+            any($all[]; .metadata.uid == $uid and owned(.; $seen + [$uid])));
+        [$all[] | select(.kind != "ServiceAccount" or .metadata.name != "default") |
+          select(.kind != "ConfigMap" or .metadata.name != "kube-root-ca.crt") |
+          select(.kind != "Secret" or .type != "helm.sh/release.v1" or .metadata.labels.owner != "helm" or
+            ((.metadata.labels.name // "") as $release | $releases | index($release)) == null) |
+          select(owned(.; []) | not)] | length == 0'
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+  register: platform_application_ownership_check
+
+- name: Reject unowned platform objects
+  ansible.builtin.assert:
+    that: platform_application_ownership_check.rc == 0
+    fail_msg: PLATFORM_APPLICATION_OBJECT_OWNERSHIP_CONFLICT
+  changed_when: false
+
+- name: List the exact platform Helm release before mutation
+  ansible.builtin.command:
+    argv:
+      - "{{ platform_application_helm }}"
+      - --kubeconfig
+      - "{{ platform_application_kubeconfig }}"
+      - list
+      - --all
+      - --namespace
+      - "{{ platform_application_namespace }}"
+      - --filter
+      - "^{{ platform_application_release_name }}$"
+      - --output
+      - json
+  register: platform_application_release_list
+  changed_when: false
+
+- name: Read existing platform Helm release metadata
+  ansible.builtin.command:
+    argv:
+      - "{{ platform_application_helm }}"
+      - --kubeconfig
+      - "{{ platform_application_kubeconfig }}"
+      - get
+      - metadata
+      - "{{ platform_application_release_name }}"
+      - --namespace
+      - "{{ platform_application_namespace }}"
+      - --output
+      - json
+  register: platform_application_release_metadata
+  changed_when: false
+  when: platform_application_release_list.stdout | from_json | length == 1
+
+- name: Refuse a foreign platform Helm installation
+  ansible.builtin.assert:
+    that:
+      - platform_application_release_list.stdout | from_json | length <= 1
+      - platform_application_release_list.stdout | from_json | length == 0 or
+        ((platform_application_release_metadata.stdout | from_json).name == platform_application_release_name and
+         (platform_application_release_metadata.stdout | from_json).namespace == platform_application_namespace and
+         (platform_application_release_metadata.stdout | from_json).description == 'labweaver-installation:' ~ platform_application_installation_id)
+    fail_msg: PLATFORM_APPLICATION_RELEASE_OWNERSHIP_CONFLICT
+  changed_when: false
+
+- name: Verify all cross-namespace mutation targets before reconciliation
+  ansible.builtin.include_tasks: ownership.yml
+
 - name: Load the application identities from the selected Bundle
   ansible.builtin.set_fact:
     platform_application_lock: >-
@@ -196,102 +317,6 @@
     fail_msg: PLATFORM_APPLICATION_POSTGRES_FORWARD_INPUT_INVALID
   when: platform_application_postgres_forward_enabled | bool
 
-- name: Install the persistent PostgreSQL port-forward
-  ansible.builtin.template:
-    src: postgres-port-forward.service.j2
-    dest: /etc/systemd/system/{{ platform_application_postgres_forward_service_name }}
-    owner: root
-    group: root
-    mode: "0644"
-  notify: Restart the retained PostgreSQL port-forward
-  when: platform_application_postgres_forward_enabled | bool
-
-- name: Apply the PostgreSQL port-forward before database reconciliation
-  ansible.builtin.meta: flush_handlers
-  when: platform_application_postgres_forward_enabled | bool
-
-- name: Require the retained PostgreSQL port-forward endpoint
-  ansible.builtin.wait_for:
-    host: 127.0.0.1
-    port: "{{ platform_application_postgres_forward_port }}"
-    state: started
-    timeout: 30
-  when: platform_application_postgres_forward_enabled | bool
-
-- name: Validate the NATS port-forward contract
-  ansible.builtin.assert:
-    that:
-      - platform_application_nats_forward_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
-      - platform_application_nats_forward_kubernetes_service is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
-      - platform_application_nats_forward_hostname is match('^[a-z0-9][a-z0-9.-]+$')
-      - platform_application_nats_forward_hostname == 'nats.labweaver-data.svc'
-      - platform_application_nats_forward_address == '127.0.0.1'
-      - platform_application_nats_forward_address is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
-      - platform_application_nats_forward_service_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.service$')
-      - platform_application_nats_forward_port | int > 1024
-      - platform_application_nats_forward_port | int < 65536
-    fail_msg: PLATFORM_APPLICATION_NATS_FORWARD_INPUT_INVALID
-  when: platform_application_nats_forward_enabled | bool
-
-- name: Install the persistent NATS port-forward
-  ansible.builtin.template:
-    src: nats-port-forward.service.j2
-    dest: /etc/systemd/system/{{ platform_application_nats_forward_service_name }}
-    owner: root
-    group: root
-    mode: "0644"
-  notify: Restart the retained NATS port-forward
-  when: platform_application_nats_forward_enabled | bool
-
-- name: Apply the NATS port-forward before JetStream reconciliation
-  ansible.builtin.meta: flush_handlers
-  when: platform_application_nats_forward_enabled | bool
-
-- name: Require the retained NATS port-forward endpoint
-  ansible.builtin.wait_for:
-    host: 127.0.0.1
-    port: "{{ platform_application_nats_forward_port }}"
-    state: started
-    timeout: 30
-  when: platform_application_nats_forward_enabled | bool
-
-- name: Validate the MinIO port-forward contract
-  ansible.builtin.assert:
-    that:
-      - platform_application_minio_forward_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
-      - platform_application_minio_forward_kubernetes_service is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
-      - platform_application_minio_forward_hostname is match('^[a-z0-9][a-z0-9.-]+$')
-      - platform_application_minio_forward_hostname == 'minio.labweaver-data.svc'
-      - platform_application_minio_forward_address == '127.0.0.1'
-      - platform_application_minio_forward_address is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
-      - platform_application_minio_forward_service_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?\.service$')
-      - platform_application_minio_forward_port | int > 1024
-      - platform_application_minio_forward_port | int < 65536
-    fail_msg: PLATFORM_APPLICATION_MINIO_FORWARD_INPUT_INVALID
-  when: platform_application_minio_forward_enabled | bool
-
-- name: Install the persistent MinIO port-forward
-  ansible.builtin.template:
-    src: minio-port-forward.service.j2
-    dest: /etc/systemd/system/{{ platform_application_minio_forward_service_name }}
-    owner: root
-    group: root
-    mode: "0644"
-  notify: Restart the retained MinIO port-forward
-  when: platform_application_minio_forward_enabled | bool
-
-- name: Apply the MinIO port-forward before bucket reconciliation
-  ansible.builtin.meta: flush_handlers
-  when: platform_application_minio_forward_enabled | bool
-
-- name: Require the retained MinIO port-forward endpoint
-  ansible.builtin.wait_for:
-    host: 127.0.0.1
-    port: "{{ platform_application_minio_forward_port }}"
-    state: started
-    timeout: 30
-  when: platform_application_minio_forward_enabled | bool
-
 - name: Validate controller-owned reviewed inputs
   ansible.builtin.stat:
     path: "{{ item }}"
@@ -405,7 +430,6 @@
       - "{{ platform_application_portal_tls_certificate_file }}"
   register: platform_application_portal_certificate_verification
   changed_when: false
-  failed_when: false
   check_mode: false
   delegate_to: localhost
   become: false
@@ -794,6 +818,183 @@
     group: root
     mode: "0700"
 
+- name: Copy reviewed Helm chart
+  ansible.builtin.copy:
+    src: "{{ platform_application_chart_source }}/"
+    dest: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/chart/"
+    owner: root
+    group: root
+    mode: preserve
+
+- name: Copy reviewed private values files
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/{{ item | basename }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ platform_application_values_files }}"
+  no_log: true
+
+- name: Build immutable Helm arguments
+  ansible.builtin.set_fact:
+    platform_application_values_argv: >-
+      {%- set values = [] -%}
+      {%- for values_file in platform_application_values_files -%}
+      {%- set _ = values.append(
+        '--values=' + platform_application_work_root + '/' + platform_application_run_id
+        + '/' + (values_file | basename)) -%}
+      {%- endfor -%}
+      {{ values }}
+    platform_application_image_argv: >-
+      {%- set values = [
+        '--set-string',
+        'imagePullSecrets[0].name=' + platform_application_image_pull_secret_name,
+        '--set-string',
+        'deploymentIdentity.configurationBundleSha256=' + platform_application_configuration_bundle_sha256
+      ] -%}
+      {%- for image in platform_application_package.images -%}
+      {%- set _ = values.extend(['--set-string', 'images.' + (image.component | replace('-', '_')) + '=' + image.reference]) -%}
+      {%- endfor -%}
+      {{ values }}
+    platform_application_route_argv: >-
+      {%- set values = [] -%}
+      {%- if platform_application_portal_route_name | length > 0 -%}
+      {%- set _ = values.extend([
+        '--set', 'portalRoute.enabled=true',
+        '--set-string', 'portalRoute.namespace=' + platform_application_portal_route_namespace,
+        '--set-string', 'portalRoute.name=' + platform_application_portal_route_name,
+        '--set-string', 'portalRoute.hostname=' + platform_application_portal_hostname,
+        '--set-string', 'portalRoute.gatewayName=' + platform_application_portal_gateway_name,
+        '--set-string', 'portalRoute.gatewaySectionName=' + platform_application_portal_gateway_listener_name,
+        '--set-string', 'runtimeRoute.baseHostname=' + platform_application_runtime_base_hostname,
+        '--set-string', 'runtimeRoute.gatewayName=' + platform_application_runtime_gateway_name,
+        '--set-string', 'runtimeRoute.gatewayClassName=' + platform_application_runtime_gateway_class_name,
+        '--set-string', 'runtimeRoute.tlsHostname=' + platform_application_runtime_tls_hostname,
+        '--set-string', 'runtimeRoute.tlsSecretName=' + platform_application_runtime_tls_secret_name
+      ]) -%}
+      {%- endif -%}
+      {%- if platform_application_object_store_route_enabled -%}
+      {%- set _ = values.extend([
+        '--set', 'objectStoreRoute.enabled=true',
+        '--set-string', 'objectStoreRoute.namespace=' + platform_application_data_namespace,
+        '--set-string', 'objectStoreRoute.serviceName=' + platform_application_object_store_service_name,
+        '--set', 'objectStoreRoute.servicePort=' + (platform_application_object_store_service_port | string),
+        '--set-string', 'objectStoreRoute.pathPrefix=/' + platform_application_minio_bucket,
+        '--set-string', 'objectStoreRoute.backendHostname=' + platform_application_object_store_backend_hostname,
+        '--set-file', 'objectStoreRoute.caCertificate=' + platform_application_minio_ca_file,
+        '--set-string', 'workloads.control-service.externalEgress[0].cidr=' + platform_application_object_store_external_cidr,
+        '--set', 'workloads.control-service.externalEgress[0].ports[0]=443'
+      ]) -%}
+      {%- endif -%}
+      {%- if platform_application_ssh_load_balancer_ip | length > 0 -%}
+      {%- set _ = values.extend([
+        '--set', 'sshGatewayService.enabled=true',
+        '--set-string', 'sshGatewayService.loadBalancerIP=' + platform_application_ssh_load_balancer_ip,
+        '--set-string', 'sshGatewayService.sharedIPKey=' + platform_application_ssh_shared_ip_key
+      ]) -%}
+      {%- endif -%}
+      {{ values }}
+
+- name: Verify every final Helm mutation target before Kubernetes reconciliation
+  ansible.builtin.include_tasks: chart-ownership.yml
+
+- name: Install the persistent PostgreSQL port-forward
+  ansible.builtin.template:
+    src: postgres-port-forward.service.j2
+    dest: /etc/systemd/system/{{ platform_application_postgres_forward_service_name }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart the retained PostgreSQL port-forward
+  when: platform_application_postgres_forward_enabled | bool
+
+- name: Apply the PostgreSQL port-forward before database reconciliation
+  ansible.builtin.meta: flush_handlers
+  when: platform_application_postgres_forward_enabled | bool
+
+- name: Require the retained PostgreSQL port-forward endpoint
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ platform_application_postgres_forward_port }}"
+    state: started
+    timeout: 30
+  when: platform_application_postgres_forward_enabled | bool
+
+- name: Validate the NATS port-forward contract
+  ansible.builtin.assert:
+    that:
+      - platform_application_nats_forward_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - platform_application_nats_forward_kubernetes_service is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - platform_application_nats_forward_hostname is match('^[a-z0-9][a-z0-9.-]+$')
+      - platform_application_nats_forward_hostname == 'nats.labweaver-data.svc'
+      - platform_application_nats_forward_address == '127.0.0.1'
+      - platform_application_nats_forward_address is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+      - platform_application_nats_forward_service_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.service$')
+      - platform_application_nats_forward_port | int > 1024
+      - platform_application_nats_forward_port | int < 65536
+    fail_msg: PLATFORM_APPLICATION_NATS_FORWARD_INPUT_INVALID
+  when: platform_application_nats_forward_enabled | bool
+
+- name: Install the persistent NATS port-forward
+  ansible.builtin.template:
+    src: nats-port-forward.service.j2
+    dest: /etc/systemd/system/{{ platform_application_nats_forward_service_name }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart the retained NATS port-forward
+  when: platform_application_nats_forward_enabled | bool
+
+- name: Apply the NATS port-forward before JetStream reconciliation
+  ansible.builtin.meta: flush_handlers
+  when: platform_application_nats_forward_enabled | bool
+
+- name: Require the retained NATS port-forward endpoint
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ platform_application_nats_forward_port }}"
+    state: started
+    timeout: 30
+  when: platform_application_nats_forward_enabled | bool
+
+- name: Validate the MinIO port-forward contract
+  ansible.builtin.assert:
+    that:
+      - platform_application_minio_forward_namespace is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - platform_application_minio_forward_kubernetes_service is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - platform_application_minio_forward_hostname is match('^[a-z0-9][a-z0-9.-]+$')
+      - platform_application_minio_forward_hostname == 'minio.labweaver-data.svc'
+      - platform_application_minio_forward_address == '127.0.0.1'
+      - platform_application_minio_forward_address is match('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+      - platform_application_minio_forward_service_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?\.service$')
+      - platform_application_minio_forward_port | int > 1024
+      - platform_application_minio_forward_port | int < 65536
+    fail_msg: PLATFORM_APPLICATION_MINIO_FORWARD_INPUT_INVALID
+  when: platform_application_minio_forward_enabled | bool
+
+- name: Install the persistent MinIO port-forward
+  ansible.builtin.template:
+    src: minio-port-forward.service.j2
+    dest: /etc/systemd/system/{{ platform_application_minio_forward_service_name }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart the retained MinIO port-forward
+  when: platform_application_minio_forward_enabled | bool
+
+- name: Apply the MinIO port-forward before bucket reconciliation
+  ansible.builtin.meta: flush_handlers
+  when: platform_application_minio_forward_enabled | bool
+
+- name: Require the retained MinIO port-forward endpoint
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ platform_application_minio_forward_port }}"
+    state: started
+    timeout: 30
+  when: platform_application_minio_forward_enabled | bool
+
 - name: Resolve actual primary and retained data-service endpoints
   ansible.builtin.command:
     argv:
@@ -1086,7 +1287,10 @@
   loop: "{{ platform_application_nats_streams }}"
   register: platform_application_stream_info_before
   check_mode: false
-  failed_when: false
+  failed_when: >-
+    platform_application_stream_info_before.rc != 0 and
+    ((platform_application_stream_info_before.stdout | default('') ~ platform_application_stream_info_before.stderr | default(''))
+      is not search('(?i)stream\\s+.*not found|stream not found'))
   changed_when: false
 
 - name: Create only missing configured streams
@@ -1198,7 +1402,6 @@
   loop: "{{ platform_application_nats_streams }}"
   register: platform_application_stream_info_after
   check_mode: false
-  failed_when: false
   changed_when: false
 
 - name: Reject failed configured stream readback outside check mode
@@ -1245,7 +1448,10 @@
   loop: "{{ platform_application_nats_consumers }}"
   register: platform_application_consumer_info_before
   check_mode: false
-  failed_when: false
+  failed_when: >-
+    platform_application_consumer_info_before.rc != 0 and
+    ((platform_application_consumer_info_before.stdout | default('') ~ platform_application_consumer_info_before.stderr | default(''))
+      is not search('(?i)consumer\\s+.*not found|consumer not found'))
   changed_when: false
 
 - name: Materialize structured NATS consumer configurations
@@ -1341,7 +1547,6 @@
   loop: "{{ platform_application_nats_consumers }}"
   register: platform_application_consumer_info_after
   check_mode: false
-  failed_when: false
   changed_when: false
 
 - name: Reject failed configured consumer readback outside check mode
@@ -1375,7 +1580,13 @@
   register: platform_application_minio_bucket_before
   check_mode: false
   changed_when: false
-  failed_when: false
+  failed_when: >-
+    platform_application_minio_bucket_before.rc != 0 and
+    (
+      (platform_application_minio_bucket_before.stdout | default('') ~
+       platform_application_minio_bucket_before.stderr | default('')) is not
+      search('(?i)(not found|does not exist|no such key)')
+    )
   environment:
     MC_CONFIG_DIR: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/mc"
     SSL_CERT_FILE: "{{ platform_application_minio_ca_file }}"
@@ -1543,7 +1754,7 @@
   loop_control:
     label: "{{ item.binding }}"
   register: platform_application_harbor_seed_digest_probes
-  failed_when: false
+  failed_when: platform_application_harbor_seed_digest_probes.status | default(0) not in [200, 404]
   no_log: true
 
 - name: Require every reviewed container base image digest in the retained Harbor project
@@ -1806,7 +2017,13 @@
   register: platform_application_keycloak_realm_before
   environment:
     JAVA_OPTS_APPEND: "-Djdk.net.hosts.file={{ platform_application_work_root }}/{{ platform_application_run_id }}/keycloak.hosts"
-  failed_when: false
+  failed_when: >-
+    platform_application_keycloak_realm_before.rc != 0 and
+    (
+      (platform_application_keycloak_realm_before.stdout | default('') ~
+       platform_application_keycloak_realm_before.stderr | default('')) is not
+      search('(?i)(not found|does not exist)')
+    )
   check_mode: false
   changed_when: false
   no_log: true
@@ -2175,6 +2392,8 @@
       kind: Namespace
       metadata:
         name: "{{ platform_application_namespace }}"
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         labels:
           app.kubernetes.io/part-of: labweaver
           labweaver.io/managed: "true"
@@ -2228,6 +2447,7 @@
         labels:
           app.kubernetes.io/part-of: labweaver
         annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
           cdi.kubevirt.io/storage.bind.immediate.requested: "true"
           labweaver.io/source-release: "{{ item.item.release }}"
           labweaver.io/source-registry: "{{ item.item.registry_url }}"
@@ -2259,6 +2479,7 @@
         name: "{{ item.seed_data_volume_name }}"
         namespace: "{{ platform_application_namespace }}"
         annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
           cdi.kubevirt.io/storage.bind.immediate.requested: "true"
   loop: "{{ platform_application_lock.platform_vm_bases }}"
   loop_control:
@@ -2290,6 +2511,7 @@
         name: "{{ item.seed_data_volume_name }}"
         namespace: "{{ platform_application_namespace }}"
         annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
           cdi.kubevirt.io/storage.bind.immediate.requested: "true"
   loop: "{{ platform_application_lock.platform_vm_bases }}"
   loop_control:
@@ -2352,6 +2574,7 @@
         labels:
           app.kubernetes.io/part-of: labweaver
         annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
           labweaver.io/source-release: "{{ item.item.release }}"
           labweaver.io/source-registry: "{{ item.item.registry_url }}"
           labweaver.io/disk-sha256: "{{ item.item.disk_sha256 }}"
@@ -2405,6 +2628,8 @@
       apiVersion: v1
       kind: Secret
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: "{{ platform_application_image_pull_secret_name }}"
         namespace: "{{ platform_application_namespace }}"
         labels:
@@ -2428,6 +2653,8 @@
       apiVersion: v1
       kind: Secret
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: "{{ platform_application_portal_tls_secret_name }}"
         namespace: "{{ platform_application_portal_route_namespace }}"
         labels:
@@ -2712,7 +2939,7 @@
     kubeconfig: "{{ platform_application_kubeconfig }}"
     state: present
     apply: true
-    definition: "{{ item }}"
+    definition: "{{ item | combine({'metadata': {'annotations': {'labweaver.io/installation-id': platform_application_installation_id}}}, recursive=True) }}"
   loop: "{{ platform_application_configuration_objects }}"
   when: item.metadata.name != 'evaluation-service-config'
   no_log: true
@@ -2726,7 +2953,8 @@
       apiVersion: v1
       kind: ConfigMap
       metadata: >-
-        {{ platform_application_evaluation_configuration_object.metadata }}
+        {{ platform_application_evaluation_configuration_object.metadata |
+           combine({'annotations': {'labweaver.io/installation-id': platform_application_installation_id}}, recursive=True) }}
       data:
         config.yaml: >-
           {{
@@ -2778,7 +3006,8 @@
       apiVersion: v1
       kind: ConfigMap
       metadata: >-
-        {{ platform_application_build_executor_configuration_object.metadata }}
+        {{ platform_application_build_executor_configuration_object.metadata |
+           combine({'annotations': {'labweaver.io/installation-id': platform_application_installation_id}}, recursive=True) }}
       data:
         config.yaml: >-
           {{
@@ -2849,7 +3078,8 @@
       apiVersion: v1
       kind: ConfigMap
       metadata: >-
-        {{ platform_application_agent_configuration_object.metadata }}
+        {{ platform_application_agent_configuration_object.metadata |
+           combine({'annotations': {'labweaver.io/installation-id': platform_application_installation_id}}, recursive=True) }}
       data: >-
         {{
           platform_application_agent_configuration_object.data
@@ -2894,6 +3124,8 @@
       kind: Namespace
       metadata:
         name: "{{ platform_application_evaluation_namespace }}"
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         labels:
           app.kubernetes.io/part-of: labweaver
           labweaver.io/managed: "true"
@@ -2910,6 +3142,8 @@
       apiVersion: networking.k8s.io/v1
       kind: NetworkPolicy
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: oj-runner-default-deny
         namespace: "{{ platform_application_evaluation_namespace }}"
         labels:
@@ -2965,6 +3199,8 @@
       apiVersion: v1
       kind: ServiceAccount
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: "{{ item }}"
         namespace: "{{ platform_application_evaluation_namespace }}"
         labels:
@@ -2984,6 +3220,8 @@
       apiVersion: networking.k8s.io/v1
       kind: NetworkPolicy
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: oj-runner-object-store-egress
         namespace: "{{ platform_application_evaluation_namespace }}"
         labels:
@@ -3013,6 +3251,8 @@
       apiVersion: networking.k8s.io/v1
       kind: NetworkPolicy
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: ansible-probe-default-deny
         namespace: "{{ platform_application_evaluation_namespace }}"
         labels:
@@ -3070,6 +3310,8 @@
       apiVersion: v1
       kind: Secret
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: "{{ platform_application_evaluation_pull_secret_name }}"
         namespace: "{{ platform_application_evaluation_namespace }}"
         labels:
@@ -3095,6 +3337,8 @@
       kind: Namespace
       metadata:
         name: "{{ platform_application_authoring_namespace }}"
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         labels:
           app.kubernetes.io/part-of: labweaver
           labweaver.io/managed: "true"
@@ -3112,6 +3356,8 @@
       apiVersion: networking.k8s.io/v1
       kind: NetworkPolicy
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: authoring-default-deny
         namespace: "{{ platform_application_authoring_namespace }}"
         labels:
@@ -3158,14 +3404,18 @@
     kubeconfig: "{{ platform_application_kubeconfig }}"
     state: present
     apply: true
-    definition: "{{ lookup('template', 'authoring-platform-egress.yml.j2') | from_yaml }}"
+    definition: >-
+      {{ lookup('template', 'authoring-platform-egress.yml.j2') | from_yaml |
+         combine({'metadata': {'annotations': {'labweaver.io/installation-id': platform_application_installation_id}}}, recursive=True) }}
 
 - name: Reconcile the reviewed model egress for the platform services
   kubernetes.core.k8s:
     kubeconfig: "{{ platform_application_kubeconfig }}"
     state: present
     apply: true
-    definition: "{{ lookup('template', 'platform-model-egress.yml.j2') | from_yaml }}"
+    definition: >-
+      {{ lookup('template', 'platform-model-egress.yml.j2') | from_yaml |
+         combine({'metadata': {'annotations': {'labweaver.io/installation-id': platform_application_installation_id}}}, recursive=True) }}
 
 - name: Reconcile the tokenless authoring runner service account
   kubernetes.core.k8s:
@@ -3176,6 +3426,8 @@
       apiVersion: v1
       kind: ServiceAccount
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: "{{ platform_application_authoring_service_account_name }}"
         namespace: "{{ platform_application_authoring_namespace }}"
         labels:
@@ -3199,6 +3451,8 @@
       apiVersion: v1
       kind: Secret
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: "{{ platform_application_authoring_pull_secret_name }}"
         namespace: "{{ platform_application_authoring_namespace }}"
         labels:
@@ -3223,6 +3477,8 @@
       apiVersion: v1
       kind: ConfigMap
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: "{{ platform_application_authoring_buildkit_config_name }}"
         namespace: "{{ platform_application_authoring_namespace }}"
         labels:
@@ -3283,6 +3539,8 @@
       apiVersion: cilium.io/v2
       kind: CiliumNetworkPolicy
       metadata:
+        annotations:
+          labweaver.io/installation-id: "{{ platform_application_installation_id }}"
         name: admin-probes
         namespace: "{{ platform_application_data_namespace }}"
         labels:
@@ -3374,6 +3632,16 @@
     that:
       - platform_application_cdi_clone_source_policy.resources | length <= 1
       - >-
+        platform_application_cdi_clone_source_policy.resources | length == 0 or
+        (platform_application_cdi_clone_source_policy.resources[0].metadata.annotations['labweaver.io/installation-id']
+          | default('') == platform_application_installation_id) or
+        (platform_application_cdi_clone_source_policy.resources[0].metadata.annotations['meta.helm.sh/release-name']
+          | default('') == platform_application_release_name and
+         platform_application_cdi_clone_source_policy.resources[0].metadata.annotations['meta.helm.sh/release-namespace']
+          | default('') == platform_application_namespace and
+         platform_application_cdi_clone_source_policy.resources[0].metadata.labels['app.kubernetes.io/managed-by']
+          | default('') == 'Helm')
+      - >-
         platform_application_cdi_clone_source_policy.resources | length == 0
         or
         platform_application_cdi_clone_source_policy.resources[0].spec.podSelector.matchLabels
@@ -3427,103 +3695,14 @@
           meta.helm.sh/release-namespace: "{{ platform_application_namespace }}"
   when: platform_application_cdi_clone_source_policy.resources | length == 1
 
-- name: Copy reviewed Helm chart
-  ansible.builtin.copy:
-    src: "{{ platform_application_chart_source }}/"
-    dest: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/chart/"
-    owner: root
-    group: root
-    mode: preserve
-
-- name: Copy reviewed private values files
-  ansible.builtin.copy:
-    src: "{{ item }}"
-    dest: "{{ platform_application_work_root }}/{{ platform_application_run_id }}/{{ item | basename }}"
-    owner: root
-    group: root
-    mode: "0600"
-  loop: "{{ platform_application_values_files }}"
-  no_log: true
-
-- name: Build immutable Helm arguments
-  ansible.builtin.set_fact:
-    platform_application_values_argv: >-
-      {%- set values = [] -%}
-      {%- for values_file in platform_application_values_files -%}
-      {%- set _ = values.append(
-        '--values=' + platform_application_work_root + '/' + platform_application_run_id
-        + '/' + (values_file | basename)) -%}
-      {%- endfor -%}
-      {{ values }}
-    platform_application_image_argv: >-
-      {%- set values = [
-        '--set-string',
-        'imagePullSecrets[0].name=' + platform_application_image_pull_secret_name,
-        '--set-string',
-        'deploymentIdentity.configurationBundleSha256=' + platform_application_configuration_bundle_sha256
-      ] -%}
-      {%- for image in platform_application_package.images -%}
-      {%- set _ = values.extend(['--set-string', 'images.' + (image.component | replace('-', '_')) + '=' + image.reference]) -%}
-      {%- endfor -%}
-      {{ values }}
-    platform_application_route_argv: >-
-      {%- set values = [] -%}
-      {%- if platform_application_portal_route_name | length > 0 -%}
-      {%- set _ = values.extend([
-        '--set', 'portalRoute.enabled=true',
-        '--set-string', 'portalRoute.namespace=' + platform_application_portal_route_namespace,
-        '--set-string', 'portalRoute.name=' + platform_application_portal_route_name,
-        '--set-string', 'portalRoute.hostname=' + platform_application_portal_hostname,
-        '--set-string', 'portalRoute.gatewayName=' + platform_application_portal_gateway_name,
-        '--set-string', 'portalRoute.gatewaySectionName=' + platform_application_portal_gateway_listener_name,
-        '--set-string', 'runtimeRoute.baseHostname=' + platform_application_runtime_base_hostname,
-        '--set-string', 'runtimeRoute.gatewayName=' + platform_application_runtime_gateway_name,
-        '--set-string', 'runtimeRoute.gatewayClassName=' + platform_application_runtime_gateway_class_name,
-        '--set-string', 'runtimeRoute.tlsHostname=' + platform_application_runtime_tls_hostname,
-        '--set-string', 'runtimeRoute.tlsSecretName=' + platform_application_runtime_tls_secret_name
-      ]) -%}
-      {%- endif -%}
-      {%- if platform_application_object_store_route_enabled -%}
-      {%- set _ = values.extend([
-        '--set', 'objectStoreRoute.enabled=true',
-        '--set-string', 'objectStoreRoute.namespace=' + platform_application_data_namespace,
-        '--set-string', 'objectStoreRoute.serviceName=' + platform_application_object_store_service_name,
-        '--set', 'objectStoreRoute.servicePort=' + (platform_application_object_store_service_port | string),
-        '--set-string', 'objectStoreRoute.pathPrefix=/' + platform_application_minio_bucket,
-        '--set-string', 'objectStoreRoute.backendHostname=' + platform_application_object_store_backend_hostname,
-        '--set-file', 'objectStoreRoute.caCertificate=' + platform_application_minio_ca_file,
-        '--set-string', 'workloads.control-service.externalEgress[0].cidr=' + platform_application_object_store_external_cidr,
-        '--set', 'workloads.control-service.externalEgress[0].ports[0]=443'
-      ]) -%}
-      {%- endif -%}
-      {%- if platform_application_ssh_load_balancer_ip | length > 0 -%}
-      {%- set _ = values.extend([
-        '--set', 'sshGatewayService.enabled=true',
-        '--set-string', 'sshGatewayService.loadBalancerIP=' + platform_application_ssh_load_balancer_ip,
-        '--set-string', 'sshGatewayService.sharedIPKey=' + platform_application_ssh_shared_ip_key
-      ]) -%}
-      {%- endif -%}
-      {{ values }}
-
 - name: Deploy the immutable configured platform profile
   ansible.builtin.command:
     argv: >-
       {{ [platform_application_helm, '--kubeconfig', platform_application_kubeconfig,
           'upgrade', '--install', platform_application_release_name,
           platform_application_work_root + '/' + platform_application_run_id + '/chart',
-          '--namespace', platform_application_namespace, '--take-ownership', '--wait',
-          '--timeout', platform_application_rollout_timeout]
-          + platform_application_values_argv + platform_application_image_argv
-          + platform_application_route_argv }}
-  changed_when: true
-
-- name: Deploy the identical profile a second time
-  ansible.builtin.command:
-    argv: >-
-      {{ [platform_application_helm, '--kubeconfig', platform_application_kubeconfig,
-          'upgrade', '--install', platform_application_release_name,
-          platform_application_work_root + '/' + platform_application_run_id + '/chart',
-          '--namespace', platform_application_namespace, '--take-ownership', '--wait',
+          '--namespace', platform_application_namespace, '--description',
+          'labweaver-installation:' + platform_application_installation_id, '--wait',
           '--timeout', platform_application_rollout_timeout]
           + platform_application_values_argv + platform_application_image_argv
           + platform_application_route_argv }}

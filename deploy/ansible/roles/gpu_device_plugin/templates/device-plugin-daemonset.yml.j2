@@ -3,6 +3,7 @@ kind: DaemonSet
 metadata:
   name: nvidia-gpu-device-plugin-{{ gpu_device_plugin_mode }}
   namespace: {{ gpu_device_plugin_namespace }}
+  annotations: {labweaver.io/installation-id: {{ labweaver_installation_id | quote }}}
   labels:
     app.kubernetes.io/name: nvidia-gpu-device-plugin
     labweaver.io/gpu-mode: {{ gpu_device_plugin_mode }}

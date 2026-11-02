@@ -17,39 +17,11 @@
           ~ '@sha256:[0-9a-f]{64}$')
     fail_msg: CILIUM_RELEASE_LOCK_INVALID
 
-- name: Assert Helm is available on the control plane
-  tags: [cilium]
-  ansible.builtin.command: helm version --short
-  changed_when: false
-
-- name: Install pinned Gateway API Standard CRDs before enabling Gateway API
-  kubernetes.core.k8s:
-    state: present
-    src: >-
-      {{ gateway_api_crd_file
-         | default('https://github.com/kubernetes-sigs/gateway-api/releases/download/'
-                   ~ gateway_api_version ~ '/experimental-install.yaml') }}
-
-- name: Add pinned Helm repositories
-  tags: [cilium]
-  kubernetes.core.helm_repository:
-    name: "{{ item.name }}"
-    repo_url: "{{ item.url }}"
-  loop:
-    - { name: cilium, url: https://helm.cilium.io/ }
-    - { name: metallb, url: https://metallb.github.io/metallb }
-  environment: "{{ labweaver_controller_proxy_env | default({}) }}"
-
-- name: Install Cilium with kube-proxy replacement and Gateway API
-  tags: [cilium]
-  kubernetes.core.helm:
-    name: cilium
-    chart_ref: cilium/cilium
-    chart_version: "{{ cluster_network_cilium_lock.chart }}"
-    update_repo_cache: true
-    release_namespace: kube-system
-    create_namespace: false
-    values:
+- name: Bind the exact Cilium values used by planning and reconciliation
+  tags: [always]
+  ansible.builtin.set_fact:
+    cluster_network_cilium_values:
+      labweaverInstallationId: "{{ labweaver_installation_id }}"
       image:
         override: "{{ cluster_network_cilium_lock.image }}"
       kubeProxyReplacement: true
@@ -78,24 +50,123 @@
           enabled: true
       gatewayAPI:
         enabled: true
+        gatewayClass:
+          create: true
+      operator:
+        skipCRDCreation: true
+    cluster_network_boundary_objects: >-
+      {{ [lookup('template', 'host-firewall-policy.yml.j2') | from_yaml] +
+         (lookup('template', 'metallb.yml.j2') | from_yaml_all | list) +
+         [{'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'name': 'metallb-memberlist', 'namespace': 'metallb-system'}}] }}
+
+- name: Assert Helm is available on the control plane
+  tags: [cilium]
+  ansible.builtin.command: helm version --short
+  changed_when: false
+
+
+- name: Add pinned Helm repositories
+  tags: [cilium]
+  kubernetes.core.helm_repository:
+    name: "{{ item.name }}"
+    repo_url: "{{ item.url }}"
+  loop:
+    - { name: cilium, url: https://helm.cilium.io/ }
+    - { name: metallb, url: https://metallb.github.io/metallb }
   environment: "{{ labweaver_controller_proxy_env | default({}) }}"
 
-- name: Apply the LabWeaver node firewall policy
+- name: Plan the complete pinned Cilium CRD mutation inventory
+  ansible.builtin.include_tasks:
+    file: cilium-crds.yml
+    apply:
+      tags: [always]
+  tags: [always]
+
+- name: Verify every network mutation target before changing the cluster
+  ansible.builtin.include_role:
+    name: installation_boundary
+    apply:
+      tags: [always]
+  tags: [always]
+  vars:
+    installation_boundary_shared_namespaces: [kube-system]
+    installation_boundary_sources: >-
+      {{ [gateway_api_crd_file | default('https://github.com/kubernetes-sigs/gateway-api/releases/download/'
+           ~ gateway_api_version ~ '/experimental-install.yaml')] + cluster_network_cilium_crd_sources }}
+    installation_boundary_objects: "{{ cluster_network_boundary_objects }}"
+    installation_boundary_helm_releases:
+      - name: cilium
+        namespace: kube-system
+        chart_ref: cilium/cilium
+        chart_version: "{{ cluster_network_cilium_lock.chart }}"
+        values: "{{ cluster_network_cilium_values }}"
+      - name: metallb
+        namespace: metallb-system
+        chart_ref: metallb/metallb
+        chart_version: "{{ metallb_chart_version }}"
+
+- name: Install pinned Gateway API and Cilium CRDs before installing controllers
   kubernetes.core.k8s:
     kubeconfig: /etc/kubernetes/admin.conf
     state: present
-    definition: "{{ lookup('template', 'host-firewall-policy.yml.j2') | from_yaml }}"
+    definition: "{{ installation_boundary_owned_objects | selectattr('kind', 'equalto', 'CustomResourceDefinition') | list }}"
 
-- name: Install MetalLB
-  kubernetes.core.helm:
-    name: metallb
-    chart_ref: metallb/metallb
-    chart_version: "{{ metallb_chart_version }}"
-    release_namespace: metallb-system
-    create_namespace: true
-  environment: "{{ labweaver_controller_proxy_env | default({}) }}"
+- name: Require every planned network API schema before starting its controller
+  ansible.builtin.command:
+    argv: [kubectl, --kubeconfig, /etc/kubernetes/admin.conf, wait, "crd/{{ item.metadata.name }}", --for=condition=Established, --timeout=120s]
+  loop: "{{ installation_boundary_owned_source_objects | selectattr('kind', 'equalto', 'CustomResourceDefinition') | list }}"
+  changed_when: false
+
+- name: Reconcile verified network releases with a private identity producer
+  block:
+    - name: Prepare the private network Helm identity producer
+      ansible.builtin.include_role:
+        name: installation_boundary
+        tasks_from: renderer
+        apply:
+          tags: [always]
+      tags: [always]
+
+    - name: Install Cilium with kube-proxy replacement and Gateway API
+      tags: [cilium]
+      kubernetes.core.helm:
+        name: cilium
+        chart_ref: cilium/cilium
+        chart_version: "{{ cluster_network_cilium_lock.chart }}"
+        update_repo_cache: true
+        release_namespace: kube-system
+        create_namespace: false
+        values: "{{ cluster_network_cilium_values }}"
+        post_renderer: "{{ installation_boundary_helm_post_renderer }}"
+      environment: "{{ labweaver_controller_proxy_env | default({}) | combine({'LW_BUNDLE_INSTALLATION_ID': labweaver_installation_id}) }}"
+
+    - name: Apply the LabWeaver node firewall policy
+      kubernetes.core.k8s:
+        kubeconfig: /etc/kubernetes/admin.conf
+        state: present
+        definition: "{{ installation_boundary_owned_objects | selectattr('kind', 'equalto', 'CiliumClusterwideNetworkPolicy') | list }}"
+
+    - name: Install MetalLB
+      kubernetes.core.helm:
+        name: metallb
+        chart_ref: metallb/metallb
+        chart_version: "{{ metallb_chart_version }}"
+        release_namespace: metallb-system
+        create_namespace: false
+        post_renderer: "{{ installation_boundary_helm_post_renderer }}"
+        values:
+          labweaverInstallationId: "{{ labweaver_installation_id }}"
+      environment: "{{ labweaver_controller_proxy_env | default({}) | combine({'LW_BUNDLE_INSTALLATION_ID': labweaver_installation_id}) }}"
+  always:
+    - name: Remove the private network Helm identity producer on every outcome
+      ansible.builtin.include_role:
+        name: installation_boundary
+        tasks_from: cleanup
+        apply:
+          tags: [always]
+      tags: [always]
 
 - name: Apply MetalLB address pool and L2 advertisement
   kubernetes.core.k8s:
     state: present
-    definition: "{{ lookup('template', 'metallb.yml.j2') | from_yaml_all | list }}"
+    definition: "{{ installation_boundary_owned_objects | selectattr('kind', 'in', ['IPAddressPool', 'L2Advertisement']) | list }}"

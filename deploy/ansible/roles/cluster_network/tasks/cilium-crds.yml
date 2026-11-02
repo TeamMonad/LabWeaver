@@ -1,0 +1,44 @@
+---
+- name: Read the complete CRD catalog from the exact locked Cilium tag
+  ansible.builtin.uri:
+    url: >-
+      https://api.github.com/repos/cilium/cilium/contents/pkg/k8s/apis/cilium.io/client/crds/{{ item }}?ref=v{{ cluster_network_cilium_lock.chart }}
+    return_content: true
+    status_code: 200
+  loop: [v2, v2alpha1]
+  register: cluster_network_cilium_crd_catalogs
+  environment: "{{ labweaver_controller_proxy_env | default({}) }}"
+  check_mode: false
+  when: cluster_network_cilium_crd_files | length == 0
+
+- name: Require both pinned Cilium CRD catalogs to be readable
+  ansible.builtin.assert:
+    that:
+      - item.json | type_debug == 'list'
+      - item.json | length > 0
+    fail_msg: CILIUM_CRD_CATALOG_INVALID
+  loop: "{{ cluster_network_cilium_crd_catalogs.results }}"
+  when: cluster_network_cilium_crd_files | length == 0
+
+- name: Bind reviewed Cilium CRD source overrides
+  ansible.builtin.set_fact:
+    cluster_network_cilium_crd_sources: "{{ cluster_network_cilium_crd_files }}"
+
+- name: Bind every schema source from the pinned Cilium CRD catalogs
+  ansible.builtin.set_fact:
+    cluster_network_cilium_crd_sources: >-
+      {{ cluster_network_cilium_crd_sources +
+         ['https://raw.githubusercontent.com/cilium/cilium/v' ~ cluster_network_cilium_lock.chart ~
+          '/pkg/k8s/apis/cilium.io/client/crds/' ~ item.0.item ~ '/' ~ item.1.name] }}
+  loop: >-
+    {{ [] if cluster_network_cilium_crd_files | length > 0 else
+       cluster_network_cilium_crd_catalogs.results | subelements('json') }}
+  when:
+    - cluster_network_cilium_crd_files | length == 0
+    - item.1.type == 'file'
+    - item.1.name is match('^[a-z0-9_.-]+[.]yaml$')
+
+- name: Require a complete nonempty explicit Cilium schema inventory
+  ansible.builtin.assert:
+    that: cluster_network_cilium_crd_sources | length > 0
+    fail_msg: CILIUM_CRD_SOURCES_REQUIRED

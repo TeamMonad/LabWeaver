@@ -113,6 +113,8 @@
       metadata:
         name: "{{ fastapi_dls_tls_secret_name }}"
         namespace: "{{ fastapi_dls_namespace }}"
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
         labels:
           app.kubernetes.io/part-of: labweaver-infrastructure
           app.kubernetes.io/managed-by: ansible

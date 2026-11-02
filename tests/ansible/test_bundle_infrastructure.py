@@ -466,5 +466,40 @@ pathlib.Path(__import__('sys').argv[1]).write_text('ok')
         self.assertNotIn("synthetic-identity-password", failed.stdout + failed.stderr)
 
 
+    def test_deploy_wipe_uses_only_authenticated_bundle_installation(self) -> None:
+        installation_id = "019fa9d0-0000-7000-8000-000000000142"
+        self.fixture.model["target"]["installationId"] = installation_id
+        self.save()
+        self.fixture.seal()
+        argv = [
+            "deployment_bundle.py", "--runtime", str(self.fixture.runtime),
+            "deploy", "--archive", str(self.fixture.archive),
+            "--identity", str(self.fixture.identity), "--env", "demo",
+            "--mode", "wipe", "--target", "labweaver", "--scope", "platform", "--yes",
+        ]
+        with patch.object(sys, "argv", argv), patch.object(bundle, "_consume") as consumer:
+            self.assertEqual(bundle.main(), 0)
+            self.assertEqual(consumer.call_count, 1)
+            command, environment = consumer.call_args.args
+            self.assertEqual(environment["LW_BUNDLE_INSTALLATION_ID"], installation_id)
+            self.assertEqual(environment["LABWEAVER_BUNDLE_INVENTORY_FILE"], environment["ANSIBLE_INVENTORY"])
+            self.assertEqual(command[:3], ["cargo", "xtask", "deploy"])
+            self.assertIn("wipe", command)
+        self.fixture.clean_runtime()
+
+        # A different sealed source lacking the installation id cannot mutate.
+        self.fixture.model["target"].pop("installationId")
+        self.fixture.archive = self.fixture.directory / "missing-identity.age"
+        self.fixture.identity = self.fixture.directory / "missing-id-key.txt"
+        self.save()
+        self.fixture.seal()
+        rejected_argv = argv.copy()
+        rejected_argv[5] = str(self.fixture.archive)
+        rejected_argv[7] = str(self.fixture.identity)
+        with patch.object(sys, "argv", rejected_argv), patch.object(bundle, "_consume") as consumer:
+            self.assertNotEqual(bundle.main(), 0)
+            consumer.assert_not_called()
+        self.fixture.clean_runtime()
+
 if __name__ == "__main__":
     unittest.main()

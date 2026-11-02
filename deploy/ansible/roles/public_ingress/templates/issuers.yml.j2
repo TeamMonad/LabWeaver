@@ -2,6 +2,7 @@ apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
   name: {{ public_ingress_selfsigned_issuer }}
+  annotations: {labweaver.io/installation-id: {{ labweaver_installation_id | quote }}}
   labels:
     app.kubernetes.io/part-of: labweaver-infrastructure
 spec:
@@ -12,10 +13,12 @@ apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
   name: {{ public_ingress_acme_issuer }}
+  annotations: {labweaver.io/installation-id: {{ labweaver_installation_id | quote }}}
   labels:
     app.kubernetes.io/part-of: labweaver-infrastructure
 spec:
   acme:
+    disableAccountKeyGeneration: true
     email: {{ public_ingress_acme_email }}
     server: {{ public_ingress_acme_server }}
     privateKeySecretRef:

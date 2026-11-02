@@ -45,6 +45,56 @@
        + (fastapi_dls_allowed_client_pod_selector | dict2items) }}
   when: fastapi_dls_enabled | bool
 
+- name: Bind the complete FastAPI-DLS producer inventory
+  ansible.builtin.set_fact:
+    fastapi_dls_boundary_objects:
+      - apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: "{{ fastapi_dls_namespace }}"
+          labels:
+            app.kubernetes.io/part-of: labweaver-infrastructure
+            labweaver.io/infrastructure: 'true'
+            app.kubernetes.io/managed-by: ansible
+      - apiVersion: v1
+        kind: Secret
+        metadata: {name: "{{ fastapi_dls_tls_secret_name }}", namespace: "{{ fastapi_dls_namespace }}"}
+      - apiVersion: v1
+        kind: Secret
+        metadata:
+          name: "{{ fastapi_dls_client_token_secret_name }}"
+          namespace: "{{ fastapi_dls_client_token_secret_namespace }}"
+      - apiVersion: v1
+        kind: Secret
+        metadata:
+          name: "{{ fastapi_dls_signing_root_secret_name }}"
+          namespace: "{{ fastapi_dls_signing_root_secret_namespace }}"
+      - apiVersion: v1
+        kind: ConfigMap
+        metadata: {name: "{{ fastapi_dls_client_config_name }}", namespace: "{{ fastapi_dls_namespace }}"}
+      - apiVersion: v1
+        kind: ConfigMap
+        metadata: {name: "{{ fastapi_dls_service_name }}-proxy", namespace: "{{ fastapi_dls_namespace }}"}
+      - apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata: {name: "{{ fastapi_dls_data_pvc_name }}", namespace: "{{ fastapi_dls_namespace }}"}
+      - apiVersion: v1
+        kind: Service
+        metadata: {name: "{{ fastapi_dls_service_name }}", namespace: "{{ fastapi_dls_namespace }}"}
+      - apiVersion: apps/v1
+        kind: Deployment
+        metadata: {name: "{{ fastapi_dls_service_name }}", namespace: "{{ fastapi_dls_namespace }}"}
+      - "{{ lookup('template', 'network-policy.yml.j2') | from_yaml }}"
+  when: fastapi_dls_enabled | bool
+
+- name: Verify every FastAPI-DLS mutation target before changing the cluster
+  ansible.builtin.include_role:
+    name: installation_boundary
+  vars:
+    installation_boundary_kubeconfig: "{{ fastapi_dls_kubeconfig }}"
+    installation_boundary_objects: "{{ fastapi_dls_boundary_objects }}"
+  when: fastapi_dls_enabled | bool
+
 - name: Reconcile the FastAPI-DLS namespace
   kubernetes.core.k8s:
     kubeconfig: "{{ fastapi_dls_kubeconfig }}"
@@ -55,6 +105,8 @@
       kind: Namespace
       metadata:
         name: "{{ fastapi_dls_namespace }}"
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
         labels:
           app.kubernetes.io/part-of: labweaver-infrastructure
           labweaver.io/infrastructure: "true"
@@ -253,6 +305,8 @@
       metadata:
         name: "{{ fastapi_dls_client_config_name }}"
         namespace: "{{ fastapi_dls_namespace }}"
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
         labels:
           app.kubernetes.io/name: fastapi-dls
           app.kubernetes.io/part-of: labweaver-infrastructure
@@ -283,6 +337,8 @@
       metadata:
         name: "{{ fastapi_dls_data_pvc_name }}"
         namespace: "{{ fastapi_dls_namespace }}"
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
         labels:
           app.kubernetes.io/name: fastapi-dls
           app.kubernetes.io/part-of: labweaver-infrastructure
@@ -305,6 +361,8 @@
       metadata:
         name: "{{ fastapi_dls_service_name }}"
         namespace: "{{ fastapi_dls_namespace }}"
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
         labels:
           app.kubernetes.io/name: fastapi-dls
           app.kubernetes.io/part-of: labweaver-infrastructure
@@ -330,6 +388,8 @@
       metadata:
         name: "{{ fastapi_dls_service_name }}-proxy"
         namespace: "{{ fastapi_dls_namespace }}"
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
         labels:
           app.kubernetes.io/name: fastapi-dls
           app.kubernetes.io/part-of: labweaver-infrastructure
@@ -342,7 +402,9 @@
     kubeconfig: "{{ fastapi_dls_kubeconfig }}"
     state: present
     apply: true
-    definition: "{{ lookup('template', 'network-policy.yml.j2') | from_yaml }}"
+    definition: >-
+      {{ lookup('template', 'network-policy.yml.j2') | from_yaml |
+         combine({'metadata': {'annotations': {'labweaver.io/installation-id': labweaver_installation_id}}}, recursive=True) }}
   when: fastapi_dls_enabled | bool
 
 - name: Reconcile the FastAPI-DLS Deployment
@@ -356,6 +418,8 @@
       metadata:
         name: "{{ fastapi_dls_service_name }}"
         namespace: "{{ fastapi_dls_namespace }}"
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
         labels:
           app.kubernetes.io/name: fastapi-dls
           app.kubernetes.io/part-of: labweaver-infrastructure
@@ -373,6 +437,7 @@
               app.kubernetes.io/name: fastapi-dls
               app.kubernetes.io/part-of: labweaver-infrastructure
             annotations:
+              labweaver.io/installation-id: "{{ labweaver_installation_id }}"
               checksum/fastapi-dls-proxy-config: >-
                 {{ lookup('template', 'nginx.conf.j2') | hash('sha256') }}
               checksum/fastapi-dls-tls: "{{ fastapi_dls_tls_public_checksum }}"
@@ -561,6 +626,37 @@
   no_log: true
   when: fastapi_dls_enabled | bool
 
+- name: Read the exact ReplicaSet owners of the selected DLS execution Pods
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ fastapi_dls_kubeconfig }}"
+    api_version: apps/v1
+    kind: ReplicaSet
+    namespace: "{{ fastapi_dls_namespace }}"
+  register: fastapi_dls_backend_replicasets
+  when: fastapi_dls_enabled | bool
+
+- name: Refuse DLS execution Pods outside the verified deployment UID chain
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/jq
+      - --exit-status
+      - --arg
+      - installation
+      - "{{ labweaver_installation_id }}"
+      - >-
+        .deployment as $deployment | .replicas as $replicas |
+        $deployment.metadata.uid != null and
+        $deployment.metadata.annotations["labweaver.io/installation-id"] == $installation and
+        all(.pods[]; any(.metadata.ownerReferences[]?.uid;
+          . as $uid | $uid != null and any($replicas[];
+            .metadata.uid == $uid and any(.metadata.ownerReferences[]?.uid; . == $deployment.metadata.uid))))
+    stdin: >-
+      {{ {'deployment': fastapi_dls_deployment_status.resources[0], 'pods': fastapi_dls_backend_pods.resources,
+          'replicas': fastapi_dls_backend_replicasets.resources} | to_json }}
+  changed_when: false
+  no_log: true
+  when: fastapi_dls_enabled | bool
+
 - name: Read the retained FastAPI-DLS client token Secret
   kubernetes.core.k8s_info:
     kubeconfig: "{{ fastapi_dls_kubeconfig }}"
@@ -742,6 +838,8 @@
       metadata:
         name: "{{ fastapi_dls_client_token_secret_name }}"
         namespace: "{{ fastapi_dls_client_token_secret_namespace }}"
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
         labels:
           app.kubernetes.io/name: fastapi-dls
           app.kubernetes.io/part-of: labweaver-infrastructure
@@ -764,6 +862,8 @@
       metadata:
         name: "{{ fastapi_dls_signing_root_secret_name }}"
         namespace: "{{ fastapi_dls_signing_root_secret_namespace }}"
+        annotations:
+          labweaver.io/installation-id: "{{ labweaver_installation_id }}"
         labels:
           app.kubernetes.io/name: fastapi-dls
           app.kubernetes.io/part-of: labweaver-infrastructure

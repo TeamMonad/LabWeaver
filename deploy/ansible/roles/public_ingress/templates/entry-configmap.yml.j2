@@ -3,6 +3,7 @@ kind: ConfigMap
 metadata:
   name: {{ public_ingress_entry_name }}
   namespace: {{ public_ingress_entry_namespace }}
+  annotations: {labweaver.io/installation-id: {{ labweaver_installation_id | quote }}}
   labels:
     app.kubernetes.io/part-of: labweaver-infrastructure
 data:

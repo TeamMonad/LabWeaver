@@ -3,6 +3,7 @@ kind: Gateway
 metadata:
   name: {{ public_ingress_gateway_name }}
   namespace: {{ public_ingress_namespace }}
+  annotations: {labweaver.io/installation-id: {{ labweaver_installation_id | quote }}}
   labels:
     app.kubernetes.io/part-of: labweaver-infrastructure
 spec:

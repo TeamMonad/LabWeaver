@@ -517,18 +517,20 @@ class AnsibleFixtureTests(unittest.TestCase):
             "metadata": {"name": "control-service-config"},
             "data": {"config.yaml": yaml.safe_dump(configuration)},
         }
-        applied = environment.compile_expression(application["definition"][2:-2].strip())(
-            item=control,
-            platform_application_evaluation_worker_image=(
-                "harbor.test/labweaver/evaluation-service@sha256:" + "b" * 64
-            ),
-        )
-        self.assertEqual(
-            yaml.safe_load(applied["data"]["config.yaml"])["control"]["evaluationRuntime"][
-                "runnerImage"
-            ],
-            runner,
-        )
+        from test_deployment_ownership_execution import run_tasks
+
+        result = run_tasks([
+            {"name": "Render reviewed application object", "ansible.builtin.set_fact": {"applied": application["definition"]}},
+            {"name": "Preserve reviewed runner while stamping ownership", "ansible.builtin.assert": {"that": [
+                "(applied.data['config.yaml'] | from_yaml).control.evaluationRuntime.runnerImage == runner",
+                "applied.metadata.annotations['labweaver.io/installation-id'] == platform_application_installation_id",
+            ]}},
+        ], {
+            "item": control, "runner": runner,
+            "platform_application_installation_id": "019fa9d0-0000-7000-8000-000000000142",
+            "platform_application_evaluation_worker_image": "harbor.test/labweaver/evaluation-service@sha256:" + "b" * 64,
+        })
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         for rejected in (
             "harbor.test/labweaver/evaluation-runtime:latest",
             "harbor.test/labweaver/evaluation-runtime@sha256:" + "a" * 63,
@@ -1519,7 +1521,9 @@ class AnsibleFixtureTests(unittest.TestCase):
             tasks.index("Reconcile the exact CDI clone source network policy"),
             tasks.index("Deploy the immutable configured platform profile"),
         )
-        self.assertEqual(tasks.count("'--take-ownership'"), 2)
+        self.assertNotIn("'--take-ownership'", tasks)
+        self.assertIn("labweaver-installation:", tasks)
+        self.assertNotIn("Deploy the identical profile a second time", tasks)
 
     def test_platform_application_uses_supported_nats_account_probe(self) -> None:
         tasks = (
@@ -1612,7 +1616,7 @@ class AnsibleFixtureTests(unittest.TestCase):
             section = tasks.split(f"- name: {name}", maxsplit=1)[1].split(
                 "- name:", maxsplit=1
             )[0]
-            self.assertIn("failed_when: false", section)
+            self.assertNotIn("failed_when: false", section)
             validation_name = (
                 "Validate retained or created stream identities"
                 if "streams" in name
