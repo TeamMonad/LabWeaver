@@ -32,8 +32,7 @@ def main():
             if key:
                 headers["Idempotency-Key"] = key
             return executor.https_json(endpoint.rstrip("/") + path, ca, method=method,
-                                       payload=None if payload is None else json.dumps(payload), headers=headers,
-                                       expected_configuration_sha256=source["configurationSha256"] if method == "GET" and path == f"{executor.PREFIX}/applies/{self.apply_id}" else None)
+                                       payload=None if payload is None else json.dumps(payload), headers=headers)
 
         def observe(self):
             def read_peer(_pod):
@@ -51,9 +50,15 @@ def main():
 
     control = LiveControl()
     if settings["case"] == "success":
+        # The executor-only view carries the bound attempt and its immutable digest only.
+        intent = control.request("GET", f"{executor.PREFIX}/applies/{control.apply_id}")
+        assert set(intent) == {"revision", "attempt", "configurationSha256"}, sorted(intent)
+        assert set(intent["attempt"]) == {"id", "revision", "desiredRevision", "encryptedBundleSha256",
+                                          "stage", "executorClientId"}, sorted(intent["attempt"])
+        mismatched = type(control)()
+        mismatched.source = dict(source, configurationSha256="f" * 64)
         try:
-            executor.https_json(endpoint.rstrip("/") + f"{executor.PREFIX}/applies/{control.apply_id}", ca,
-                                headers={"Authorization": f"Bearer {token}"}, expected_configuration_sha256="f" * 64)
+            executor.read_intent(mismatched)
         except executor.ApplyError as error:
             assert "intent-binding" in str(error)
         else:
@@ -68,10 +73,17 @@ def main():
         return
     if settings["case"] != "success":
         raise AssertionError("executor accepted mismatched or unreachable replica")
-    assert result["appliedState"] == "verified"
-    assert result["latestApply"]["stage"] == "succeeded"
-    # Re-entry reads and observes the same intent, without adding a report.
-    assert executor.finish(control)["latestApply"]["revision"] == result["latestApply"]["revision"]
+    assert result["attempt"]["stage"] == "succeeded"
+    assert set(result) == {"revision", "attempt", "configurationSha256"}, sorted(result)
+    # Re-entry after success only observes; it reports nothing and never reaches deployment.
+    assert executor.already_verified(control)
+    assert executor.finish(control)["attempt"]["revision"] == result["attempt"]["revision"]
+    try:
+        executor.prepare(control)
+    except executor.ApplyError as error:
+        assert "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT:prepare" in str(error)
+    else:
+        raise AssertionError("a succeeded attempt was accepted for another deployment")
     print("VERIFIED_APPLY_CONTROL_OK")
 
 

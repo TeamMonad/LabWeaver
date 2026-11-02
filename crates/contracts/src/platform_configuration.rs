@@ -573,6 +573,43 @@ pub struct PlatformConfigurationApply {
     pub updated_at: UtcTimestamp,
 }
 
+/// The only view the deployment executor receives. It carries the bound attempt and the
+/// immutable digest of the version it binds, never administrator settings or other versions.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlatformConfigurationExecutorIntent {
+    /// Aggregate fence used for the executor's next report.
+    pub revision: u64,
+    pub attempt: PlatformConfigurationExecutorAttempt,
+    /// `configurationSha256` of the version bound by `attempt.desiredRevision`.
+    pub configuration_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlatformConfigurationExecutorAttempt {
+    pub id: OperationId,
+    pub revision: Revision,
+    pub desired_revision: Revision,
+    pub encrypted_bundle_sha256: String,
+    pub stage: PlatformConfigurationApplyStage,
+    pub executor_client_id: Option<String>,
+}
+
+impl PlatformConfigurationExecutorAttempt {
+    #[must_use]
+    pub fn from_apply(apply: &PlatformConfigurationApply) -> Self {
+        Self {
+            id: apply.id,
+            revision: apply.revision,
+            desired_revision: apply.desired_revision,
+            encrypted_bundle_sha256: apply.encrypted_bundle_sha256.clone(),
+            stage: apply.stage,
+            executor_client_id: apply.executor_client_id.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlatformConfigurationImpact {

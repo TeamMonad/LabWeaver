@@ -4170,6 +4170,112 @@
       }
     },
     "/internal/v1/platform-configuration/applies/{applyId}": {
+      "get": {
+        "description": "Permission: control.platform_configuration.apply. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getPlatformConfigurationExecutorIntent",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "applyId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/platform-configuration-executor-intent.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "control.platform_configuration.apply"
+            ]
+          }
+        ],
+        "summary": "getPlatformConfigurationExecutorIntent",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_PLATFORM_CONFIGURATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_LIFECYCLE_INVALID",
+          "LW_PLATFORM_CONFIGURATION_EXECUTION_LOCATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_PREAUTHORIZATION_INVALID",
+          "LW_PLATFORM_CONFIGURATION_REVISION_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_APPLY_IN_PROGRESS",
+          "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT",
+          "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH",
+          "LW_PLATFORM_CONFIGURATION_EXECUTOR_DENIED",
+          "LW_PLATFORM_CONFIGURATION_NOT_FOUND",
+          "LW_PLATFORM_CONFIGURATION_NOT_LOADED",
+          "LW_PLATFORM_CONFIGURATION_REPLICA_IDENTITY_REQUIRED",
+          "LW_PLATFORM_CONFIGURATION_BUNDLE_REQUIRED",
+          "LW_PLATFORM_CONFIGURATION_BUNDLE_TOO_LARGE",
+          "LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED",
+          "LW_IDEMPOTENCY_CONFLICT",
+          "LW_OPERATION_IN_PROGRESS",
+          "LW_PLATFORM_CONFIGURATION_POLICY_UNSUPPORTED"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "control.platform_configuration.apply",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
+      },
       "put": {
         "description": "Permission: control.platform_configuration.apply. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
         "operationId": "reportPlatformConfigurationApply",
@@ -4215,7 +4321,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "../contracts/v1/platform-configuration-status.schema.json"
+                  "$ref": "../contracts/v1/platform-configuration-executor-intent.schema.json"
                 }
               }
             },

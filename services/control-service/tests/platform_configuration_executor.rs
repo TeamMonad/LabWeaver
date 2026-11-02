@@ -174,6 +174,60 @@ async fn production_executor_verifies_real_control_and_fails_closed() -> TestRes
                     .await?;
                 assert_eq!(response.status(), expected);
             }
+            // The apply-only identity reads exactly its bound attempt and digest; no
+            // administrator settings, identities or other versions.
+            let response = fixture
+                .router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/internal/v1/platform-configuration/applies/{attempt_id}"
+                        ))
+                        .header(
+                            "Authorization",
+                            format!(
+                                "Bearer {}",
+                                fixture.token(
+                                    "labweaver-deployment-executor",
+                                    "control.platform_configuration.apply"
+                                )?
+                            ),
+                        )
+                        .body(Body::empty())?,
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            let intent: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 1_048_576).await?,
+            )?;
+            let keys = |value: &serde_json::Value| -> Vec<String> {
+                let mut keys: Vec<String> = value
+                    .as_object()
+                    .map(|object| object.keys().cloned().collect())
+                    .unwrap_or_default();
+                keys.sort();
+                keys
+            };
+            assert_eq!(
+                keys(&intent),
+                ["attempt", "configurationSha256", "revision"]
+            );
+            assert_eq!(
+                keys(&intent["attempt"]),
+                [
+                    "desiredRevision",
+                    "encryptedBundleSha256",
+                    "executorClientId",
+                    "id",
+                    "revision",
+                    "stage"
+                ]
+            );
+            assert_eq!(
+                intent["configurationSha256"],
+                serde_json::Value::from(desired.configuration_sha256.clone())
+            );
         }
         let input = temporary.path().join(format!("{case}.json"));
         std::fs::write(

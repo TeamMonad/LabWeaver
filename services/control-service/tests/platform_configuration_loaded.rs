@@ -325,9 +325,24 @@ async fn actual_bundle_load_is_required_for_success_and_failure_keeps_effective(
         )
         .await?;
     assert_eq!(accepted.status(), StatusCode::OK);
-    let mut state: PlatformConfigurationStatus =
+    let intent: serde_json::Value =
         serde_json::from_slice(&to_bytes(accepted.into_body(), 1_048_576).await?)?;
+    // The apply-only identity receives exactly its attempt and the bound digest.
+    let mut fields: Vec<_> = intent
+        .as_object()
+        .ok_or("intent is not an object")?
+        .keys()
+        .cloned()
+        .collect();
+    fields.sort();
+    assert_eq!(fields, ["attempt", "configurationSha256", "revision"]);
+    let intent: contracts::platform_configuration::PlatformConfigurationExecutorIntent =
+        serde_json::from_value(intent)?;
+    assert_eq!(intent.attempt.id, id);
+    let mut state = configuration::get(&pool).await?;
+    assert_eq!(intent.revision, state.revision);
     let effective = state.applied.clone().ok_or("not applied")?;
+    assert_eq!(intent.configuration_sha256, effective.configuration_sha256);
     let effective_bundle = state.applied_bundle_sha256.clone();
     let replay = configuration::report(
         &pool,

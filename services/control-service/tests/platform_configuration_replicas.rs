@@ -13,9 +13,9 @@ use contracts::platform_configuration::{
     ControlConfigurationDeploymentObservation as DeploymentObservation,
     ControlConfigurationReplicaObservation as ReplicaObservation,
     PlatformConfigurationApplyStage as Stage, PlatformConfigurationDesired,
-    PlatformConfigurationFailureReason, PlatformConfigurationStatus,
-    RegisterPlatformConfigurationBundleRequest, ReportPlatformConfigurationApplyRequest,
-    UpdatePlatformConfigurationRequest,
+    PlatformConfigurationExecutorIntent, PlatformConfigurationFailureReason,
+    PlatformConfigurationStatus, RegisterPlatformConfigurationBundleRequest,
+    ReportPlatformConfigurationApplyRequest, UpdatePlatformConfigurationRequest,
 };
 use contracts::{ActorId, Revision, UtcTimestamp};
 use control_service::platform_configuration::{
@@ -158,7 +158,7 @@ async fn succeed(
     state: &PlatformConfigurationStatus,
     observed: Option<DeploymentObservation>,
     value: &str,
-) -> TestResult<(StatusCode, Option<PlatformConfigurationStatus>)> {
+) -> TestResult<(StatusCode, Option<PlatformConfigurationExecutorIntent>)> {
     let attempt = state.latest_apply.as_ref().ok_or("no attempt")?;
     let request = ReportPlatformConfigurationApplyRequest {
         expected_revision: attempt.revision,
@@ -315,7 +315,12 @@ async fn all_control_replicas_must_report_actual_loaded_source_before_applied() 
     )
     .await?;
     assert_eq!(status, StatusCode::OK);
-    let effective = result.ok_or("no applied result")?;
+    assert_eq!(
+        result.ok_or("no executor intent")?.attempt.stage,
+        Stage::Succeeded
+    );
+    // The executor sees only its attempt; the administrator aggregate is read directly.
+    let effective = configuration::get(&pool).await?;
     let old_effective = effective.applied.clone().ok_or("no effective")?;
 
     let mut changed = old_effective.configuration.clone();
@@ -405,7 +410,11 @@ async fn all_control_replicas_must_report_actual_loaded_source_before_applied() 
     )
     .await?;
     assert_eq!(status, StatusCode::OK);
-    let verified = result.ok_or("no verified result")?;
+    assert_eq!(
+        result.ok_or("no executor intent")?.attempt.stage,
+        Stage::Succeeded
+    );
+    let verified = configuration::get(&pool).await?;
     assert_eq!(verified.applied, verified.desired);
     assert_eq!(
         configuration::get_apply(&pool, failed_id).await?.stage,

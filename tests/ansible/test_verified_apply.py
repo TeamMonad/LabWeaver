@@ -167,11 +167,17 @@ class LocalUpExecutorTests(unittest.TestCase):
 
 
 class ManagedObjectOwnershipTests(unittest.TestCase):
+    TARGET = {"namespace": "science", "installationId": "019fa9d0-0000-7000-8000-000000000142"}
+
+    def configmap(self, name, data):
+        return {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {
+            "name": name, "namespace": "science",
+            "annotations": {"labweaver.io/installation-id": self.TARGET["installationId"]}}, "data": data}
+
     def test_apply_requires_owned_reads_and_uses_uid_revision_preconditions(self):
-        target = {"namespace": "science", "installationId": "019fa9d0-0000-7000-8000-000000000142"}
-        desired = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {
-            "name": "control-service-config", "namespace": "science",
-            "annotations": {"labweaver.io/installation-id": target["installationId"]}}, "data": {"config.yaml": "configuration"}}
+        target = self.TARGET
+        desired = self.configmap("control-service-config", {"config.yaml": "configuration"})
+        names = {("ConfigMap", "control-service-config")}
         current = {"metadata": dict(desired["metadata"], uid=target["installationId"], resourceVersion="7")}
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / ".private/objects.yaml"
@@ -180,7 +186,7 @@ class ManagedObjectOwnershipTests(unittest.TestCase):
                 with patch.object(executor.subprocess, "run", side_effect=[
                     subprocess.CompletedProcess([], 0, observed, b""), subprocess.CompletedProcess([], 0, b"", b""),
                 ]) as commands:
-                    executor.apply_objects(path, target)
+                    executor.apply_objects(path, target, names)
                     self.assertEqual(commands.call_args.args[0][1], operation)
                     written = json.loads(commands.call_args.kwargs["input"])
                     if operation == "replace":
@@ -191,8 +197,83 @@ class ManagedObjectOwnershipTests(unittest.TestCase):
                          subprocess.CompletedProcess([], 0, json.dumps(foreign).encode(), b"")):
                 with patch.object(executor.subprocess, "run", return_value=read) as commands:
                     with self.assertRaisesRegex(executor.ApplyError, "release-ownership"):
-                        executor.apply_objects(path, target)
+                        executor.apply_objects(path, target, names)
                     self.assertEqual(commands.call_count, 1)
+
+    def test_configuration_stage_never_rewrites_package_bound_application_objects(self):
+        # The rendered application objects carry the raw Bundle values; the application role
+        # later binds package images into these ConfigMaps. The configuration stage must not
+        # restore the raw values over those bindings.
+        bundle_objects = [
+            self.configmap("control-service-config", {"config.yaml": "control"}),
+            self.configmap("evaluation-service-config", {"config.yaml": "coordinator:\n  workerImage: example/worker:raw\n"}),
+            self.configmap("build-executor-config", {"config.yaml": "executor:\n  serviceImage: example/runner:raw\n"}),
+            self.configmap("agent-service-config", {"config.yaml": "sandbox:\n  image: example/sandbox:raw\n"}),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / ".private/objects.yaml"
+            fixtures.write(path, yaml.safe_dump_all(bundle_objects).encode())
+            written = []
+
+            def kubectl(command, **kwargs):
+                if command[1] in ("create", "replace"):
+                    written.append(json.loads(kwargs["input"])["metadata"]["name"])
+                return subprocess.CompletedProcess(command, 0, b"", b"")
+
+            with patch.object(executor.subprocess, "run", side_effect=kubectl):
+                executor.apply_objects(path, self.TARGET, executor.CONFIGURATION_OBJECTS)
+        self.assertEqual(written, ["control-service-config"])
+
+    def test_missing_configuration_object_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / ".private/objects.yaml"
+            fixtures.write(path, yaml.safe_dump(self.configmap("agent-service-config", {})).encode())
+            with patch.object(executor.subprocess, "run") as commands:
+                with self.assertRaisesRegex(executor.ApplyError, "release-ownership"):
+                    executor.apply_objects(path, self.TARGET, executor.CONFIGURATION_OBJECTS)
+                commands.assert_not_called()
+
+
+class SucceededIntentReplayTests(unittest.TestCase):
+    SOURCE = {"desiredRevision": 3, "encryptedBundleSha256": "b" * 64, "configurationSha256": "c" * 64}
+
+    def control(self, stage):
+        test = self
+
+        class Recording:
+            source = test.SOURCE
+            apply_id = "019fa9d0-0000-7000-8000-0000000000aa"
+            calls = []
+            observed = 0
+
+            def request(self, method, path, payload=None, revision=None, key=None):
+                self.calls.append(method)
+                return {"revision": 9, "configurationSha256": test.SOURCE["configurationSha256"], "attempt": {
+                    "id": self.apply_id, "revision": 5, "desiredRevision": 3,
+                    "encryptedBundleSha256": test.SOURCE["encryptedBundleSha256"], "stage": stage,
+                    "executorClientId": executor.CLIENT}}
+
+            def observe(self):
+                self.observed += 1
+
+        return Recording()
+
+    def test_succeeded_attempt_is_confirmed_without_writes(self):
+        control = self.control("succeeded")
+        self.assertTrue(executor.already_verified(control))
+        self.assertEqual(control.calls, ["GET"])
+        self.assertEqual(control.observed, 1)
+
+    def test_succeeded_attempt_cannot_be_prepared_for_another_deployment(self):
+        control = self.control("succeeded")
+        with self.assertRaisesRegex(executor.ApplyError, "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT:prepare"):
+            executor.prepare(control)
+        self.assertEqual(control.calls, ["GET"])
+
+    def test_unfinished_attempt_proceeds_to_the_normal_sequence(self):
+        control = self.control("applying")
+        self.assertFalse(executor.already_verified(control))
+        self.assertEqual(control.observed, 0)
 
 
 if __name__ == "__main__":

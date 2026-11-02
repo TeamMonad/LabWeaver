@@ -31,7 +31,7 @@ def fail(stage, code="LW_PLATFORM_CONFIGURATION_EXECUTOR_FAILED"):
     raise ApplyError(f"{code}:{stage}")
 
 
-def https_json(url, ca, *, method="GET", payload=None, headers=None, expected_configuration_sha256=None):
+def https_json(url, ca, *, method="GET", payload=None, headers=None):
     parsed = urlsplit(url)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
         fail("identity", "LW_PLATFORM_CONFIGURATION_EXECUTOR_TLS_REQUIRED")
@@ -45,8 +45,6 @@ def https_json(url, ca, *, method="GET", payload=None, headers=None, expected_co
         body = response.read(1048577)
         if response.status != 200 or len(body) > 1048576:
             fail("identity")
-        if expected_configuration_sha256 is not None and response.getheader("X-Labweaver-Configuration-Sha256") != expected_configuration_sha256:
-            fail("intent-binding", "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH")
         return json.loads(body)
     finally:
         connection.close()
@@ -141,8 +139,6 @@ class Control:
                     except (ValueError, AttributeError):
                         pass
                     fail("control-api", code)
-                if method == "GET" and path == f"{PREFIX}/applies/{self.apply_id}" and response.getheader("X-Labweaver-Configuration-Sha256") != self.source["configurationSha256"]:
-                    fail("intent-binding", "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH")
                 return json.loads(body)
             finally:
                 connection.close()
@@ -152,10 +148,12 @@ class Control:
                                 observer.forwarded_peer_reader(self.token, self.ca_file, self.hostname))
 
 
-def bound_attempt(status, source):
-    attempt = status["latestApply"]
+def bound_attempt(intent, source):
+    """Executor intent: {revision, attempt, configurationSha256}; nothing else is read."""
+    attempt = intent["attempt"]
     if (attempt["desiredRevision"] != source["desiredRevision"]
             or attempt["encryptedBundleSha256"] != source["encryptedBundleSha256"]
+            or intent["configurationSha256"] != source["configurationSha256"]
             or attempt.get("executorClientId") not in (None, CLIENT)):
         fail("intent-binding", "LW_PLATFORM_CONFIGURATION_OBSERVATION_MISMATCH")
     return attempt
@@ -178,10 +176,20 @@ def report(control, status, stage, *, observed=None, reason=None):
 
 
 def read_intent(control):
-    status = control.request("GET", f"{PREFIX}/applies/{control.apply_id}")
-    if status["latestApply"]["id"] != control.apply_id:
+    intent = control.request("GET", f"{PREFIX}/applies/{control.apply_id}")
+    if intent["attempt"]["id"] != control.apply_id:
         fail("intent-binding")
-    return status
+    bound_attempt(intent, control.source)
+    return intent
+
+
+def already_verified(control):
+    """A succeeded attempt is final. Re-entry only confirms the live replicas; it never writes."""
+    intent = read_intent(control)
+    if intent["attempt"]["stage"] != "succeeded":
+        return False
+    control.observe()
+    return True
 
 
 def prepare(control):
@@ -189,9 +197,11 @@ def prepare(control):
     attempt = bound_attempt(status, control.source)
     if attempt["stage"] == "requested":
         status = report(control, status, "validating")
-    if status["latestApply"]["stage"] == "validating":
+    if status["attempt"]["stage"] == "validating":
         status = report(control, status, "applying")
-    if status["latestApply"]["stage"] not in ("applying", "verifying", "succeeded"):
+    # Only an attempt still being executed may receive deployment writes. A succeeded attempt
+    # is final; any further write requires a new administrator-authorized attempt.
+    if status["attempt"]["stage"] not in ("applying", "verifying"):
         fail("prepare", "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT")
     return status
 
@@ -206,7 +216,7 @@ def finish(control):
     try:
         if attempt["stage"] == "applying":
             status = report(control, status, "verifying")
-        if status["latestApply"]["stage"] != "verifying":
+        if status["attempt"]["stage"] != "verifying":
             fail("verify", "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT")
         observed = control.observe()
         return report(control, status, "succeeded", observed=observed)
@@ -239,12 +249,16 @@ def verify_release(target):
         fail("release-ownership")
 
 
-def apply_objects(path, target):
-    """Create or CAS-replace only this installation's actual derived objects."""
+def apply_objects(path, target, names):
+    """Create or CAS-replace only the named, installation-owned objects."""
+    found = set()
     for desired in bundle.yaml.safe_load_all(bundle._private_file(path, bundle.MAX_ARCHIVE_BYTES * 2)):
         metadata = desired["metadata"]
+        if (desired["kind"], metadata.get("name")) not in names:
+            continue
+        found.add((desired["kind"], metadata["name"]))
         namespace = target["namespace"]
-        if (desired["kind"] not in {"ConfigMap", "Secret"} or metadata.get("namespace") != namespace
+        if (metadata.get("namespace") != namespace
                 or metadata.get("annotations", {}).get("labweaver.io/installation-id") != target["installationId"]):
             fail("release-ownership")
         read = subprocess.run(["kubectl", "get", desired["kind"], metadata["name"], "-n", namespace,
@@ -265,6 +279,15 @@ def apply_objects(path, target):
                                 capture_output=True, timeout=30, check=False)
         if result.returncode:
             fail("apply")
+    if found != names:
+        fail("release-ownership")
+
+
+# The configuration stage owns only what the platform-configuration version derives: the
+# Control projection carried in Helm values and Control's own configuration objects. Other
+# application objects carry package-bound runtime fields (worker, executor, sandbox and
+# BuildKit images) that only the application role derives; this stage never rewrites them.
+CONFIGURATION_OBJECTS = frozenset({("ConfigMap", "control-service-config")})
 
 
 def run(action):
@@ -293,11 +316,14 @@ def run(action):
     control = Control(source, service_token(model, files), ca_file, apply_id)
     if action == "prepare":
         prepare(control)
+    elif action == "verified":
+        if not already_verified(control):
+            # Not yet succeeded: the caller runs the normal prepare/apply/finish sequence.
+            raise ApplyError("LW_PLATFORM_CONFIGURATION_APPLY_PENDING:verified")
     elif action == "finish":
         finish(control)
     elif action == "apply":
-        status = read_intent(control)
-        if bound_attempt(status, source)["stage"] not in ("applying", "verifying", "succeeded"):
+        if bound_attempt(read_intent(control), source)["stage"] not in ("applying", "verifying"):
             fail("apply", "LW_PLATFORM_CONFIGURATION_APPLY_CONFLICT")
         values = bundle._document(bundle._private_file(rendered / "helm-values.yaml"))
         overlay = {
@@ -310,7 +336,7 @@ def run(action):
         }
         overlay_file = rendered / "verified-control-values.yaml"
         bundle._write(overlay_file, bundle.yaml.safe_dump(overlay).encode())
-        apply_objects(rendered / "application.yaml", model["target"])
+        apply_objects(rendered / "application.yaml", model["target"], CONFIGURATION_OBJECTS)
         result = subprocess.run([
             "helm", "upgrade", source["installation"]["releaseName"],
             str(Path(__file__).resolve().parents[1] / "deploy/helm/labweaver"),
@@ -327,7 +353,7 @@ def run(action):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("prepare", "apply", "finish", "fail"))
+    parser.add_argument("action", choices=("prepare", "verified", "apply", "finish", "fail"))
     arguments = parser.parse_args()
     try:
         run(arguments.action)

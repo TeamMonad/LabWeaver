@@ -1296,13 +1296,10 @@ async fn http_json_yaml_share_revision_and_only_signed_executor_can_report() -> 
         )
         .await?;
     assert_eq!(accepted.status(), StatusCode::OK);
-    let state: PlatformConfigurationStatus =
+    let intent: contracts::platform_configuration::PlatformConfigurationExecutorIntent =
         serde_json::from_slice(&to_bytes(accepted.into_body(), 1024 * 1024).await?)?;
-    assert_eq!(
-        state.latest_apply.as_ref().ok_or("no attempt")?.stage,
-        Stage::Validating
-    );
-    assert!(state.applied.is_none());
+    assert_eq!(intent.attempt.stage, Stage::Validating);
+    assert!(configuration::get(&pool).await?.applied.is_none());
     let missing = fixture
         .router
         .clone()

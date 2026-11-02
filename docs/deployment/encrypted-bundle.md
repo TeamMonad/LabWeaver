@@ -523,9 +523,9 @@ configurationExecutor:
 
 观察仍复用下述 Deployment→ReplicaSet→Pod roster 与进程快照检查。统一执行器使用已有 kubectl 对准确的 Pod 做临时回环 port-forward；HTTPS 始终校验 Control Service DNS 与 Bundle 内的 CA，不依赖控制器能直连 Pod CIDR，不使用 Pod exec 或关闭 TLS。端口转发退出后必定回收。
 
-`cargo xtask deploy --env <环境> --stage configuration --yes` 是同一执行器的配置投影阶段：在 prepare 与 finish 之间，应用本 Bundle 派生的应用 ConfigMap/Secret，再使用现有 Helm chart 将实际管理版本、来源和策略挂载到已有 release。对象摘要驱动服务按同一输入重启，并等待升级完成；NATS endpoint 在各服务启动时从其既有只读 Secret 挂载读取。它不初始化其他基础设施或替换其权限。该阶段仍要求已经登记且请求应用的真实 intent；没有 bypass 旗标，命令退出成功也不能代替 Control loaded 观察。
+`cargo xtask deploy --env <环境> --stage configuration --yes` 是同一执行器的配置投影阶段：在 prepare 与 finish 之间，只写 Control 自己的 `control-service-config`，再使用现有 Helm chart 将实际管理版本、来源和策略挂载到已有 release。对象摘要驱动服务按同一输入重启，并等待升级完成；NATS endpoint 在各服务启动时从其既有只读 Secret 挂载读取。它不初始化其他基础设施或替换其权限，也不改写其他应用 ConfigMap/Secret：它们带有应用阶段绑定的包镜像（evaluation worker、build executor、authoring sandbox 和 BuildKit）。该阶段仍要求已经登记且请求应用的真实 intent；没有 bypass 旗标，命令退出成功也不能代替 Control loaded 观察。所绑定尝试已 succeeded 时，重入只重新观察实际副本，不再部署或报告；需要再次写入时由管理员提交新的应用尝试。部署失败后若失败报告也无法写入 Control，入口同时给出两个诊断码，尝试保持 unverified。
 
-内部 intent 读取同时返回绑定版本的 `X-Labweaver-Configuration-Sha256`；执行器在任何部署写入前核对它，而不是误用可能已被管理员推进的当前 desired。配置对象写入先核对 namespace 和 installation ID，只对显式 NotFound 创建新对象；已有对象以实际 UID/resourceVersion 条件替换。读取失败、归属不符或并发替换均失败关闭，不通过名称相似认领对象。
+内部 intent 读取只返回所绑定尝试及其 desired 版本的 `configurationSha256`；执行器在任何部署写入前核对它，而不是误用可能已被管理员推进的当前 desired。配置对象写入先核对 namespace 和 installation ID，只对显式 NotFound 创建新对象；已有对象以实际 UID/resourceVersion 条件替换。读取失败、归属不符、缺少该对象或并发替换均失败关闭，不通过名称相似认领对象。
 
 
 完成已获准部署后，原执行者在 `verifying` 阶段收集一次实际观察：

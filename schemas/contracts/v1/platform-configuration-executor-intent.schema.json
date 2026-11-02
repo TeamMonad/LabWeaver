@@ -1,0 +1,84 @@
+{
+  "$defs": {
+    "OperationId": {
+      "description": "Strongly typed UUIDv7 identifier for `OperationId`.",
+      "type": "string"
+    },
+    "PlatformConfigurationApplyStage": {
+      "enum": [
+        "requested",
+        "validating",
+        "applying",
+        "verifying",
+        "succeeded",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "PlatformConfigurationExecutorAttempt": {
+      "additionalProperties": false,
+      "properties": {
+        "desiredRevision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "encryptedBundleSha256": {
+          "type": "string"
+        },
+        "executorClientId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "stage": {
+          "$ref": "#/$defs/PlatformConfigurationApplyStage"
+        }
+      },
+      "required": [
+        "id",
+        "revision",
+        "desiredRevision",
+        "encryptedBundleSha256",
+        "stage"
+      ],
+      "type": "object"
+    },
+    "Revision": {
+      "description": "Monotonic aggregate revision. Zero is never a persisted revision.",
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The only view the deployment executor receives. It carries the bound attempt and the\nimmutable digest of the version it binds, never administrator settings or other versions.",
+  "properties": {
+    "attempt": {
+      "$ref": "#/$defs/PlatformConfigurationExecutorAttempt"
+    },
+    "configurationSha256": {
+      "description": "`configurationSha256` of the version bound by `attempt.desiredRevision`.",
+      "type": "string"
+    },
+    "revision": {
+      "description": "Aggregate fence used for the executor's next report.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "revision",
+    "attempt",
+    "configurationSha256"
+  ],
+  "title": "PlatformConfigurationExecutorIntent",
+  "type": "object"
+}
