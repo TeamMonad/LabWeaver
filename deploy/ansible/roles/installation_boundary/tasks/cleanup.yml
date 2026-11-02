@@ -1,0 +1,9 @@
+---
+- name: Remove the invocation-owned Helm renderer workspace
+  ansible.builtin.file:
+    path: "{{ installation_boundary_helm_workspace.path }}"
+    state: absent
+  when:
+    - installation_boundary_helm_workspace is defined
+    - installation_boundary_helm_workspace.path is defined
+  check_mode: false

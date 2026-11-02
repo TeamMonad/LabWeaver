@@ -5,4 +5,3 @@ installation_boundary_objects: []
 installation_boundary_sources: []
 installation_boundary_helm_releases: []
 installation_boundary_shared_namespaces: []
-installation_boundary_post_renderer_path: /var/tmp/labweaver-helm-installation.py

@@ -339,9 +339,8 @@ class InstallationBoundaryTests(unittest.TestCase):
                             'elif "values" in sys.argv: print(json.dumps(data["values"]))\n'
                             f'else: os.execv({real_helm!r}, [{real_helm!r}] + sys.argv[1:])\n')
             helm.chmod(0o755)
-            producer = directory / 'post-renderer.py'
             variables = {'labweaver_installation_id': INSTALLATION, 'installation_boundary_kubeconfig': str(kubeconfig),
-                         'installation_boundary_helm': str(helm), 'installation_boundary_post_renderer_path': str(producer),
+                         'installation_boundary_helm': str(helm),
                          'installation_boundary_helm_releases': [{'name': 'component', 'namespace': 'component',
                             'chart_ref': str(chart), 'chart_version': '1.0.0', 'values': {}}]}
             entry = {'name': 'Execute complete infrastructure Helm boundary', 'ansible.builtin.include_role': {'name': 'installation_boundary'}}
@@ -349,14 +348,13 @@ class InstallationBoundaryTests(unittest.TestCase):
             fixture.write_text(json.dumps(valid))
             result = run_tasks([entry], variables, environment)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertTrue(producer.exists())
+            self.assertNotIn('installation_boundary_post_renderer_path', yaml.safe_dump(tasks('deploy/ansible/roles/installation_boundary/defaults/main.yml')))
             namespace_metadata = json.loads(namespace_capture.read_text())['metadata']
             self.assertEqual(namespace_metadata['annotations']['labweaver.io/installation-id'], INSTALLATION)
             self.assertEqual(namespace_metadata['annotations']['meta.helm.sh/release-name'], 'component')
             self.assertEqual(namespace_metadata['annotations']['meta.helm.sh/release-namespace'], 'component')
             self.assertEqual(namespace_metadata['labels']['app.kubernetes.io/managed-by'], 'Helm')
             namespace_capture.unlink()
-            producer.unlink()
             for variant in ('foreign-installation', 'wrong-namespace', 'read-error'):
                 with self.subTest(release=variant):
                     invalid = copy.deepcopy(valid)
@@ -369,8 +367,38 @@ class InstallationBoundaryTests(unittest.TestCase):
                     fixture.write_text(json.dumps(invalid))
                     result = run_tasks([entry], variables, environment)
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-                    self.assertFalse(producer.exists(), 'foreign or unreadable release must stop before producer staging')
                     self.assertFalse(namespace_capture.exists(), 'foreign or unreadable release must prevent every namespace creation')
+
+    def test_helm_renderer_is_private_unique_and_cleaned_after_use(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            role_path = temporary_boundary_role(directory)
+            capture = directory / 'renderer.json'
+            variables = {'labweaver_installation_id': INSTALLATION}
+            prepare = {'name': 'Prepare invocation-owned renderer', 'ansible.builtin.include_role': {
+                'name': 'installation_boundary', 'tasks_from': 'renderer'}}
+            cleanup = {'name': 'Clean invocation-owned renderer', 'ansible.builtin.include_role': {
+                'name': 'installation_boundary', 'tasks_from': 'cleanup'}}
+            record = {'name': 'Capture private renderer ownership', 'ansible.builtin.copy': {
+                'dest': str(capture), 'mode': '0600', 'content':
+                "{{ {'root': installation_boundary_helm_workspace.path, 'script': installation_boundary_helm_post_renderer} | to_json }}"}}
+            validate = {'name': 'Check root-only renderer workspace', 'ansible.builtin.command': {
+                'argv': [sys.executable, '-c',
+                         'import os,stat,sys; assert stat.S_IMODE(os.stat(sys.argv[1]).st_mode)==0o700; assert os.path.isfile(sys.argv[2])',
+                         '{{ installation_boundary_helm_workspace.path }}', '{{ installation_boundary_helm_post_renderer }}']}}
+            paths = []
+            for fail in (False, True):
+                block = [prepare, record, validate]
+                if fail:
+                    block.append({'name': 'Fail after preparing renderer', 'ansible.builtin.fail': {'msg': 'EXPECTED_RENDERER_FAILURE'}})
+                result = run_tasks([{'name': 'Scope renderer lifecycle', 'block': block, 'always': [cleanup]}], variables,
+                                   {'ANSIBLE_ROLES_PATH': str(role_path)})
+                self.assertEqual(result.returncode == 0, not fail, result.stdout + result.stderr)
+                recorded = json.loads(capture.read_text())
+                self.assertFalse(Path(recorded['root']).exists())
+                self.assertFalse(Path(recorded['script']).exists())
+                paths.append(recorded['root'])
+            self.assertNotEqual(paths[0], paths[1])
 
     def test_chart_namespace_creation_has_exact_helm_identity_and_never_stamps_existing_namespaces(self):
         source = tasks('deploy/ansible/roles/installation_boundary/tasks/main.yml')

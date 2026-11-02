@@ -44,17 +44,29 @@
     storageclass.kubernetes.io/is-default-class=true --overwrite
   changed_when: false
 
-- name: Install pinned NFS CSI
-  kubernetes.core.helm:
-    name: csi-driver-nfs
-    chart_ref: csi-driver-nfs/csi-driver-nfs
-    chart_version: "{{ nfs_csi_chart_version }}"
-    release_namespace: kube-system
-    create_namespace: false
-    values:
-      labweaverInstallationId: "{{ labweaver_installation_id }}"
-    post_renderer: "{{ installation_boundary_helm_post_renderer }}"
-  environment: "{{ labweaver_controller_proxy_env | default({}) | combine({'LW_BUNDLE_INSTALLATION_ID': labweaver_installation_id}) }}"
+- name: Reconcile the verified NFS CSI release with a private identity producer
+  block:
+    - name: Prepare the private NFS CSI Helm identity producer
+      ansible.builtin.include_role:
+        name: installation_boundary
+        tasks_from: renderer
+
+    - name: Install pinned NFS CSI
+      kubernetes.core.helm:
+        name: csi-driver-nfs
+        chart_ref: csi-driver-nfs/csi-driver-nfs
+        chart_version: "{{ nfs_csi_chart_version }}"
+        release_namespace: kube-system
+        create_namespace: false
+        values:
+          labweaverInstallationId: "{{ labweaver_installation_id }}"
+        post_renderer: "{{ installation_boundary_helm_post_renderer }}"
+      environment: "{{ labweaver_controller_proxy_env | default({}) | combine({'LW_BUNDLE_INSTALLATION_ID': labweaver_installation_id}) }}"
+  always:
+    - name: Remove the private NFS CSI Helm identity producer on every outcome
+      ansible.builtin.include_role:
+        name: installation_boundary
+        tasks_from: cleanup
 
 - name: Configure the NFS RWX StorageClass after its CSI driver exists
   kubernetes.core.k8s:

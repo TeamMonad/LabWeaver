@@ -117,36 +117,54 @@
   loop: "{{ installation_boundary_owned_source_objects | selectattr('kind', 'equalto', 'CustomResourceDefinition') | list }}"
   changed_when: false
 
-- name: Install Cilium with kube-proxy replacement and Gateway API
-  tags: [cilium]
-  kubernetes.core.helm:
-    name: cilium
-    chart_ref: cilium/cilium
-    chart_version: "{{ cluster_network_cilium_lock.chart }}"
-    update_repo_cache: true
-    release_namespace: kube-system
-    create_namespace: false
-    values: "{{ cluster_network_cilium_values }}"
-    post_renderer: "{{ installation_boundary_helm_post_renderer }}"
-  environment: "{{ labweaver_controller_proxy_env | default({}) | combine({'LW_BUNDLE_INSTALLATION_ID': labweaver_installation_id}) }}"
+- name: Reconcile verified network releases with a private identity producer
+  block:
+    - name: Prepare the private network Helm identity producer
+      ansible.builtin.include_role:
+        name: installation_boundary
+        tasks_from: renderer
+        apply:
+          tags: [always]
+      tags: [always]
 
-- name: Apply the LabWeaver node firewall policy
-  kubernetes.core.k8s:
-    kubeconfig: /etc/kubernetes/admin.conf
-    state: present
-    definition: "{{ installation_boundary_owned_objects | selectattr('kind', 'equalto', 'CiliumClusterwideNetworkPolicy') | list }}"
+    - name: Install Cilium with kube-proxy replacement and Gateway API
+      tags: [cilium]
+      kubernetes.core.helm:
+        name: cilium
+        chart_ref: cilium/cilium
+        chart_version: "{{ cluster_network_cilium_lock.chart }}"
+        update_repo_cache: true
+        release_namespace: kube-system
+        create_namespace: false
+        values: "{{ cluster_network_cilium_values }}"
+        post_renderer: "{{ installation_boundary_helm_post_renderer }}"
+      environment: "{{ labweaver_controller_proxy_env | default({}) | combine({'LW_BUNDLE_INSTALLATION_ID': labweaver_installation_id}) }}"
 
-- name: Install MetalLB
-  kubernetes.core.helm:
-    name: metallb
-    chart_ref: metallb/metallb
-    chart_version: "{{ metallb_chart_version }}"
-    release_namespace: metallb-system
-    create_namespace: false
-    post_renderer: "{{ installation_boundary_helm_post_renderer }}"
-    values:
-      labweaverInstallationId: "{{ labweaver_installation_id }}"
-  environment: "{{ labweaver_controller_proxy_env | default({}) | combine({'LW_BUNDLE_INSTALLATION_ID': labweaver_installation_id}) }}"
+    - name: Apply the LabWeaver node firewall policy
+      kubernetes.core.k8s:
+        kubeconfig: /etc/kubernetes/admin.conf
+        state: present
+        definition: "{{ installation_boundary_owned_objects | selectattr('kind', 'equalto', 'CiliumClusterwideNetworkPolicy') | list }}"
+
+    - name: Install MetalLB
+      kubernetes.core.helm:
+        name: metallb
+        chart_ref: metallb/metallb
+        chart_version: "{{ metallb_chart_version }}"
+        release_namespace: metallb-system
+        create_namespace: false
+        post_renderer: "{{ installation_boundary_helm_post_renderer }}"
+        values:
+          labweaverInstallationId: "{{ labweaver_installation_id }}"
+      environment: "{{ labweaver_controller_proxy_env | default({}) | combine({'LW_BUNDLE_INSTALLATION_ID': labweaver_installation_id}) }}"
+  always:
+    - name: Remove the private network Helm identity producer on every outcome
+      ansible.builtin.include_role:
+        name: installation_boundary
+        tasks_from: cleanup
+        apply:
+          tags: [always]
+      tags: [always]
 
 - name: Apply MetalLB address pool and L2 advertisement
   kubernetes.core.k8s:

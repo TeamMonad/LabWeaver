@@ -1,0 +1,18 @@
+---
+- name: Create a private invocation-owned Helm renderer workspace
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: labweaver-helm-renderer-
+  register: installation_boundary_helm_workspace
+  check_mode: false
+
+- name: Bind the private Helm installation identity producer path
+  ansible.builtin.set_fact:
+    installation_boundary_helm_post_renderer: "{{ installation_boundary_helm_workspace.path }}/stamp-installation.py"
+
+- name: Stage the identity producer only inside its private workspace
+  ansible.builtin.copy:
+    src: stamp-installation.py
+    dest: "{{ installation_boundary_helm_post_renderer }}"
+    mode: '0700'
+  check_mode: false
