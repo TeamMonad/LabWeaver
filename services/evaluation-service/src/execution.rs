@@ -524,10 +524,9 @@ impl std::fmt::Display for TaskResourceFailure {
                 ResourceClientError::Conflict("LW_TASK_RESOURCE_HTTP_CONFLICT") => {
                     "LW_EVALUATION_RESOURCE_CONFLICT"
                 }
-                ResourceClientError::Conflict(code) => code,
+                ResourceClientError::Conflict(code) | ResourceClientError::Admission(code) => code,
                 ResourceClientError::Rejected => "LW_EVALUATION_RESOURCE_REJECTED",
                 ResourceClientError::Unavailable => "LW_EVALUATION_RESOURCE_UNAVAILABLE",
-                ResourceClientError::Admission(code) => code,
             },
         })
     }
