@@ -2661,7 +2661,8 @@ async fn native_build_admission_preserves_resource_codes_through_executor_and_pu
             "buildkit-primary-v1".to_owned(),
             "harbor-primary-v1".to_owned(),
             Duration::from_secs(5),
-        )?;
+        )
+        .map_err(|failure| std::io::Error::other(failure.diagnostic_code()))?;
         let mut policy = policy()?;
         policy.stage_timeout = Duration::from_secs(5);
         let failure = BuildPipeline::new(provider, policy)?
