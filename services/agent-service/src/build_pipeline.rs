@@ -4,7 +4,7 @@
 //! replay/state codes through NATS, pipeline errors, persisted status and build-failed events.
 //! Admission is non-retryable. An unresolved build funding conflict is also non-retryable: Resource
 //! has reconciled the stored command/hold, but an unchanged conflicting replay cannot authorize
-//! execution. Explicit resolution is required; neither case is an unknown BuildKit execution.
+//! execution. Explicit resolution is required; neither case is an unknown `BuildKit` execution.
 //! Unknown wire codes are rejected without retaining response details or arbitrary strings.
 #![allow(
     missing_docs,
