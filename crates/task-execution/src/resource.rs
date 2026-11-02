@@ -630,7 +630,9 @@ pub fn resource_admission_diagnostic(code: &str) -> Option<&'static str> {
     }
 }
 
-fn resource_reconciliation_diagnostic(code: &str) -> Option<&'static str> {
+/// Recognizes only stable replay/state fences; recognition does not authorize a retry.
+#[must_use]
+pub fn resource_reconciliation_diagnostic(code: &str) -> Option<&'static str> {
     match code {
         "LW_IDEMPOTENCY_CONFLICT" => Some("LW_IDEMPOTENCY_CONFLICT"),
         "LW_IDEMPOTENCY_IN_PROGRESS" => Some("LW_IDEMPOTENCY_IN_PROGRESS"),

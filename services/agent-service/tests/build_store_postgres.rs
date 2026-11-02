@@ -2476,3 +2476,268 @@ async fn known_original_history_unlocks_cleanup_without_publishing_or_rebuilding
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn native_build_admission_preserves_resource_codes_through_executor_and_public_status()
+-> Result<(), Box<dyn std::error::Error>> {
+    use agent_service::build_pipeline::{BuildCancellation, BuildExecutionFence};
+    use agent_service::build_provider::{NatsBuildExecutorServer, NatsBuildSupplyChainProvider};
+    use contracts::resource::{FixedDecimal, build_costing::BuildCostAdmissionRequest};
+    let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(12)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            postgres.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    apply_agent_migrations(&pool).await?;
+    let billing = BuildBillingFixture::start(pool.clone()).await?;
+    let nats = testcontainers::GenericImage::new("nats", "2.11.8-alpine")
+        .with_exposed_port(testcontainers::core::ContainerPort::Tcp(4222))
+        .with_wait_for(testcontainers::core::WaitFor::message_on_stderr(
+            "Server is ready",
+        ))
+        .start()
+        .await?;
+    let client = async_nats::connect(format!(
+        "nats://127.0.0.1:{}",
+        nats.get_host_port_ipv4(4222).await?
+    ))
+    .await?;
+    let executions = Arc::new(AtomicUsize::new(0));
+    let executor = FencedBuildExecutor::new(
+        PgBuildExecutorFenceStore::new(pool.clone()),
+        MeteredBoundary {
+            executions: executions.clone(),
+            queries: Arc::new(AtomicUsize::new(0)),
+            measurement: Arc::new(tokio::sync::Mutex::new(
+                contracts::resource::build_costing::BuildUsageMeasurement::NotStarted {
+                    reason: "admission rejected before BuildKit".to_owned(),
+                },
+            )),
+        },
+    )
+    .with_billing_client(billing.client.clone());
+    let server = NatsBuildExecutorServer::new(
+        client.clone(),
+        "diagnostic.build.execute".to_owned(),
+        executor,
+    )?;
+    let server = tokio::spawn(async move { server.serve().await });
+    let store = PgBuildStore::new(pool.clone());
+    for code in [
+        "LW_RESOURCE_RATE_UNCONFIGURED",
+        "LW_CREDITS_INSUFFICIENT",
+        "LW_CREDITS_CONFLICT",
+    ] {
+        let mut command = build_command()?;
+        command.request.max_duration_milliseconds = 60_000;
+        store
+            .accept_command("agent-build-command-v1", &command_event(command.clone())?)
+            .await?;
+        billing
+            .credits
+            .admin(
+                &EventId::new().to_string(),
+                ActorId::new(),
+                &[contracts::PlatformRole::PlatformAdmin],
+                &contracts::resource::credits::CreditAdminOperation::Grant {
+                    project_id: command.request.project_id,
+                    amount: FixedDecimal::parse(if code == "LW_CREDITS_CONFLICT" {
+                        "250.000000"
+                    } else {
+                        "100.000000"
+                    })?,
+                    reason: "isolated build admission regression".to_owned(),
+                },
+            )
+            .await?;
+        if code == "LW_CREDITS_INSUFFICIENT" {
+            billing
+                .synthetic_tariff("buildkit-primary-v1", "2.000000")
+                .await?;
+        }
+        let lease = store
+            .claim_due("resource-diagnostic-worker", Duration::from_secs(90))
+            .await?
+            .ok_or("build lease missing")?;
+        let token: uuid::Uuid = sqlx::query_scalar(
+            "SELECT lease_token FROM agent.build_commands WHERE build_request_id=$1",
+        )
+        .bind(command.request.id.as_uuid())
+        .fetch_one(&pool)
+        .await?;
+        let started = database_now(&pool).await?;
+        let deadline = add_time(started, time::Duration::seconds(60))?;
+        let build = build_executor_envelope(
+            &command,
+            lease.attempt,
+            token,
+            BuildProviderStage::Build,
+            deadline,
+        );
+        if code == "LW_RESOURCE_RATE_UNCONFIGURED" {
+            let mut query = build.clone();
+            query.query_only = true;
+            let payload = serde_json::to_vec(&query)?;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if client
+                        .request("diagnostic.build.execute", payload.clone().into())
+                        .await
+                        .is_ok()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await?;
+        }
+        if code == "LW_CREDITS_CONFLICT" {
+            let funded = billing
+                .client
+                .admit_build_cost(&BuildCostAdmissionRequest {
+                    build_request_id: command.request.id,
+                    attempt: lease.attempt,
+                    lease_token: token,
+                    execution_deadline: deadline,
+                    stage_request_id: build.context.stage_request_id.to_string(),
+                    authorize_execution: false,
+                })
+                .await?;
+            // An explicit lost-snapshot database fault leaves the real preexisting hold intact.
+            // Repricing through Resource's native tariff API then conflicts with that exact hold;
+            // the HTTP response, error classification and ledger decisions are not mocked.
+            sqlx::query("DELETE FROM resource.build_metering_attempts WHERE build_request_id=$1 AND attempt=$2")
+                .bind(command.request.id.as_uuid()).bind(i32::try_from(lease.attempt)?).execute(&pool).await?;
+            let rate: serde_json::Value = sqlx::query_scalar("SELECT contract FROM resource.resource_rates WHERE builder_binding='buildkit-primary-v1' AND effective_until IS NULL")
+                .fetch_one(&pool).await?;
+            let rate: contracts::resource::ResourceRate = serde_json::from_value(rate)?;
+            let boundary = add_time(database_now(&pool).await?, time::Duration::seconds(1))?;
+            billing
+                .store
+                .end_rate(
+                    rate.id,
+                    "end-before-repriced-conflict",
+                    &contracts::http::EndResourceRateRequest {
+                        effective_until: boundary,
+                    },
+                )
+                .await?;
+            billing
+                .store
+                .create_rate(
+                    "repriced-conflict-rate",
+                    &contracts::http::CreateResourceRateRequest {
+                        unit: contracts::resource::ResourceBillingUnit::BuildSecond,
+                        unit_quantity: 1,
+                        gpu_class: None,
+                        gpu_mode: None,
+                        builder_binding: Some("buildkit-primary-v1".to_owned()),
+                        model_binding: None,
+                        max_preauthorization: None,
+                        unit_price: contracts::resource::Money {
+                            currency: "CREDITS".to_owned(),
+                            amount: FixedDecimal::parse("3.000000")?,
+                        },
+                        effective_from: boundary,
+                        effective_until: None,
+                    },
+                )
+                .await?;
+            let hold_amount: String = sqlx::query_scalar(
+                "SELECT amount::text FROM resource.credit_holds WHERE hold_id=$1",
+            )
+            .bind(funded.hold.id)
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(hold_amount, funded.hold.amount.scaled().to_string());
+        }
+        let provider = NatsBuildSupplyChainProvider::new(
+            client.clone(),
+            "diagnostic.build.execute".to_owned(),
+            "buildkit-primary-v1".to_owned(),
+            "harbor-primary-v1".to_owned(),
+            Duration::from_secs(5),
+        )?;
+        let mut policy = policy()?;
+        policy.stage_timeout = Duration::from_secs(5);
+        let failure = BuildPipeline::new(provider, policy)?
+            .execute(
+                &command,
+                started,
+                BuildExecutionFence::new(lease.attempt, token, deadline)?,
+                &BuildCancellation::new(),
+            )
+            .await
+            .err()
+            .ok_or("native admission must reject before execution")?;
+        assert_eq!(failure.diagnostic_code(), code);
+        assert!(
+            !failure.retryable,
+            "unchanged admission or unresolved hold conflict cannot be automatically replayed"
+        );
+        assert!(
+            failure.cleanup_verified,
+            "pre-native admission failure creates no external build resources"
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        store
+            .fail(&lease, failure, "build-resource-diagnostic")
+            .await?;
+        let status = store
+            .load_status(
+                command.request.id,
+                &InternalAgentBuildStatusQuery {
+                    project_id: command.request.project_id,
+                    course_id: command.request.course_id,
+                },
+            )
+            .await?;
+        assert_eq!(status.state, InternalAgentBuildState::Failed);
+        assert_eq!(
+            status
+                .diagnostic_code
+                .as_ref()
+                .map(contracts::DiagnosticCode::as_str),
+            Some(code)
+        );
+        let event: serde_json::Value = sqlx::query_scalar(
+            "SELECT payload FROM agent.outbox_events WHERE aggregate_id=$1 AND subject=$2",
+        )
+        .bind(command.request.id.as_uuid())
+        .bind(subjects::AGENT_BUILD_FAILED)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(event["data"]["diagnosticCode"], code);
+        assert_eq!(event["data"]["retryable"], false);
+    }
+    server.abort();
+    Ok(())
+}
+
+#[test]
+fn build_resource_failure_wire_roundtrip_rejects_unknown_diagnostics()
+-> Result<(), Box<dyn std::error::Error>> {
+    for code in [
+        BuildProviderFailureCode::ResourceAdmission("LW_RESOURCE_RATE_UNCONFIGURED"),
+        BuildProviderFailureCode::ResourceConflict("LW_CREDITS_CONFLICT"),
+    ] {
+        let failure = BuildProviderFailure {
+            code,
+            retryable: false,
+        };
+        let decoded: BuildProviderFailure = serde_json::from_slice(&serde_json::to_vec(&failure)?)?;
+        assert_eq!(decoded, failure);
+        assert_eq!(decoded.diagnostic_code(), failure.diagnostic_code());
+    }
+    for code in [
+        serde_json::json!({"resource_admission":"LW_FAKE_SECRET"}),
+        serde_json::json!({"resource_conflict":"LW_RESOURCE_RATE_UNCONFIGURED"}),
+    ] {
+        assert!(serde_json::from_value::<BuildProviderFailureCode>(code).is_err());
+    }
+    Ok(())
+}

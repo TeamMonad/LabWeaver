@@ -1,4 +1,11 @@
 //! Deterministic, fail-closed orchestration for approved Container image builds and imports.
+//!
+//! The service-local executor failure wire preserves allowlisted Resource admission and unresolved
+//! replay/state codes through NATS, pipeline errors, persisted status and build-failed events.
+//! Admission is non-retryable. An unresolved build funding conflict is also non-retryable: Resource
+//! has reconciled the stored command/hold, but an unchanged conflicting replay cannot authorize
+//! execution. Explicit resolution is required; neither case is an unknown BuildKit execution.
+//! Unknown wire codes are rejected without retaining response details or arbitrary strings.
 #![allow(
     missing_docs,
     reason = "the contracts crate owns public wire documentation; this module exposes provider integration seams"
@@ -376,8 +383,14 @@ impl<P: BuildSupplyChainProvider> BuildPipeline<P> {
         let project = match project {
             Ok(project) => project,
             Err(mut error)
-                if error.code
-                    == BuildFailureCode::Provider(BuildProviderFailureCode::FundingRejected) =>
+                if matches!(
+                    error.code,
+                    BuildFailureCode::Provider(
+                        BuildProviderFailureCode::FundingRejected
+                            | BuildProviderFailureCode::ResourceAdmission(_)
+                            | BuildProviderFailureCode::ResourceConflict(_)
+                    )
+                ) =>
             {
                 error.cleanup_verified = true;
                 return Err(error);
@@ -683,9 +696,32 @@ pub enum BuildProviderFailureCode {
     Cancelled,
     ExecutionUnknown,
     FundingRejected,
+    /// Definitive Resource rejection before native build execution; never a provider unknown.
+    ResourceAdmission(#[serde(deserialize_with = "deserialize_resource_admission")] &'static str),
+    /// Unresolved Resource replay/state fence; never automatically replay a conflicting build.
+    ResourceConflict(#[serde(deserialize_with = "deserialize_resource_conflict")] &'static str),
     Rejected,
     IdentityMismatch,
     OutputInvalid,
+}
+
+fn deserialize_resource_admission<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<&'static str, D::Error> {
+    let code = String::deserialize(deserializer)?;
+    task_execution::resource::resource_admission_diagnostic(&code)
+        .ok_or_else(|| serde::de::Error::custom("unknown Resource admission diagnostic"))
+}
+
+fn deserialize_resource_conflict<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<&'static str, D::Error> {
+    let code = String::deserialize(deserializer)?;
+    if code == "LW_TASK_RESOURCE_HTTP_CONFLICT" {
+        return Ok("LW_TASK_RESOURCE_HTTP_CONFLICT");
+    }
+    task_execution::resource::resource_reconciliation_diagnostic(&code)
+        .ok_or_else(|| serde::de::Error::custom("unknown Resource reconciliation diagnostic"))
 }
 
 impl BuildProviderFailure {
@@ -698,6 +734,8 @@ impl BuildProviderFailure {
             BuildProviderFailureCode::ExecutionUnknown => "LW_AGENT_BUILD_EXECUTION_UNKNOWN",
             BuildProviderFailureCode::Unavailable => "LW_AGENT_BUILD_PROVIDER_UNAVAILABLE",
             BuildProviderFailureCode::FundingRejected => "LW_AGENT_BUILD_FUNDING_REJECTED",
+            BuildProviderFailureCode::ResourceAdmission(code)
+            | BuildProviderFailureCode::ResourceConflict(code) => code,
             BuildProviderFailureCode::Rejected => "LW_AGENT_BUILD_REJECTED",
             BuildProviderFailureCode::IdentityMismatch => {
                 "LW_AGENT_BUILD_PROVIDER_IDENTITY_MISMATCH"
@@ -771,6 +809,10 @@ impl BuildFailureCode {
             Self::Provider(BuildProviderFailureCode::FundingRejected) => {
                 "LW_AGENT_BUILD_FUNDING_REJECTED"
             }
+            Self::Provider(
+                BuildProviderFailureCode::ResourceAdmission(code)
+                | BuildProviderFailureCode::ResourceConflict(code),
+            ) => code,
             Self::Provider(BuildProviderFailureCode::Rejected) => "LW_AGENT_BUILD_REJECTED",
             Self::Provider(BuildProviderFailureCode::IdentityMismatch) => {
                 "LW_AGENT_BUILD_PROVIDER_IDENTITY_MISMATCH"

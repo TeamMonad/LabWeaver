@@ -1201,8 +1201,21 @@ const fn executor_failure(error: &BuildExecutorFenceError) -> BuildProviderFailu
             retryable: true,
         },
         BuildExecutorFenceError::Billing(
+            task_execution::resource::ResourceClientError::Admission(code),
+        ) => BuildProviderFailure {
+            code: BuildProviderFailureCode::ResourceAdmission(code),
+            retryable: false,
+        },
+        // Resource has already reconciled its persisted hold/command. A remaining conflict
+        // cannot authorize a changed replay; preserve the code and require explicit resolution.
+        BuildExecutorFenceError::Billing(
+            task_execution::resource::ResourceClientError::Conflict(code),
+        ) => BuildProviderFailure {
+            code: BuildProviderFailureCode::ResourceConflict(code),
+            retryable: false,
+        },
+        BuildExecutorFenceError::Billing(
             task_execution::resource::ResourceClientError::Denied
-            | task_execution::resource::ResourceClientError::Conflict(_)
             | task_execution::resource::ResourceClientError::Rejected
             | task_execution::resource::ResourceClientError::RequestMissing,
         ) => BuildProviderFailure {
