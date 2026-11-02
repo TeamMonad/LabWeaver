@@ -2530,6 +2530,7 @@ async fn native_build_admission_preserves_resource_codes_through_executor_and_pu
         "LW_RESOURCE_RATE_UNCONFIGURED",
         "LW_CREDITS_INSUFFICIENT",
         "LW_CREDITS_CONFLICT",
+        "LW_RESOURCE_RATE_OVERLAP",
     ] {
         let mut command = build_command()?;
         command.request.max_duration_milliseconds = 60_000;
@@ -2557,6 +2558,34 @@ async fn native_build_admission_preserves_resource_codes_through_executor_and_pu
             billing
                 .synthetic_tariff("buildkit-primary-v1", "2.000000")
                 .await?;
+        }
+        if code == "LW_RESOURCE_RATE_OVERLAP" {
+            // The native rate API rejects overlapping windows at creation (store.rs
+            // RateOverlap), so overlapping coverage can only exist from data that predates
+            // that check. Copy the open build rate left by the earlier cases into one labelled
+            // overlapping row; every table constraint stays active and Resource pricing reads
+            // it through its real query.
+            let contract: serde_json::Value = sqlx::query_scalar(
+                "SELECT contract FROM resource.resource_rates WHERE builder_binding='buildkit-primary-v1' AND effective_until IS NULL",
+            )
+            .fetch_one(&pool)
+            .await?;
+            let mut overlapping: contracts::resource::ResourceRate =
+                serde_json::from_value(contract)?;
+            overlapping.id = contracts::RateId::new();
+            // Start inside the existing open rate's window, before the build starts, so the
+            // build window is covered by two rates at once.
+            overlapping.effective_from = UtcTimestamp::from_utc(
+                database_now(&pool).await?.get() - time::Duration::seconds(1),
+            )?;
+            sqlx::query(
+                "INSERT INTO resource.resource_rates(rate_id,revision,unit,unit_quantity,gpu_class,gpu_mode,currency,unit_price,effective_from,effective_until,builder_binding,model_binding,max_preauthorization,contract) SELECT $1,revision,unit,unit_quantity,gpu_class,gpu_mode,currency,unit_price,$2,effective_until,builder_binding,model_binding,max_preauthorization,$3 FROM resource.resource_rates WHERE builder_binding='buildkit-primary-v1' AND effective_until IS NULL",
+            )
+            .bind(overlapping.id.as_uuid())
+            .bind(overlapping.effective_from.get())
+            .bind(serde_json::to_value(&overlapping)?)
+            .execute(&pool)
+            .await?;
         }
         let lease = store
             .claim_due("resource-diagnostic-worker", Duration::from_secs(90))
@@ -2595,6 +2624,7 @@ async fn native_build_admission_preserves_resource_codes_through_executor_and_pu
             })
             .await?;
         }
+        let mut funded_hold = None;
         if code == "LW_CREDITS_CONFLICT" {
             let funded = billing
                 .client
@@ -2607,12 +2637,19 @@ async fn native_build_admission_preserves_resource_codes_through_executor_and_pu
                     authorize_execution: false,
                 })
                 .await?;
+            funded_hold = Some(funded.hold);
             // Explicit database visibility fault: hide only metering reads behind a filtered
             // view while retaining the physical row, its actual hold, and every FK constraint.
             // The native tariff API reprices a new admission; native Credits detects the
             // existing hold mismatch. No Resource handler/response or principal is replaced.
             sqlx::query("ALTER TABLE resource.build_metering_attempts RENAME TO visibility_fault_build_metering_attempts").execute(&pool).await?;
             sqlx::query("CREATE VIEW resource.build_metering_attempts AS SELECT * FROM resource.visibility_fault_build_metering_attempts WHERE false").execute(&pool).await?;
+        }
+        // Everything between installing and removing the visibility fault runs inside one
+        // future so the schema is restored before any error or panic propagates.
+        let faulted = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+          let result: Result<agent_service::build_pipeline::BuildPipelineError, Box<dyn std::error::Error>> = async {
+          if let Some(hold) = funded_hold.as_ref() {
             let rate: serde_json::Value = sqlx::query_scalar("SELECT contract FROM resource.resource_rates WHERE builder_binding='buildkit-primary-v1' AND effective_until IS NULL")
                 .fetch_one(&pool).await?;
             let rate: contracts::resource::ResourceRate = serde_json::from_value(rate)?;
@@ -2651,37 +2688,46 @@ async fn native_build_admission_preserves_resource_codes_through_executor_and_pu
             let hold_amount: String = sqlx::query_scalar(
                 "SELECT amount::text FROM resource.credit_holds WHERE hold_id=$1",
             )
-            .bind(funded.hold.id)
+            .bind(hold.id)
             .fetch_one(&pool)
             .await?;
-            assert_eq!(hold_amount, funded.hold.amount.scaled().to_string());
-        }
-        let provider = NatsBuildSupplyChainProvider::new(
-            client.clone(),
-            "diagnostic.build.execute".to_owned(),
-            "buildkit-primary-v1".to_owned(),
-            "harbor-primary-v1".to_owned(),
-            Duration::from_secs(5),
-        )
-        .map_err(|failure| std::io::Error::other(failure.diagnostic_code()))?;
-        let mut policy = policy()?;
-        policy.stage_timeout = Duration::from_secs(5);
-        let failure = BuildPipeline::new(provider, policy)?
-            .execute(
-                &command,
-                started,
-                BuildExecutionFence::new(lease.attempt, token, deadline)?,
-                &BuildCancellation::new(),
-            )
-            .await
-            .err()
-            .ok_or("native admission must reject before execution")?;
+            assert_eq!(hold_amount, hold.amount.scaled().to_string());
+          }
+          let provider = NatsBuildSupplyChainProvider::new(
+              client.clone(),
+              "diagnostic.build.execute".to_owned(),
+              "buildkit-primary-v1".to_owned(),
+              "harbor-primary-v1".to_owned(),
+              Duration::from_secs(5),
+          )
+          .map_err(|failure| std::io::Error::other(failure.diagnostic_code()))?;
+          let mut policy = policy()?;
+          policy.stage_timeout = Duration::from_secs(5);
+          BuildPipeline::new(provider, policy)?
+              .execute(
+                  &command,
+                  started,
+                  BuildExecutionFence::new(lease.attempt, token, deadline)?,
+                  &BuildCancellation::new(),
+              )
+              .await
+              .err()
+              .ok_or_else(|| Box::<dyn std::error::Error>::from("native admission must reject before execution"))
+          }
+          .await;
+          result
+        }))
+        .await;
         if code == "LW_CREDITS_CONFLICT" {
             sqlx::query("DROP VIEW resource.build_metering_attempts")
                 .execute(&pool)
                 .await?;
             sqlx::query("ALTER TABLE resource.visibility_fault_build_metering_attempts RENAME TO build_metering_attempts").execute(&pool).await?;
         }
+        let failure = match faulted {
+            Ok(result) => result?,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
         assert_eq!(failure.diagnostic_code(), code);
         assert!(
             !failure.retryable,
