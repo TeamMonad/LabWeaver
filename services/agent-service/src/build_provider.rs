@@ -1203,7 +1203,9 @@ const fn executor_failure(error: &BuildExecutorFenceError) -> BuildProviderFailu
         BuildExecutorFenceError::Billing(
             task_execution::resource::ResourceClientError::Admission(code),
         ) => BuildProviderFailure {
-            code: BuildProviderFailureCode::ResourceAdmission(code),
+            code: BuildProviderFailureCode::ResourceAdmission(
+                crate::build_pipeline::BuildResourceDiagnostic::from_verified_resource(code),
+            ),
             retryable: false,
         },
         // Resource has already reconciled its persisted hold/command. A remaining conflict
@@ -1211,7 +1213,9 @@ const fn executor_failure(error: &BuildExecutorFenceError) -> BuildProviderFailu
         BuildExecutorFenceError::Billing(
             task_execution::resource::ResourceClientError::Conflict(code),
         ) => BuildProviderFailure {
-            code: BuildProviderFailureCode::ResourceConflict(code),
+            code: BuildProviderFailureCode::ResourceConflict(
+                crate::build_pipeline::BuildResourceDiagnostic::from_verified_resource(code),
+            ),
             retryable: false,
         },
         BuildExecutorFenceError::Billing(

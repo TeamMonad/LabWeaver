@@ -687,6 +687,17 @@ pub struct BuildProviderFailure {
     pub retryable: bool,
 }
 
+/// A safe Resource diagnostic token interned by the shared closed allowlists.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct BuildResourceDiagnostic(&'static str);
+
+impl BuildResourceDiagnostic {
+    pub(crate) const fn from_verified_resource(code: &'static str) -> Self {
+        Self(code)
+    }
+}
+
 /// Closed provider failure family safe for metrics and persisted diagnostics.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -697,9 +708,13 @@ pub enum BuildProviderFailureCode {
     ExecutionUnknown,
     FundingRejected,
     /// Definitive Resource rejection before native build execution; never a provider unknown.
-    ResourceAdmission(#[serde(deserialize_with = "deserialize_resource_admission")] &'static str),
+    ResourceAdmission(
+        #[serde(deserialize_with = "deserialize_resource_admission")] BuildResourceDiagnostic,
+    ),
     /// Unresolved Resource replay/state fence; never automatically replay a conflicting build.
-    ResourceConflict(#[serde(deserialize_with = "deserialize_resource_conflict")] &'static str),
+    ResourceConflict(
+        #[serde(deserialize_with = "deserialize_resource_conflict")] BuildResourceDiagnostic,
+    ),
     Rejected,
     IdentityMismatch,
     OutputInvalid,
@@ -707,20 +722,22 @@ pub enum BuildProviderFailureCode {
 
 fn deserialize_resource_admission<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
-) -> Result<&'static str, D::Error> {
+) -> Result<BuildResourceDiagnostic, D::Error> {
     let code = String::deserialize(deserializer)?;
     task_execution::resource::resource_admission_diagnostic(&code)
+        .map(BuildResourceDiagnostic)
         .ok_or_else(|| serde::de::Error::custom("unknown Resource admission diagnostic"))
 }
 
 fn deserialize_resource_conflict<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
-) -> Result<&'static str, D::Error> {
+) -> Result<BuildResourceDiagnostic, D::Error> {
     let code = String::deserialize(deserializer)?;
     if code == "LW_TASK_RESOURCE_HTTP_CONFLICT" {
-        return Ok("LW_TASK_RESOURCE_HTTP_CONFLICT");
+        return Ok(BuildResourceDiagnostic("LW_TASK_RESOURCE_HTTP_CONFLICT"));
     }
     task_execution::resource::resource_reconciliation_diagnostic(&code)
+        .map(BuildResourceDiagnostic)
         .ok_or_else(|| serde::de::Error::custom("unknown Resource reconciliation diagnostic"))
 }
 
@@ -735,7 +752,7 @@ impl BuildProviderFailure {
             BuildProviderFailureCode::Unavailable => "LW_AGENT_BUILD_PROVIDER_UNAVAILABLE",
             BuildProviderFailureCode::FundingRejected => "LW_AGENT_BUILD_FUNDING_REJECTED",
             BuildProviderFailureCode::ResourceAdmission(code)
-            | BuildProviderFailureCode::ResourceConflict(code) => code,
+            | BuildProviderFailureCode::ResourceConflict(code) => code.0,
             BuildProviderFailureCode::Rejected => "LW_AGENT_BUILD_REJECTED",
             BuildProviderFailureCode::IdentityMismatch => {
                 "LW_AGENT_BUILD_PROVIDER_IDENTITY_MISMATCH"
@@ -812,7 +829,7 @@ impl BuildFailureCode {
             Self::Provider(
                 BuildProviderFailureCode::ResourceAdmission(code)
                 | BuildProviderFailureCode::ResourceConflict(code),
-            ) => code,
+            ) => code.0,
             Self::Provider(BuildProviderFailureCode::Rejected) => "LW_AGENT_BUILD_REJECTED",
             Self::Provider(BuildProviderFailureCode::IdentityMismatch) => {
                 "LW_AGENT_BUILD_PROVIDER_IDENTITY_MISMATCH"

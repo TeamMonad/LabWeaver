@@ -2722,13 +2722,11 @@ async fn native_build_admission_preserves_resource_codes_through_executor_and_pu
 fn build_resource_failure_wire_roundtrip_rejects_unknown_diagnostics()
 -> Result<(), Box<dyn std::error::Error>> {
     for code in [
-        BuildProviderFailureCode::ResourceAdmission("LW_RESOURCE_RATE_UNCONFIGURED"),
-        BuildProviderFailureCode::ResourceConflict("LW_CREDITS_CONFLICT"),
+        serde_json::json!({"resource_admission":"LW_RESOURCE_RATE_UNCONFIGURED"}),
+        serde_json::json!({"resource_conflict":"LW_CREDITS_CONFLICT"}),
     ] {
-        let failure = BuildProviderFailure {
-            code,
-            retryable: false,
-        };
+        let failure: BuildProviderFailure =
+            serde_json::from_value(serde_json::json!({"code":code,"retryable":false}))?;
         let decoded: BuildProviderFailure = serde_json::from_slice(&serde_json::to_vec(&failure)?)?;
         assert_eq!(decoded, failure);
         assert_eq!(decoded.diagnostic_code(), failure.diagnostic_code());
