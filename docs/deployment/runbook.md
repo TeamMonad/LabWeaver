@@ -121,6 +121,8 @@ Cilium 的 CRD 按锁定 chart 对应的 upstream tag 完整枚举，作为独�
 
 清空仅能在另行授权的维护窗口执行，必须指定目标、范围和原 Bundle 安装 ID；先完成独立备份与数据处置审批。入口发现所有服务中的可删除 namespaced API 类型并完整分页读取，包括 Gateway、CDI 与其他 CR；发现/读取错误或外来对象在删除前阻断流程，不使用固定类型白名单。PV 缺少 `labweaver.io/installation-id` 时不会依赖 `claimRef` 推测归属。Helm 存储的 name/namespace、安装 ID、revision、UID/resourceVersion 与载荷指纹用于核验 release；从存储 manifest/hooks 找出命中的集群级及跨 namespace 对象，保留 Helm 通常保留的 CRD、范围外 Namespace 和 keep-policy 对象（已授权整 namespace 清空中的子对象不因 keep 标记获豁免）。wipe 不调用按名称卸载的 `helm uninstall`，每次 API DELETE 前重查范围与存储身份，并在 DELETE 上使用对象 UID/resourceVersion 前置条件；保护中的 PV 在 namespace 删除已提交后等待回收。外国 `lw-env-*` namespace 不因名称相似被选中，无标记旧安装不能自动采用或清空。
 
+范围外的 release 对象按 live target 汇总所有存储 revision 后再决定保留：任一 revision 或当前对象声明 `helm.sh/resource-policy: keep` 都优先于其他 revision 的删除候选，枚举顺序不改变结果。Namespace/CRD 仍遵守上述保留边界。保留不豁免安装归属校验，也不取消其他目标的 revision 指纹和 UID/resourceVersion 删除前置条件。
+
 Kubernetes 不提供“namespace 全部子对象快照 + namespace 删除”的跨资源事务，子对象插入不会改变 namespace 自身的 resourceVersion；上述重查与对象前置条件不能宣称消除该间隙。维护窗口必须阻止并行 Helm 升级及其他范围内写入，真实集群的中断恢复和并发控制仍需现场验收。本计划编写阶段不执行清空：
 
 ```sh

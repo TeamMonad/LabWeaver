@@ -241,10 +241,9 @@ def inspect(client: Kubernetes, installation: str, reviewed: dict) -> dict:
                 if boundary is None or boundary.get("metadata", {}).get("annotations", {}).get("labweaver.io/installation-id") != installation:
                     raise WipeError("PLATFORM_WIPE_NAMESPACE_OWNERSHIP_CONFLICT")
             objects[uid], locations[uid] = obj, path
+            targets[path] = obj
             if planned["kind"] in ("Namespace", "CustomResourceDefinition") or planned["metadata"].get("annotations", {}).get("helm.sh/resource-policy") == "keep":
                 preserved.add(path)
-            else:
-                targets[path] = obj
 
     # The namespace-local default Kubernetes identity is an explicitly bounded
     # platform target. A same-name account with foreign metadata or additional
@@ -302,6 +301,15 @@ def inspect(client: Kubernetes, installation: str, reviewed: dict) -> dict:
             if volume.get("metadata", {}).get("annotations", {}).get("labweaver.io/installation-id") != installation:
                 raise WipeError("PLATFORM_WIPE_VOLUME_OWNERSHIP_CONFLICT")
             targets[object_path("/api/v1/persistentvolumes", volume["metadata"]["name"])] = volume
+    # Resolve retention once per live target, after all historical manifests
+    # and volume candidates have contributed. No revision can undo a keep
+    # policy from another revision or from the live object.
+    preserved.update(
+        path for path, target in targets.items()
+        if target["kind"] in ("Namespace", "CustomResourceDefinition") or
+        target["metadata"].get("annotations", {}).get("helm.sh/resource-policy") == "keep"
+    )
+    targets = {path: target for path, target in targets.items() if path not in preserved}
     return {"namespaces": namespaces, "targets": targets, "storage": sorted(fingerprints), "preserved": sorted(preserved)}
 
 

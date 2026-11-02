@@ -372,6 +372,38 @@ class DiscoveredWipeOwnershipTests(unittest.TestCase):
             WIPE.wipe(api, INSTALLATION, [namespace], 1)
         self.assertEqual(api.attempts, [])
 
+    def test_keep_wins_across_release_history_and_live_object_in_either_order(self):
+        for kind in ("ClusterRole", "ClusterRoleBinding", "HTTPRoute", "Namespace", "CustomResourceDefinition"):
+            for keep_source in ("latest", "older", "live"):
+                for reverse in (False, True):
+                    with self.subTest(kind=kind, keep_source=keep_source, reverse=reverse):
+                        namespace = obj("Namespace", "labweaver-system")
+                        portal = obj("Namespace", "portal")
+                        live = helm_object(kind, "retained", "portal")
+                        older, latest = copy.deepcopy(live), copy.deepcopy(live)
+                        selected = {"latest": latest, "older": older, "live": live}[keep_source]
+                        selected["metadata"]["annotations"]["helm.sh/resource-policy"] = "keep"
+                        history = [release_storage([older], revision=1), release_storage([latest], revision=2)]
+                        if reverse:
+                            history.reverse()
+                        api = KubernetesAPI([namespace, portal, live] + history)
+                        if reverse:
+                            api.page_size = 1
+                            original_listing = api.listing
+
+                            def reversed_listing(path):
+                                return list(reversed(original_listing(path)))
+
+                            api.listing = reversed_listing
+                        result = WIPE.wipe(api, INSTALLATION, [namespace], 1)
+                        retained_path = path_for(live)
+                        self.assertIn(retained_path, api.values)
+                        self.assertEqual(api.values[retained_path], live)
+                        self.assertIn(retained_path, result["preserved"])
+                        self.assertNotIn(retained_path, result["deleted"])
+                        self.assertNotIn(retained_path, [path for path, _options in api.attempts])
+                        self.assertEqual(result["deleted"], [path_for(namespace)])
+
     def test_keep_policy_has_no_foreign_object_exemption_and_retention_matches_scope(self):
         namespace, outside = obj("Namespace", "labweaver-system"), obj("Namespace", "outside")
         crd = helm_object("CustomResourceDefinition", "types.example")
