@@ -156,6 +156,38 @@ class KubernetesAPI(WIPE.Kubernetes):
         return copy.deepcopy(self.values.get(clean))
 
 
+class AliasedKubernetesAPI(KubernetesAPI):
+    """Serve v1 and v1beta1 HTTPRoute representations of the same live UID."""
+
+    beta_version = "gateway.networking.k8s.io/v1beta1"
+
+    def __init__(self, values, route):
+        super().__init__(values)
+        beta = copy.deepcopy(route)
+        beta["apiVersion"] = self.beta_version
+        self.beta_path = path_for(route).replace("/v1/", "/v1beta1/")
+        self.values[self.beta_path] = beta
+
+    def request(self, path, delete=None):
+        clean = urlsplit(path).path
+        if delete is None and clean == root(self.beta_version):
+            self.reads.append(path)
+            return {"groupVersion": self.beta_version, "resources": [
+                {"name": "httproutes", "kind": "HTTPRoute", "namespaced": True,
+                 "verbs": ["get", "list", "delete"]}]}
+        current = self.values.get(clean)
+        result = super().request(path, delete)
+        if delete is None and clean == "/apis":
+            group = next(item for item in result["groups"] if item["name"] == "gateway.networking.k8s.io")
+            group["versions"].append({"groupVersion": self.beta_version})
+        if delete is not None and current is not None:
+            uid = current["metadata"]["uid"]
+            for alias, value in list(self.values.items()):
+                if value["metadata"]["uid"] == uid:
+                    del self.values[alias]
+        return result
+
+
 class DiscoveredWipeOwnershipTests(unittest.TestCase):
     def test_foreign_gateway_cdi_and_unknown_custom_resources_prevent_every_delete(self):
         for kind in ("Gateway", "HTTPRoute", "TLSRoute", "DataVolume", "DataSource", "PreviouslyUnknown"):
@@ -403,6 +435,62 @@ class DiscoveredWipeOwnershipTests(unittest.TestCase):
                         self.assertNotIn(retained_path, result["deleted"])
                         self.assertNotIn(retained_path, [path for path, _options in api.attempts])
                         self.assertEqual(result["deleted"], [path_for(namespace)])
+
+    def test_keep_wins_by_uid_across_served_api_versions_and_revision_order(self):
+        for keep_source in ("older", "latest", "live"):
+            for reverse_versions in (False, True):
+                for reverse_history in (False, True):
+                    with self.subTest(keep=keep_source, reverse_versions=reverse_versions, reverse_history=reverse_history):
+                        namespace, portal = obj("Namespace", "labweaver-system"), obj("Namespace", "portal")
+                        live = helm_object("HTTPRoute", "retained", "portal")
+                        older, latest = copy.deepcopy(live), copy.deepcopy(live)
+                        (latest if reverse_versions else older)["apiVersion"] = AliasedKubernetesAPI.beta_version
+                        {"older": older, "latest": latest, "live": live}[keep_source]["metadata"]["annotations"]["helm.sh/resource-policy"] = "keep"
+                        history = [release_storage([older], revision=1), release_storage([latest], revision=2)]
+                        api = AliasedKubernetesAPI([namespace, portal, live] + history, live)
+                        if reverse_history:
+                            original_listing = api.listing
+
+                            def reversed_listing(path):
+                                return list(reversed(original_listing(path)))
+
+                            api.listing = reversed_listing
+                        result = WIPE.wipe(api, INSTALLATION, [namespace], 1)
+                        aliases = {path_for(live), api.beta_path}
+                        self.assertTrue(aliases <= api.values.keys())
+                        self.assertEqual(set(result["preserved"]), aliases)
+                        self.assertFalse(aliases.intersection(path for path, _options in api.attempts))
+                        self.assertEqual(result["deleted"], [path_for(namespace)])
+
+    def test_nonretained_api_aliases_produce_one_uid_conditioned_delete(self):
+        for reverse_versions in (False, True):
+            namespace, portal = obj("Namespace", "labweaver-system"), obj("Namespace", "portal")
+            live = helm_object("HTTPRoute", "remove-once", "portal")
+            older, latest = copy.deepcopy(live), copy.deepcopy(live)
+            (latest if reverse_versions else older)["apiVersion"] = AliasedKubernetesAPI.beta_version
+            api = AliasedKubernetesAPI([namespace, portal, live, release_storage([older]),
+                                       release_storage([latest], revision=2)], live)
+            result = WIPE.wipe(api, INSTALLATION, [namespace], 1)
+            aliases = {path_for(live), api.beta_path}
+            attempts = [(path, options) for path, options in api.attempts if path in aliases]
+            self.assertEqual(len(attempts), 1)
+            self.assertEqual(attempts[0][1]["preconditions"], {
+                "uid": live["metadata"]["uid"], "resourceVersion": live["metadata"]["resourceVersion"]})
+            self.assertEqual(len(aliases.intersection(result["deleted"])), 1)
+            self.assertFalse(aliases.intersection(api.values))
+            self.assertEqual(result["preserved"], [])
+
+    def test_inconsistent_alias_observations_fail_before_every_delete(self):
+        for field in ("resourceVersion", "annotations", "labels"):
+            namespace, portal = obj("Namespace", "labweaver-system"), obj("Namespace", "portal")
+            live = helm_object("HTTPRoute", "inconsistent", "portal")
+            beta = copy.deepcopy(live)
+            beta["apiVersion"] = AliasedKubernetesAPI.beta_version
+            api = AliasedKubernetesAPI([namespace, portal, live, release_storage([live, beta])], live)
+            api.values[api.beta_path]["metadata"][field] = "changed" if field == "resourceVersion" else {"foreign": "true"}
+            with self.assertRaisesRegex(WIPE.WipeError, "PLATFORM_WIPE_LIST_CHANGED"):
+                WIPE.wipe(api, INSTALLATION, [namespace], 1)
+            self.assertEqual(api.attempts, [])
 
     def test_keep_policy_has_no_foreign_object_exemption_and_retention_matches_scope(self):
         namespace, outside = obj("Namespace", "labweaver-system"), obj("Namespace", "outside")

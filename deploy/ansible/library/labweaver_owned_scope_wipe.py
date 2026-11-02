@@ -171,7 +171,23 @@ def manifest_objects(release: dict) -> list[dict]:
 
 def inspect(client: Kubernetes, installation: str, reviewed: dict) -> dict:
     kinds, collections = discover(client)
-    namespaces, objects, locations = {}, {}, {}
+    namespaces, objects, locations, aliases = {}, {}, {}, {}
+
+    def remember(obj: dict, path: str) -> str:
+        uid, _revision = identity(obj)
+        if uid in objects:
+            previous = objects[uid]
+            if (identity(previous) != identity(obj) or previous['kind'] != obj['kind'] or
+                previous['metadata']['name'] != obj['metadata']['name'] or
+                previous['metadata'].get('namespace') != obj['metadata'].get('namespace') or
+                previous['metadata'].get('annotations', {}) != obj['metadata'].get('annotations', {}) or
+                previous['metadata'].get('labels', {}) != obj['metadata'].get('labels', {}) or
+                (previous['apiVersion'] == obj['apiVersion'] and previous != obj)):
+                raise WipeError('PLATFORM_WIPE_LIST_CHANGED')
+        else:
+            objects[uid], locations[uid] = obj, path
+        aliases.setdefault(uid, set()).add(path)
+        return uid
     for name, expected in reviewed.items():
         path = object_path("/api/v1/namespaces", name)
         namespace = client.request(path)
@@ -187,19 +203,10 @@ def inspect(client: Kubernetes, installation: str, reviewed: dict) -> dict:
             for obj in client.listing(collection):
                 if obj.get("metadata", {}).get("namespace") != name:
                     raise WipeError("PLATFORM_WIPE_LIST_FAILED")
-                uid, _revision = identity(obj)
                 path = object_path(collection, obj["metadata"]["name"])
-                if uid in objects:
-                    previous = objects[uid]
-                    if (identity(previous) != identity(obj) or previous['kind'] != obj['kind'] or
-                        previous['metadata']['name'] != obj['metadata']['name'] or
-                        previous['metadata']['namespace'] != obj['metadata']['namespace'] or
-                        (previous['apiVersion'] == obj['apiVersion'] and previous != obj)):
-                        raise WipeError('PLATFORM_WIPE_LIST_CHANGED')
-                    # Core Events and events.k8s.io expose the same immutable
-                    # object through different wire representations.
-                    continue
-                objects[uid], locations[uid] = obj, path
+                # Served versions (including core/events.k8s.io Events) can
+                # expose different representations of one immutable object.
+                remember(obj, path)
 
     storage, releases, fingerprints = {}, [], []
     seen = set()
@@ -235,15 +242,14 @@ def inspect(client: Kubernetes, installation: str, reviewed: dict) -> dict:
             obj = client.request(path)
             if obj is None:
                 continue
-            uid, _revision = identity(obj)
+            uid = remember(obj, path)
             if namespaced:
                 boundary = client.request(object_path("/api/v1/namespaces", namespace))
                 if boundary is None or boundary.get("metadata", {}).get("annotations", {}).get("labweaver.io/installation-id") != installation:
                     raise WipeError("PLATFORM_WIPE_NAMESPACE_OWNERSHIP_CONFLICT")
-            objects[uid], locations[uid] = obj, path
-            targets[path] = obj
+            targets[uid] = objects[uid]
             if planned["kind"] in ("Namespace", "CustomResourceDefinition") or planned["metadata"].get("annotations", {}).get("helm.sh/resource-policy") == "keep":
-                preserved.add(path)
+                preserved.add(uid)
 
     # The namespace-local default Kubernetes identity is an explicitly bounded
     # platform target. A same-name account with foreign metadata or additional
@@ -277,7 +283,8 @@ def inspect(client: Kubernetes, installation: str, reviewed: dict) -> dict:
         annotations = metadata.get("annotations", {})
         if uid in storage or uid in default_accounts or uid in public_bundles or annotations.get("labweaver.io/installation-id") == installation:
             return True
-        if (locations[uid], annotations.get("meta.helm.sh/release-name"), annotations.get("meta.helm.sh/release-namespace")) in release_roots and metadata.get("labels", {}).get("app.kubernetes.io/managed-by") == "Helm":
+        if any((path, annotations.get("meta.helm.sh/release-name"), annotations.get("meta.helm.sh/release-namespace")) in release_roots
+               for path in aliases[uid]) and metadata.get("labels", {}).get("app.kubernetes.io/managed-by") == "Helm":
             return True
         # Events refer to their subject by UID rather than ownerReferences.
         # Names and labels are not authority; the subject must resolve to the
@@ -297,20 +304,20 @@ def inspect(client: Kubernetes, installation: str, reviewed: dict) -> dict:
     volumes = client.listing("/api/v1/persistentvolumes")
     for volume in volumes:
         if volume.get("spec", {}).get("claimRef", {}).get("namespace") in reviewed:
-            identity(volume)
+            uid = remember(volume, object_path("/api/v1/persistentvolumes", volume["metadata"]["name"]))
             if volume.get("metadata", {}).get("annotations", {}).get("labweaver.io/installation-id") != installation:
                 raise WipeError("PLATFORM_WIPE_VOLUME_OWNERSHIP_CONFLICT")
-            targets[object_path("/api/v1/persistentvolumes", volume["metadata"]["name"])] = volume
-    # Resolve retention once per live target, after all historical manifests
-    # and volume candidates have contributed. No revision can undo a keep
-    # policy from another revision or from the live object.
+            targets[uid] = objects[uid]
+    # Resolve retention once per live UID, after all historical manifests,
+    # served-version aliases and volume candidates have contributed.
     preserved.update(
-        path for path, target in targets.items()
+        uid for uid, target in targets.items()
         if target["kind"] in ("Namespace", "CustomResourceDefinition") or
         target["metadata"].get("annotations", {}).get("helm.sh/resource-policy") == "keep"
     )
-    targets = {path: target for path, target in targets.items() if path not in preserved}
-    return {"namespaces": namespaces, "targets": targets, "storage": sorted(fingerprints), "preserved": sorted(preserved)}
+    targets = {locations[uid]: target for uid, target in targets.items() if uid not in preserved}
+    preserved_paths = sorted({path for uid in preserved for path in aliases[uid]})
+    return {"namespaces": namespaces, "targets": targets, "storage": sorted(fingerprints), "preserved": preserved_paths}
 
 
 def wipe(client: Kubernetes, installation: str, namespaces: list[dict], timeout: int, check: bool = False) -> dict:
