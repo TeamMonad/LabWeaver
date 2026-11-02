@@ -2607,11 +2607,12 @@ async fn native_build_admission_preserves_resource_codes_through_executor_and_pu
                     authorize_execution: false,
                 })
                 .await?;
-            // An explicit lost-snapshot database fault leaves the real preexisting hold intact.
-            // Repricing through Resource's native tariff API then conflicts with that exact hold;
-            // the HTTP response, error classification and ledger decisions are not mocked.
-            sqlx::query("DELETE FROM resource.build_metering_attempts WHERE build_request_id=$1 AND attempt=$2")
-                .bind(command.request.id.as_uuid()).bind(i32::try_from(lease.attempt)?).execute(&pool).await?;
+            // Explicit database visibility fault: hide only metering reads behind a filtered
+            // view while retaining the physical row, its actual hold, and every FK constraint.
+            // The native tariff API reprices a new admission; native Credits detects the
+            // existing hold mismatch. No Resource handler/response or principal is replaced.
+            sqlx::query("ALTER TABLE resource.build_metering_attempts RENAME TO visibility_fault_build_metering_attempts").execute(&pool).await?;
+            sqlx::query("CREATE VIEW resource.build_metering_attempts AS SELECT * FROM resource.visibility_fault_build_metering_attempts WHERE false").execute(&pool).await?;
             let rate: serde_json::Value = sqlx::query_scalar("SELECT contract FROM resource.resource_rates WHERE builder_binding='buildkit-primary-v1' AND effective_until IS NULL")
                 .fetch_one(&pool).await?;
             let rate: contracts::resource::ResourceRate = serde_json::from_value(rate)?;
@@ -2675,6 +2676,12 @@ async fn native_build_admission_preserves_resource_codes_through_executor_and_pu
             .await
             .err()
             .ok_or("native admission must reject before execution")?;
+        if code == "LW_CREDITS_CONFLICT" {
+            sqlx::query("DROP VIEW resource.build_metering_attempts")
+                .execute(&pool)
+                .await?;
+            sqlx::query("ALTER TABLE resource.visibility_fault_build_metering_attempts RENAME TO build_metering_attempts").execute(&pool).await?;
+        }
         assert_eq!(failure.diagnostic_code(), code);
         assert!(
             !failure.retryable,
