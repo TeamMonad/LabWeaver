@@ -68,6 +68,8 @@ pub enum EnvironmentOperationKind {
     Expire,
     Delete,
     Cleanup,
+    Restore,
+    Purge,
     Freeze,
 }
 
@@ -989,8 +991,74 @@ pub struct ResourceWorkCleanupStatus {
     pub revision: Revision,
     pub observed_state: ObservedEnvironmentState,
     pub cleanup_complete: bool,
+    pub generation: u64,
+    pub compute_retired: bool,
+    pub storage_purged: bool,
+    pub disk_retention: Option<EnvironmentDiskRetention>,
+    pub retained_storage_usage: Option<EnvironmentRetainedStorageUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic_code: Option<String>,
+}
+
+/// Cumulative real disk occupancy. Always platform-paid, never attributed to a compute hold.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentRetainedStorageUsage {
+    pub started_at: UtcTimestamp,
+    pub measured_until: UtcTimestamp,
+    pub storage_bytes: u64,
+    pub closed: bool,
+}
+
+/// Disk lifetime is independent of retirement of a compute generation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentDiskState {
+    Retiring,
+    Retained,
+    Restored,
+    Purging,
+    Purged,
+}
+
+/// Immutable retention window, with separately observed retirement and purge facts.
+/// Both user deletion and arrears retention are platform-paid; no compute hold funds this window.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentDiskRetention {
+    pub state: EnvironmentDiskState,
+    pub started_at: UtcTimestamp,
+    pub expires_at: UtcTimestamp,
+    pub retired_generation: u64,
+    pub compute_retired_at: Option<UtcTimestamp>,
+    pub restored_generation: Option<u64>,
+    /// A restored, stopped disk does not restart its retention clock or authorize compute.
+    pub reactivated_at: Option<UtcTimestamp>,
+    pub purged_at: Option<UtcTimestamp>,
+}
+
+impl EnvironmentDiskRetention {
+    pub fn validate(&self) -> Result<(), EnvironmentError> {
+        if self.expires_at.get() - self.started_at.get() != time::Duration::days(7)
+            || self.retired_generation == 0
+            || self
+                .compute_retired_at
+                .is_some_and(|at| at < self.started_at)
+            || self.purged_at.is_some_and(|at| at < self.expires_at)
+            || (self.state == EnvironmentDiskState::Purged) != self.purged_at.is_some()
+            || (self.state == EnvironmentDiskState::Restored) != self.restored_generation.is_some()
+            || self
+                .restored_generation
+                .is_some_and(|generation| generation <= self.retired_generation)
+            || self.reactivated_at.is_some_and(|at| {
+                self.state != EnvironmentDiskState::Restored || at < self.started_at
+            })
+            || (self.state != EnvironmentDiskState::Retiring && self.compute_retired_at.is_none())
+        {
+            return Err(EnvironmentError::InvalidAggregate);
+        }
+        Ok(())
+    }
 }
 
 impl ResourceWorkCleanupStatus {
@@ -1001,6 +1069,24 @@ impl ResourceWorkCleanupStatus {
             || self.revision.get() == 0
             || self.capacity_binding.trim().is_empty()
             || self.capacity_binding.len() > 120
+            || self.generation == 0
+            || self.cleanup_complete != (self.compute_retired && self.storage_purged)
+            || self.storage_purged && !self.compute_retired
+        {
+            return Err(EnvironmentError::InvalidResourceHandoff);
+        }
+        if let Some(retention) = &self.disk_retention {
+            retention.validate()?;
+            if self.compute_retired
+                != (retention.compute_retired_at.is_some()
+                    && retention.state != EnvironmentDiskState::Restored)
+                || self.storage_purged != (retention.state == EnvironmentDiskState::Purged)
+            {
+                return Err(EnvironmentError::InvalidResourceHandoff);
+            }
+        }
+        if let Some(usage) = &self.retained_storage_usage
+            && (usage.storage_bytes == 0 || usage.measured_until < usage.started_at)
         {
             return Err(EnvironmentError::InvalidResourceHandoff);
         }
@@ -1223,6 +1309,11 @@ pub struct EnvironmentCleanupTarget {
     pub namespace: String,
     #[schemars(with = "String")]
     pub uid: uuid::Uuid,
+    /// Only an owner-accepted expiry operation may set this flag on the pinned disk identity.
+    #[serde(default)]
+    pub purge_disk: bool,
+    #[serde(default)]
+    pub retain_disk: bool,
     /// Existing-namespace Work objects; an absent entry must never be adopted later.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub objects: Vec<crate::execution::ExecutionObjectRef>,
@@ -1255,6 +1346,8 @@ impl EnvironmentCleanupTarget {
                     || !matches!(
                         (object.api_version.as_str(), object.resource.as_str()),
                         ("apps/v1", "deployments")
+                            | ("kubevirt.io/v1", "virtualmachines")
+                            | ("cdi.kubevirt.io/v1beta1", "datavolumes")
                             | (
                                 "v1",
                                 "services"
@@ -1272,8 +1365,8 @@ impl EnvironmentCleanupTarget {
     }
 }
 
-/// Version whose destructive calls always require an owner-persisted UID checkpoint first.
-pub const ENVIRONMENT_CLEANUP_PROTOCOL_VERSION: u8 = 1;
+/// Version requiring owner-persisted object UIDs and explicit retain/purge disk authority.
+pub const ENVIRONMENT_CLEANUP_PROTOCOL_VERSION: u8 = 2;
 
 /// Idempotent accepted environment operation.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -1537,6 +1630,8 @@ pub struct PublicEnvironmentInstance {
     pub last_diagnostic_code: Option<String>,
     pub failed_phase: Option<ObservedEnvironmentState>,
     pub cleanup_evidence: Option<crate::ArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_retention: Option<EnvironmentDiskRetention>,
 }
 
 impl From<EnvironmentInstance> for PublicEnvironmentInstance {
@@ -1569,6 +1664,7 @@ impl From<EnvironmentInstance> for PublicEnvironmentInstance {
             last_diagnostic_code,
             failed_phase,
             cleanup_evidence,
+            disk_retention,
         } = instance;
         Self {
             id,
@@ -1598,6 +1694,7 @@ impl From<EnvironmentInstance> for PublicEnvironmentInstance {
             last_diagnostic_code,
             failed_phase,
             cleanup_evidence,
+            disk_retention,
         }
     }
 }
@@ -1634,6 +1731,7 @@ impl PublicEnvironmentInstance {
             last_diagnostic_code,
             failed_phase,
             cleanup_evidence,
+            disk_retention,
         } = self;
         let snapshot = EnvironmentInstance {
             id,
@@ -1663,6 +1761,7 @@ impl PublicEnvironmentInstance {
             last_diagnostic_code,
             failed_phase,
             cleanup_evidence,
+            disk_retention,
         };
         snapshot.validate()?;
         Ok(snapshot.into())
@@ -1714,6 +1813,8 @@ pub struct EnvironmentInstance {
     pub last_diagnostic_code: Option<String>,
     pub failed_phase: Option<ObservedEnvironmentState>,
     pub cleanup_evidence: Option<crate::ArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_retention: Option<EnvironmentDiskRetention>,
 }
 
 impl EnvironmentInstance {
@@ -1742,6 +1843,9 @@ impl EnvironmentInstance {
 
     /// Validates aggregate invariants without consulting provider state.
     pub fn validate(&self) -> Result<(), EnvironmentError> {
+        if let Some(retention) = &self.disk_retention {
+            retention.validate()?;
+        }
         if self.display_label.trim().is_empty()
             || self.display_label.chars().count() > 120
             || self.display_label.chars().any(char::is_control)
@@ -1822,7 +1926,12 @@ impl EnvironmentInstance {
         }
         if self.resource_reservation_released
             && (self.class != EnvironmentClass::Experiment
-                || self.observed_state != ObservedEnvironmentState::Deleted)
+                || !(self.observed_state == ObservedEnvironmentState::Deleted
+                    || self.observed_state == ObservedEnvironmentState::Stopped
+                        && self
+                            .disk_retention
+                            .as_ref()
+                            .is_some_and(|disk| disk.state == EnvironmentDiskState::Restored)))
         {
             return Err(EnvironmentError::InvalidAggregate);
         }
@@ -1962,6 +2071,7 @@ impl EnvironmentInstance {
                     | State::Expiring
                     | State::Deleting
             ) | (State::Deleting, State::Deleted | State::Failed)
+                | (State::Deleted, State::Stopped | State::Deleting)
         );
         if allowed {
             Ok(())
@@ -1979,6 +2089,7 @@ impl EnvironmentInstance {
         use ObservedEnvironmentState as State;
         let allowed = match operation {
             Operation::Create => state == State::Requested,
+            Operation::Restore | Operation::Purge => state == State::Deleted,
             Operation::Start => state == State::Stopped,
             Operation::Stop | Operation::Freeze => state == State::Ready,
             Operation::Restart | Operation::Reset => {
@@ -2638,7 +2749,7 @@ mod tests {
             "Work cannot silently drop its lease"
         );
     }
-    const OPERATIONS: [EnvironmentOperationKind; 12] = [
+    const OPERATIONS: [EnvironmentOperationKind; 14] = [
         EnvironmentOperationKind::Create,
         EnvironmentOperationKind::Start,
         EnvironmentOperationKind::Stop,
@@ -2651,6 +2762,8 @@ mod tests {
         EnvironmentOperationKind::Delete,
         EnvironmentOperationKind::Cleanup,
         EnvironmentOperationKind::Freeze,
+        EnvironmentOperationKind::Restore,
+        EnvironmentOperationKind::Purge,
     ];
 
     #[test]
@@ -2707,6 +2820,7 @@ mod tests {
                             | State::Expiring
                             | State::Deleting
                     ) | (State::Deleting, State::Deleted | State::Failed)
+                        | (State::Deleted, State::Stopped | State::Deleting)
                 );
                 assert_eq!(
                     EnvironmentInstance::ensure_transition(from, to).is_ok(),
@@ -2725,6 +2839,7 @@ mod tests {
             for operation in OPERATIONS {
                 let expected = match operation {
                     Operation::Create => state == State::Requested,
+                    Operation::Restore | Operation::Purge => state == State::Deleted,
                     Operation::Start => state == State::Stopped,
                     Operation::Stop | Operation::Freeze => state == State::Ready,
                     Operation::Restart | Operation::Reset => {

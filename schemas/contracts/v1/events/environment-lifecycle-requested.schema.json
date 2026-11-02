@@ -373,6 +373,8 @@
         "expire",
         "delete",
         "cleanup",
+        "restore",
+        "purge",
         "freeze"
       ],
       "type": "string"

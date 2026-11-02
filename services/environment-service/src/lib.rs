@@ -15,6 +15,8 @@ mod api;
 mod cdi_import;
 mod container_placement;
 mod container_provider;
+mod disk_retention;
+pub use disk_retention::record_disk_observation;
 mod freeze_binding;
 mod kubevirt_console_executor;
 mod kubevirt_provider;

@@ -134,6 +134,9 @@ domains:
       - id: 9
         file: environment/0009_outbox_publication_claims.sql
         sha256: 572a02c172d6b4602fb8e5307bbe07ce06074db731f8c8addee938abc206e989
+      - id: 10
+        file: environment/0010_disk_retention.sql
+        sha256: 2c3b7b7558c68096e269a05af2e8d85b917a487b7f166abf31374ba595c1f878
   - name: agent
     migrations:
       - id: 1

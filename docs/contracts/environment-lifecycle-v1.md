@@ -12,7 +12,7 @@ Environment 是交互环境的唯一业务生命周期。Experiment 与 Work 表
 
 ## 既有 namespace 运行落点
 
-本增量支持一个部署指定项目的普通 Container Work。它仍通过 Resource 授权、lease 和 Environment 生命周期创建；客户端不能选择 namespace。VM 和 Experiment 不使用此模式。普通容器的 UID、capabilities 和 rootfs 声明沿下文同一运行授权执行，网络声明须为 `deny_all`。既有 namespace 的 PSA、配额和网络策略由部署管理员提供，Environment 不覆盖或绕过它们；配置不被该空间准入时明确失败。本模式不提供 privileged、持久盘独立回收、7天保留或导入导出。Namespace 不是宿主隔离或特权运行边界。
+本增量支持一个部署指定项目的普通 Container Work。它仍通过 Resource 授权、lease 和 Environment 生命周期创建；客户端不能选择 namespace。VM 和 Experiment 不使用此模式。普通容器的 UID、capabilities 和 rootfs 声明沿下文同一运行授权执行，网络声明须为 `deny_all`。既有 namespace 的 PSA、配额和网络策略由部署管理员提供，Environment 不覆盖或绕过它们；配置不被该空间准入时明确失败。本模式使用下文同一七天保留、恢复和独立清盘事实，不提供 privileged 或导入导出。Namespace 不是宿主隔离或特权运行边界。
 
 默认不设置 `LABWEAVER_CONTAINER_PLACEMENT_CONFIG_FILE`，继续使用 `lw-env-{environmentId}` 专用 namespace。启用时按以下步骤准备部署输入：
 
@@ -27,9 +27,9 @@ Executor 在首次 Kubernetes 副作用前，与现有代次 fence 同一事务�
 
 Freeze binding 从该事实返回真实 namespace/PVC。终端、Work 配置脚本和 Access 应用代理也消费同一落点；应用代理从现行内部 endpoint eligibility 获取 `runtimeTarget`。默认模式仍返回原专用 namespace 的目标。Owner、项目、revision、Ready、观测代次、lease 和端点健康资格检查保持生效。Evaluation coordinator 由 #197 owner 组合，不能改写 binding 或跳过资格检查。
 
-停止只退役本 Work Pod。删除先清除本 Work 的计算对象，再清除 PVC。每次对象删除都核固定名称和归属，并携带 UID/resourceVersion 前置条件。计算阶段结束前，Executor 读取完整的 namespace Pod 列表，确认本 Work 的 Pod，以及引用本 Work PVC 的 Pod 均已消失；缺少或不同归属标签的挂载 Pod 也会阻止盘清除。Pending 或 terminating Pod 仍视为存在。列表不完整、格式未知或超时均不进入盘清除，重试重新观测，不保存可复用的“已经卸载”标记。
+停止只退役本 Work Pod。普通 Delete 和租约到期回收退役计算后保留 PVC；Container 的 Deployment、Service、ServiceAccount 和拉取 Secret 单独退役，VM 停止 guest 并确认 VMI 消失，不删除系统盘或其 DataVolume。每次对象删除都核固定名称、原归属、已持久化 UID，并携带当前 resourceVersion 前置条件。计算阶段结束前，Executor 读取完整 namespace Pod 列表，确认本 Work Pod 及引用本 Work PVC 的 Pod 均已消失；Pending、terminating、缺少归属标签的挂载 Pod 同样阻止完成。读错误、列表不完整、格式未知和超时均不当作缺失。
 
-清理不删除既有 Namespace，不移除任何 finalizer，也不删除其他 Work、部署策略或冻结 Job。未知归属、UID 变化和超时保持失败状态。Pod 消失的观测不替代存储后端的挂载 fencing。删除仍会删除本 Work PVC，七天回收站、恢复和独立磁盘清除终态尚未交付。删除操作证据区分 `namespaceRetained=true`、`workObjectsAbsent=true` 和默认模式的 `namespaceAbsent=true`。
+清理不删除既有 Namespace，不移除其他控制器的 finalizer，也不删除其他 Work、部署策略或冻结 Job。保留与清盘在默认专用 Namespace 中同样不删除整个 Namespace。Pod 消失的观测不替代 CSI/node fencing；网络分区后的真实存储隔离仍须单独验收。清理证据分别记录 `computeRetired`、`storagePurged`、`namespaceAbsent` 和 `namespaceRetained`，不再把计算退役说成磁盘已删除。
 
 回退此增量前，先通过当前版本正常收尾既有 namespace Work。不要切回默认模式来迁移现有 Work，也不要删除其落点账本记录。真实定位和凭据保留在私有部署输入；Issue/PR 只记录合成验证结果。
 
@@ -103,6 +103,52 @@ VM runtime 运行事实可先于 SSH 握手入库，此时 `instanceReady=true`�
 
 停止、删除和设备释放由实际执行结果确认。失败保留明确状态和诊断，不虚报 Deleted 或可用容量。保留存储与计算资源分别处理，Environment 向 Resource 提供可信状态变化用于计量；异常清理期间费用待核实。
 
+### 七天保留、恢复和清盘
+
+`diskRetention` 是独立于计算状态的 Environment 事实：`retiring → retained → restored`，或
+`retiring → retained → purging → purged`。计算生命周期的 `observedState=deleted` 只表示此代计算已退役，
+不能单独证明磁盘清除。首次成功退役观测用数据库时钟固定 `startedAt`，`expiresAt=startedAt+7天`；
+重放、重试、进程重启和重复清理不延长该窗口。未创建过盘的显式缺失不制造保留用量。
+
+所有者在保留期内调用现有 `POST /api/v1/environments/{environmentId}/recover`（SDK `recoverEnvironment`），
+携带 `Idempotency-Key` 和当前 `If-Match`。Environment 将它受理为独立 `restore` 操作，恢复同一盘到
+更高运行代次的 **Stopped** 实例，不自动启动、不取得新计算权。重放原 key 返回同一 receipt；启动仍必须通过
+Resource 当前批准、容量和资金覆盖，不能复用已经释放的旧 compute hold。盘已清除、正在清除或保留期已结束
+分别以 `LW_ENVIRONMENT_DISK_NOT_RETAINED` 或 `LW_ENVIRONMENT_DISK_RETENTION_EXPIRED` 拒绝，HTTP 409。
+
+恢复前沿现有 `environment_stopped` 原因撤销访问授权；相同 key 重放不重复撤权。Delete/Purge 失败时 `/recover` 继续原清理操作及 UID checkpoint，而不是把 retiring/purging 当成可恢复盘。恢复后 Start 重新校验当前授权，并进入 Provisioning 重建计算；Container 与 KubeVirt 都继续使用原盘 UID。VM 正常关机时，仍存在的 VMI 或挂载 Pod 返回 Pending，不消耗错误重试次数；读取失败仍明确失败。
+
+Environment worker 到期后用稳定幂等键受理独立 `purge` 操作。清盘只删除原固定 UID 的目标 PVC；VM 先以
+Orphan 传播删除该盘的原 DataVolume，再按 PVC UID/resourceVersion 清除系统盘。任何挂载 Pod、替换 UID、
+未知读取或旧代次都不能授权删除。完成后保留 `purgedAt`、计算退役事实和操作历史；不删除 Resource 账本、
+Evaluation 成绩或其他磁盘。取消未完成的初次创建仍走原取消清理，不等于用户 Delete。
+
+到期扫描仅在实际需要受理命令时，将命令事务的 future 放到堆上，避免把大型事务状态机内联到调度器和调用者栈。空闲扫描不产生这次分配；运行与测试都不以放大线程栈作为前置条件。
+
+清理协议版本为 2：UID checkpoint 同时固定保盘/清盘权限。迁移将正常 Ready、Stopped 及历史操作的协议 1 标记切换为 2，原身份不变。旧版本尚未确认完成的破坏性清理保留原 UID checkpoint，并隔离为可查询的 Failed／`LW_ENVIRONMENT_CLEANUP_PROTOCOL_UPGRADE_REQUIRED`；不会继续删除、恢复执行或重新绑定 UID。迁移可重放，不能用删除 namespace 或清空数据库绕过盘身份检查。
+
+普通 Delete 与欠费/租约回收后的七天保留都由平台承担，实际占用以 `environment.retained_disk_usage` 独立保存
+字节数及毫秒时间边界；保留段不发送到旧项目用量/compute hold。超过到期但物理清盘尚未完成的占用仍保留，
+不能伪造成零。恢复到 Stopped 不延长七天窗口，也不关闭实际存储记录；只有取得新资金授权并观测到新代 Ready（`reactivatedAt`）或实际清盘才关闭平台保留段。未重新运行的恢复盘到原期限仍回到清盘流程，不能通过反复恢复/删除延长平台付费窗口。全写通道只读阻断与导出不在此切片，不能从停止计算推定这些能力已完成。
+
+### Resource #210 消费边界
+
+`GET /internal/v1/resource/work-cleanups/{environmentId}` 继续只对原 Resource 服务身份开放。
+严格 DTO 保留 environment/project/course/owner/lease/revision/capacityBinding，并新增 `generation`、
+`computeRetired`、`storagePurged`、`diskRetention` 和 `retainedStorageUsage`。`cleanupComplete` 仅在计算与
+存储都确认释放后为 true；保留中必须为 false。用量读回以同一 aggregate 行锁取得并持久化当前真实保留区间。
+
+Resource 消费者必须完成以下事项；本切片不修改 Resource：
+
+1. 校验全部原 lease/claim/项目/所有者及 generation/revision fence，拒绝未知、倒序、错范围和读取失败。
+2. `computeRetired=true` 仅释放 CPU、内存和 GPU；保留盘继续占用 storage 容量，不能等同释放整个 claim。
+3. 将 `retainedStorageUsage` 按 `(environmentId, startedAt)` 的累计 watermark 去重入账，只处理新增时间段；
+   跨费率拆分仍用 Resource 唯一计价逻辑，保存不可变平台成本，不增加项目 Credits spent 或 ResourceBudget.spent，
+   不扣旧计算 hold、不新增第二个钱包或计算预占。
+4. `storagePurged=true` 才释放该盘存储容量并关闭保留区间；恢复到 Stopped 不释放盘、不重开窗口。新计算须有当前有效资金授权，首次 Ready/`reactivatedAt` 才结束原平台保留段，转回正常运行计量。
+5. 钱包、budget、平台成本及维度释放在 Resource 原事务中一致更新，覆盖重复消息、丢响应、重启和延迟清盘。
+
+
 Access 的 `0008_funded_experiment_console_fence.sql` 将控制台能力的租约 CHECK 改为按实际资金租约而非用途分类：Work 必须带完整 lease fence；Experiment 可以保留旧的无租约形态，也可以携带完整原租约 fence。任一字段缺失或能力有效期超过 lease 到期均拒绝。Environment 的 owner/endpoint/console 解析与终端升级保留同一完整租约身份、当前有效窗及观测代次；迁移本身不创建租约、批准或资金预占。
 
 ## 验证
@@ -174,7 +220,7 @@ ConfigMap 的 `providers.json`；目录挂载为 `/etc/labweaver/container-proje
 
 VM 此切片保持原 guest 用户、SSH 和持久系统盘行为：不能用 `runAsUser` 指定 guest UID，不能添加容器
 capabilities、启用容器提权或声明容器只读 rootfs；不支持的组合直接拒绝，不伪装成 guest 能力已经执行。
-当前没有 privileged、DinD、宿主隔离/fencing 或回收站验收结果，不能从投影字段或 PSA 标签推定这些能力。
+当前没有 privileged、DinD 或真实 CSI/node fencing 验收结果，不能从投影字段或 PSA 标签推定这些能力；磁盘保留、恢复和独立清盘的服务端语义见上文，真实集群持久性仍需单独验收。
 
 ## Original funded lease and ResourceApproval consumption
 

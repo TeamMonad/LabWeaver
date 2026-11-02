@@ -6,6 +6,8 @@
 
 mod support;
 use support::kubevirt_executor_plan;
+#[path = "cases/disk_retention_upgrade.rs"]
+mod disk_retention_upgrade;
 #[path = "cases/template_upgrade.rs"]
 mod template_upgrade_cases;
 

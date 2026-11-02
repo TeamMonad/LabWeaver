@@ -1076,7 +1076,13 @@ impl PgKubeVirtExecutorFenceStore {
                 .and_then(|value| value.get("status"))
                 .and_then(Value::as_str)
                 == Some("deleted");
-            if tombstoned && cleanup_succeeded {
+            let disk_successor: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM environment.environment_instances WHERE environment_id=$1 AND generation=$2 AND contract->'operation'->>'id'=$3 AND contract->'diskRetention'->>'state' IN ('restored','purging'))")
+                .bind(fence.environment_id.as_uuid()).bind(i64::try_from(fence.environment_generation).map_err(|_| KubeVirtExecutorFenceError::IdentityMismatch)?)
+                .bind(fence.operation_id.to_string()).fetch_one(&mut *transaction).await?;
+            if tombstoned
+                && cleanup_succeeded
+                && !(disk_successor && fence.environment_generation > highest_generation)
+            {
                 if fence.action == ReconcileAction::Cleanup {
                     let value = last_response
                         .as_ref()
@@ -2851,6 +2857,30 @@ where
                     "spec":{"endpointSelector":{"matchLabels":{"labweaver.io/environment-id":instance.id.to_string()}},"egress":vm_vgpu_license_egress(licensing)?}
                 }),
             ));
+        }
+        if let Some(target) = &instance.operation.cleanup_target
+            && instance.disk_retention.as_ref().is_some_and(|disk| {
+                disk.state == contracts::environment::EnvironmentDiskState::Restored
+            })
+        {
+            let pvc = target
+                .objects
+                .iter()
+                .find(|object| object.resource == "persistentvolumeclaims")
+                .ok_or(ReleaseProjectionError::IdentityMismatch)?;
+            let data_volume = documents
+                .iter_mut()
+                .find(|resource| resource.kind == "DataVolume")
+                .ok_or(ReleaseProjectionError::IdentityMismatch)?;
+            data_volume.document["metadata"]["annotations"]["labweaver.io/retained-pvc-uid"] =
+                json!(pvc.uid);
+            if let Some(original) = target
+                .objects
+                .iter()
+                .find(|object| object.resource == "datavolumes")
+            {
+                data_volume.document["metadata"]["uid"] = json!(original.uid);
+            }
         }
         let plan_sha256 = canonical_hash(&json!({
             "environmentId": instance.id,

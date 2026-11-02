@@ -1063,12 +1063,46 @@ async fn recover_environment(
     headers: HeaderMap,
 ) -> Result<(StatusCode, Json<EnvironmentOperationAccepted>), EnvironmentApiError> {
     require_access_bff(caller)?;
+    require_session(&headers)?;
+    let actor_id = actor(&headers)?;
+    let key = idempotency_key(&headers)?;
+    let expected_revision = if_match(&headers)?;
+    let instance = load_owned(&state, environment_id, actor_id).await?;
+    // An old restore receipt remains replayable after a later generation has started.
+    if let Some(receipt) = state
+        .store
+        .lookup_api_lifecycle_replay(
+            key.as_str(),
+            environment_id,
+            EnvironmentOperationKind::Restore,
+            expected_revision,
+            actor_id,
+            true,
+            None,
+        )
+        .await?
+    {
+        return Ok((StatusCode::ACCEPTED, Json(receipt)));
+    }
+    let restoring = instance.desired_state
+        == contracts::environment::DesiredEnvironmentState::Deleted
+        && instance.disk_retention.as_ref().is_some_and(|disk| {
+            matches!(
+                disk.state,
+                contracts::environment::EnvironmentDiskState::Retained
+                    | contracts::environment::EnvironmentDiskState::Purged
+            )
+        });
     accept_lifecycle(
         &state,
         environment_id,
         &headers,
-        EnvironmentOperationKind::Recover,
-        None,
+        if restoring {
+            EnvironmentOperationKind::Restore
+        } else {
+            EnvironmentOperationKind::Recover
+        },
+        restoring.then_some("environment_stopped"),
         true,
         context.trace_id(),
         None,
@@ -1570,7 +1604,13 @@ impl EnvironmentApiError {
                 EnvironmentStoreError::AllocationPending
                 | EnvironmentStoreError::IdempotencyConflict
                 | EnvironmentStoreError::IdempotencyInProgress
-                | EnvironmentStoreError::Lifecycle(crate::LifecycleError::OperationActive),
+                | EnvironmentStoreError::Lifecycle(
+                    crate::LifecycleError::OperationActive
+                    | crate::LifecycleError::DiskNotRetained
+                    | crate::LifecycleError::DiskRetentionExpired
+                    | crate::LifecycleError::DiskPurgeNotDue
+                    | crate::LifecycleError::CleanupProtocolUpgradeRequired,
+                ),
             )
             | Self::Messaging(NatsMessagingError::LeaseNotActive) => StatusCode::CONFLICT,
             _ => StatusCode::SERVICE_UNAVAILABLE,
@@ -1582,6 +1622,30 @@ impl IntoResponse for EnvironmentApiError {
     fn into_response(self) -> Response {
         if let Self::Store(EnvironmentStoreError::TemplateUpgrade(error)) = &self {
             return template_upgrade_problem(error);
+        }
+        if let Self::Store(EnvironmentStoreError::Lifecycle(error)) = &self {
+            let detail = match error {
+                crate::LifecycleError::DiskNotRetained => {
+                    Some("磁盘不在可恢复的保留状态；已经清除的磁盘不能恢复。")
+                }
+                crate::LifecycleError::DiskRetentionExpired => {
+                    Some("七天磁盘保留期已结束，不能恢复。")
+                }
+                crate::LifecycleError::DiskPurgeNotDue => Some("磁盘保留期尚未结束，不能清除。"),
+                crate::LifecycleError::CleanupProtocolUpgradeRequired => Some(
+                    "旧版本清理操作已安全隔离，请联系管理员核对原对象身份；不会自动重新绑定或删除磁盘。",
+                ),
+                _ => None,
+            };
+            if let Some(detail) = detail {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(
+                        serde_json::json!({"diagnosticCode": error.to_string(), "detail": detail}),
+                    ),
+                )
+                    .into_response();
+            }
         }
         if let Self::RuntimeAdmission(crate::RuntimeAdmissionError::StorageHealth(error)) = &self {
             return (
@@ -1640,6 +1704,33 @@ mod tests {
         let now: UtcTimestamp = "2026-07-19T00:00:00.000Z".parse()?;
         let deadline = add_duration(now, Duration::from_mins(15))?;
         assert_eq!(deadline.to_string(), "2026-07-19T00:15:00.000Z");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retention_diagnostics_preserve_conflict_codes_and_readable_details()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use axum::response::IntoResponse;
+        for error in [
+            crate::LifecycleError::DiskNotRetained,
+            crate::LifecycleError::DiskRetentionExpired,
+            crate::LifecycleError::DiskPurgeNotDue,
+            crate::LifecycleError::CleanupProtocolUpgradeRequired,
+        ] {
+            let expected = error.to_string();
+            let response =
+                super::EnvironmentApiError::Store(crate::EnvironmentStoreError::Lifecycle(error))
+                    .into_response();
+            assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+            let bytes = axum::body::to_bytes(response.into_body(), 8192).await?;
+            let body: serde_json::Value = serde_json::from_slice(&bytes)?;
+            assert_eq!(body["diagnosticCode"], expected);
+            assert!(
+                body["detail"]
+                    .as_str()
+                    .is_some_and(|detail| !detail.is_empty())
+            );
+        }
         Ok(())
     }
 }

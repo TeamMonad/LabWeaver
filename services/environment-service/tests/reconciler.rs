@@ -464,6 +464,8 @@ fn retry_and_recover_resume_the_persisted_failed_phase() -> Result<(), Box<dyn s
             // This case resumes a proven original cleanup, not an unbound legacy failure.
             active.operation.cleanup_target =
                 Some(contracts::environment::EnvironmentCleanupTarget {
+                    purge_disk: false,
+                    retain_disk: false,
                     namespace: format!("lw-env-{}", active.id),
                     uid: uuid::Uuid::now_v7(),
                     objects: Vec::new(),

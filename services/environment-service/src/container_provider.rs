@@ -656,7 +656,13 @@ impl PgContainerExecutorFenceStore {
                 .and_then(|value| value.get("status"))
                 .and_then(Value::as_str)
                 == Some("deleted");
-            if tombstoned && cleanup_succeeded {
+            let disk_successor: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM environment.environment_instances WHERE environment_id=$1 AND generation=$2 AND contract->'operation'->>'id'=$3 AND contract->'diskRetention'->>'state' IN ('restored','purging'))")
+                .bind(fence.environment_id.as_uuid()).bind(i64::try_from(fence.operation_generation).map_err(|_| ContainerExecutorFenceError::IdentityMismatch)?)
+                .bind(fence.operation_id.to_string()).fetch_one(&mut *transaction).await?;
+            if tombstoned
+                && cleanup_succeeded
+                && !(disk_successor && fence.operation_generation > highest_generation)
+            {
                 if fence.action == ReconcileAction::Cleanup {
                     let value = last_response
                         .as_ref()
@@ -1642,6 +1648,25 @@ impl ContainerProviderConfiguration {
                         ["claimName"] = json!(placement.resource_name("workspace"));
                 }
             }
+        }
+        if let Some(target) = &instance.operation.cleanup_target
+            && instance.disk_retention.as_ref().is_some_and(|disk| {
+                disk.state == contracts::environment::EnvironmentDiskState::Restored
+            })
+        {
+            let disk = target
+                .objects
+                .iter()
+                .find(|object| object.resource == "persistentvolumeclaims")
+                .ok_or(ReleaseProjectionError::IdentityMismatch)?;
+            let document = documents
+                .iter_mut()
+                .find(|resource| resource.kind == "PersistentVolumeClaim")
+                .ok_or(ReleaseProjectionError::IdentityMismatch)?;
+            if document.name != disk.name {
+                return Err(ReleaseProjectionError::IdentityMismatch);
+            }
+            document.document["metadata"]["uid"] = json!(disk.uid);
         }
         let plan_sha256 = container_plan_sha256(
             instance.id,

@@ -789,6 +789,8 @@ async fn persist_visibility_checkpoint(
     pinned.revision = revision(pinned.revision.get() + 1);
     pinned.operation.provider_step += 1;
     pinned.operation.cleanup_target = Some(contracts::environment::EnvironmentCleanupTarget {
+        purge_disk: false,
+        retain_disk: false,
         namespace: "private-shared-namespace".to_owned(),
         uid: uuid::Uuid::now_v7(),
         objects: vec![contracts::execution::ExecutionObjectRef {

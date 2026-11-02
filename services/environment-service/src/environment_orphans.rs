@@ -325,6 +325,20 @@ fn object_owner(
 }
 
 fn classify_instance(instance: &EnvironmentInstance) -> OrphanDecision {
+    if instance.operation.diagnostic_code.as_deref()
+        == Some("LW_ENVIRONMENT_CLEANUP_PROTOCOL_UPGRADE_REQUIRED")
+    {
+        return OrphanDecision::Unverified;
+    }
+    if instance.disk_retention.as_ref().is_some_and(|disk| {
+        matches!(
+            disk.state,
+            contracts::environment::EnvironmentDiskState::Retained
+                | contracts::environment::EnvironmentDiskState::Restored
+        )
+    }) {
+        return OrphanDecision::Referenced;
+    }
     if instance.desired_state != DesiredEnvironmentState::Deleted {
         return OrphanDecision::Referenced;
     }
@@ -343,7 +357,7 @@ fn classify_instance(instance: &EnvironmentInstance) -> OrphanDecision {
         && instance.endpoints.is_empty()
         && instance.operation.access_revocation_revision.is_some()
         && instance.operation.cleanup_target.is_some()
-        && !instance.operation.preserve_mutable_disk
+        && (!instance.operation.preserve_mutable_disk || instance.disk_retention.is_some())
     {
         OrphanDecision::Recovering
     } else {
@@ -366,6 +380,8 @@ mod tests {
         assert_eq!(classify_instance(&instance), OrphanDecision::Unverified);
         instance.operation.access_revocation_revision = Some(instance.revision);
         instance.operation.cleanup_target = Some(EnvironmentCleanupTarget {
+            purge_disk: false,
+            retain_disk: false,
             namespace: format!("lw-env-{}", instance.id),
             uid: uuid::Uuid::now_v7(),
             objects: Vec::new(),

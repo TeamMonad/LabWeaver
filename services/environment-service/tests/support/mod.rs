@@ -1,6 +1,7 @@
 #![allow(dead_code, clippy::panic)]
 
 pub mod manual_release;
+pub mod retention;
 
 use std::{error::Error, path::Path, str::FromStr};
 
@@ -96,6 +97,13 @@ impl environment_service::ExperimentResourceAllocator for TestResourceAllocator 
 /// Integration tests must use the same ordered and hash-checked SQL as the service migration
 /// coordinator so newly added tables cannot silently be absent from a test database.
 pub async fn apply_environment_migrations(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    apply_environment_migrations_through(pool, u64::MAX).await
+}
+
+pub async fn apply_environment_migrations_through(
+    pool: &PgPool,
+    maximum: u64,
+) -> Result<(), Box<dyn Error>> {
     sqlx::query("CREATE SCHEMA environment")
         .execute(pool)
         .await?;
@@ -111,6 +119,9 @@ pub async fn apply_environment_migrations(pool: &PgPool) -> Result<(), Box<dyn E
         .find(|domain| domain.name == Domain::Environment)
         .ok_or_else(|| std::io::Error::other("migration catalog has no environment domain"))?;
     for migration in &environment_migrations.migrations {
+        if migration.id > maximum {
+            continue;
+        }
         let sql = MigrationCatalog::read_verified_sql(&migration_root, migration)?;
         sqlx::raw_sql(sqlx::AssertSqlSafe(&*sql))
             .execute(&mut *connection)
@@ -137,6 +148,7 @@ pub fn finite_retention() -> RetentionSnapshot {
 pub fn ready_instance() -> EnvironmentInstance {
     let accepted_at = timestamp("2026-07-14T00:00:00.000Z");
     EnvironmentInstance {
+        disk_retention: None,
         id: EnvironmentId::new(),
         display_label: "Ready environment".to_owned(),
         project_id: ProjectId::new(),
@@ -206,6 +218,7 @@ pub fn ready_instance() -> EnvironmentInstance {
 pub fn requested_instance() -> EnvironmentInstance {
     let accepted_at = timestamp("2026-07-14T00:00:00.000Z");
     EnvironmentInstance {
+        disk_retention: None,
         id: EnvironmentId::new(),
         display_label: "Requested environment".to_owned(),
         project_id: ProjectId::new(),

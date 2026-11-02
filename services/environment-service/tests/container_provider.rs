@@ -1482,3 +1482,48 @@ fn security_objects_precede_computation_in_every_container_network_mode() {
         }
     }
 }
+
+#[tokio::test]
+async fn restored_container_start_reauthorizes_and_reaches_ready_with_same_disk()
+-> Result<(), Box<dyn std::error::Error>> {
+    let projection = projection();
+    let now = timestamp("2026-07-16T08:30:00.000Z");
+    let uid = uuid::Uuid::from_u128(444);
+    let started = support::retention::delete_restore_and_reauthorize(
+        instance_for(&projection),
+        &projection,
+        uid,
+        now,
+    )?;
+    let backend = Arc::new(FixtureBackend::default());
+    let provider = provider(projection.clone(), backend.clone());
+    let action = environment_service::next_action(&started, now)?;
+    assert_eq!(action, ReconcileAction::Provision);
+    let plan = provider.plan(&started, &resolved(projection), action)?;
+    assert_eq!(
+        resource(&plan, "PersistentVolumeClaim").document["metadata"]["uid"],
+        uid.to_string()
+    );
+    let observation = provider
+        .execute(action, &started)
+        .await
+        .map_err(|failure| format!("{failure:?}"))?
+        .completed()
+        .ok_or("completed")?;
+    let ready = environment_service::apply_provider_observation(
+        &started,
+        started.operation.id,
+        observation,
+    )?;
+    assert_eq!(ready.observed_state, ObservedEnvironmentState::Ready);
+    assert_eq!(ready.observed_generation, ready.generation);
+    assert_eq!(
+        backend
+            .operations
+            .lock()
+            .map_err(|_| "operations")?
+            .as_slice(),
+        ["apply"]
+    );
+    Ok(())
+}

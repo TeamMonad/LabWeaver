@@ -8,6 +8,7 @@ use tokio::sync::watch;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 mod legacy_protocol;
+mod retention;
 
 // In-process transport at the existing Kubernetes seam, forwarding every operation to the
 // production executor. The lifecycle, worker CAS and PostgreSQL store are not replaced.
@@ -56,6 +57,7 @@ impl crate::ContainerProviderBackend for DirectKubernetes {
 
 struct Context {
     _postgres: ContainerAsync<Postgres>,
+    minio: Option<Box<ContainerAsync<testcontainers::GenericImage>>>,
     pool: sqlx::PgPool,
     store: crate::PgEnvironmentStore,
     mock: MockKubernetes,
@@ -77,6 +79,14 @@ impl Context {
         runtime: contracts::authoring::RuntimeKind,
         max_attempts: u32,
     ) -> TestResult<Self> {
+        Self::start_runtime_with_funding(runtime, max_attempts, false).await
+    }
+
+    async fn start_runtime_with_funding(
+        runtime: contracts::authoring::RuntimeKind,
+        max_attempts: u32,
+        funded: bool,
+    ) -> TestResult<Self> {
         let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(4)
@@ -95,13 +105,16 @@ impl Context {
         if runtime == contracts::authoring::RuntimeKind::VirtualMachine {
             initial.provider_binding = "kubevirt-primary-v1".to_owned();
         }
+        if funded {
+            initial = crate::test_support::funded_instance(initial);
+        }
         store.create("cleanup-checkpoint-create", &initial).await?;
         store
             .accept_command(
                 "cleanup-checkpoint-delete",
                 &crate::LifecycleCommand {
                     environment_id: initial.id,
-                    kind: EnvironmentOperationKind::Delete,
+                    kind: EnvironmentOperationKind::Cancel,
                     expected_revision: initial.revision,
                     actor_id: initial.owner_id,
                     trace_id: "cleanup-checkpoint".to_owned(),
@@ -123,6 +136,7 @@ impl Context {
         let (files, executor) = test_kubevirt_executor(&mock).await?;
         Ok(Self {
             _postgres: postgres,
+            minio: None,
             pool,
             store,
             mock,
@@ -439,6 +453,7 @@ async fn lost_worker_lease_cannot_commit_checkpoint_or_send_delete() -> TestResu
             context.initial.project_id,
             &format!("lw-env-{}", context.initial.id),
             None,
+            false,
         )
         .await
         .map_err(|error| format!("{error:?}"))?
@@ -617,7 +632,7 @@ async fn shared_namespace_object_checkpoint_rejects_replacement_on_later_call() 
 }
 
 async fn run_inventory_pages(pages: Vec<InventoryPage>) -> TestResult {
-    let context = Context::start().await?;
+    let context = Box::pin(Context::start()).await?;
     context.mock.inventory_pages.lock().await.extend(pages);
     let (stop, shutdown) = watch::channel(false);
     let scanning = context.executor.clone().run_orphan_reconciler(
