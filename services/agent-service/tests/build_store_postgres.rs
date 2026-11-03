@@ -2642,8 +2642,9 @@ async fn native_build_admission_preserves_resource_codes_through_executor_and_pu
             // view while retaining the physical row, its actual hold, and every FK constraint.
             // The native tariff API reprices a new admission; native Credits detects the
             // existing hold mismatch. No Resource handler/response or principal is replaced.
-            sqlx::query("ALTER TABLE resource.build_metering_attempts RENAME TO visibility_fault_build_metering_attempts").execute(&pool).await?;
-            sqlx::query("CREATE VIEW resource.build_metering_attempts AS SELECT * FROM resource.visibility_fault_build_metering_attempts WHERE false").execute(&pool).await?;
+            // PostgreSQL DDL is transactional: the rename and the filtered view are installed
+            // in one statement batch, so a failure leaves the original schema untouched.
+            sqlx::raw_sql("BEGIN; ALTER TABLE resource.build_metering_attempts RENAME TO visibility_fault_build_metering_attempts; CREATE VIEW resource.build_metering_attempts AS SELECT * FROM resource.visibility_fault_build_metering_attempts WHERE false; COMMIT;").execute(&pool).await?;
         }
         // Everything between installing and removing the visibility fault runs inside one
         // future so the schema is restored before any error or panic propagates.
@@ -2718,16 +2719,34 @@ async fn native_build_admission_preserves_resource_codes_through_executor_and_pu
           result
         }))
         .await;
-        if code == "LW_CREDITS_CONFLICT" {
-            sqlx::query("DROP VIEW resource.build_metering_attempts")
+        // Restore atomically before evaluating the faulted result, then report the first
+        // failure: a test error or panic takes precedence over a restore failure.
+        let restored = if code == "LW_CREDITS_CONFLICT" {
+            sqlx::raw_sql("BEGIN; DROP VIEW resource.build_metering_attempts; ALTER TABLE resource.visibility_fault_build_metering_attempts RENAME TO build_metering_attempts; COMMIT;")
                 .execute(&pool)
-                .await?;
-            sqlx::query("ALTER TABLE resource.visibility_fault_build_metering_attempts RENAME TO build_metering_attempts").execute(&pool).await?;
-        }
+                .await
+                .map(|_| ())
+        } else {
+            Ok(())
+        };
         let failure = match faulted {
             Ok(result) => result?,
             Err(panic) => std::panic::resume_unwind(panic),
         };
+        restored?;
+        if code == "LW_CREDITS_CONFLICT" {
+            let restored_table: Option<String> = sqlx::query_scalar(
+                "SELECT relkind::text FROM pg_class WHERE oid = to_regclass('resource.build_metering_attempts')",
+            )
+            .fetch_optional(&pool)
+            .await?
+            .flatten();
+            assert_eq!(
+                restored_table.as_deref(),
+                Some("r"),
+                "the physical metering table must be restored after the visibility fault"
+            );
+        }
         assert_eq!(failure.diagnostic_code(), code);
         assert!(
             !failure.retryable,
