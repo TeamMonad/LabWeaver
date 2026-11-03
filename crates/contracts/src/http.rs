@@ -3250,6 +3250,20 @@ pub const OPERATIONS: &[OperationContract] = &[
     ),
     op!(
         GatewayInternal,
+        Get,
+        "/internal/v1/platform-configuration/applies/{applyId}",
+        "getPlatformConfigurationExecutorIntent",
+        "control.platform_configuration.apply",
+        ServiceJwt,
+        None,
+        200,
+        false,
+        true,
+        PLATFORM_ADMIN,
+        Service
+    ),
+    op!(
+        GatewayInternal,
         Put,
         "/internal/v1/platform-configuration/applies/{applyId}",
         "reportPlatformConfigurationApply",

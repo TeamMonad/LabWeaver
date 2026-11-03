@@ -14,7 +14,7 @@ cargo xtask package-prepare
 
 `package-prepare` 会校验已有下载；Claude Code 或离线包内容损坏时会删除该文件并重新下载一次。下载只写入同目录的 `.part` 文件，通过锁定的 SHA-512（Claude Code）或 SHA-256（离线包）校验后才原子重命名到最终路径；被中断的 `.part` 文件会在下次下载时覆盖，无需手工删除损坏缓存。每次连接最多等待 30 秒，连续 60 秒低于 1 KiB/s 视为停滞，每次传输最多 3600 秒。curl 保留 3 次额外重试（最多 4 次尝试），并用 `--retry-max-time 7200` 限制重试预算，避免服务器的 `Retry-After` 导致无限等待。该预算包含首轮尝试以来的耗时和重试等待，但不会中止已开始的传输；因此单个包的下载最坏约为 7200 + 3600 = 10800 秒（3 小时），不是 7200 秒的硬截止，也不是整个准备命令的总时限。3600 秒的单次上限允许约 83 MB 的 Claude Code 包在约 29 KiB/s 的慢连接上完成。下载或校验失败会终止准备，不发布最终文件。`package-check` 仍只读、无网络，遇到缺失或损坏文件时直接失败，不会修复输入。
 
- 需要可用的 Linux Docker 引擎、Docker Buildx、Kind、kubectl、Helm、Python、OpenSSL 和 OpenSSH 的 `ssh-keygen`。首次运行会拉取基础镜像并编译 Rust 与 Web 镜像，应预留足够的磁盘、内存和构建时间。固定版本的基础镜像在服务启动前由各 Kind 节点按 digest 预拉取，下载不会占用服务启动的等待时间。已有应用构建缓存会被复用。
+需要可用的 Linux Docker 引擎、Docker Buildx、Kind、kubectl、Helm、Python、OpenSSL、OpenSSH 的 `ssh-keygen`，以及加密 Bundle 文档锁定的 age/age-keygen。先构建同源 `cargo build -p xtask --locked`；自定义 target 目录时设置 `LABWEAVER_BUNDLE_CONFIGURATION_TOOL` 为实际 xtask 二进制。首次运行会拉取基础镜像并编译 Rust 与 Web 镜像，应预留足够的磁盘、内存和构建时间。固定版本的基础镜像在服务启动前由各 Kind 节点按 digest 预拉取，下载不会占用服务启动的等待时间。已有应用构建缓存会被复用。
 
 在仓库根目录运行：
 
@@ -32,6 +32,13 @@ python tools/local_dev.py down
 本地 Keycloak 使用独立 PVC 保存开发数据库，Pod 或 Docker 重启后保留账号、角色和签名密钥。单实例部署采用 `Recreate`，避免两个进程同时访问数据库。该存储随 `down` 删除，不用于长期身份管理；不要只重建身份数据库而保留依赖原账号身份的业务数据库。
 
 本地 realm 从 `deploy/ansible/roles/identity_foundation/defaults/main.yml` 读取服务身份与角色策略。Access 服务账户的组织用户目录权限复用 `identity_service_realm_role_assignments`，同时导入 `realm-management` 的 `query-users` / `view-users` 授权和 client scope mappings；保持 `fullScopeAllowed=false`，不授予管理用户或管理 realm 的权限。Keycloak 保留已有 realm 时不会通过重新导入覆盖这些角色；仅更新代码或重启 Pod 不会修复既有开发数据库中的缺失授权，需由该环境的负责人安排全新开发栈验收，不应在共享验收期间清空或修改身份库。
+
+`up` 不再以服务 rollout 就绪作为平台运行策略就绪。它先通过真实 Keycloak authorization-code OIDC 登录本次 provision 的 `platform-admin` 账户，经门户 BFF 的同一管理员 API 保存 desired、登记实际 age 密文并请求 apply；使用 Cookie、Origin、CSRF、ETag 和幂等键，不伪造 principal、不直写平台配置数据库。随后以 `labweaver-deployment-executor` 的独立服务账户调用 `cargo xtask deploy --env local --stage configuration --yes`，挂载实际保存版本和经过 age 认证的密文来源，并用真实 Control 全副本 loaded 观察完成 verified applied。只有读回该原 attempt 的 succeeded、verified 和准确密文摘要后，`up` 才记录 ready。普通与 external-fixtures 使用相同路径；配置不匹配、JWT/TLS 错误或副本不可达会使启动失败，不跳过运行策略校验。
+
+管理 Bundle 来自本次真实应用输入及管理员保存的版本；Resource 保留既有独立渲染输入。本次 age 身份与归档在运行拥有的 `.private/local-dev/<runId>/` 中分别保存，运行解密目录退出即清理，`down` 仍按原归属流程清理整个一次性环境。`.private` 及其相关目录必须为当前用户拥有的 `0700` 目录；不要通过放宽权限或把客户端 Secret/会话写入普通日志解决启动错误。部署执行器只获得 Control 的 `control.platform_configuration.apply` client role，不获得平台管理员、Access 网关转发或 Keycloak realm 管理角色。
+
+为生成真实管理 Bundle，`up` 将 Control/Access/Agent/Evaluation/build executor 的本次 NATS YAML 输入收敛为 `serverFile`，各服务的既有 Secret 挂载从 Environment owner 的同一个 `nats-server` 输入派生，不再把 endpoint 复制进 ConfigMap。原内联输入只用于第一次尚未初始化管理配置的服务启动；配置执行阶段应用该同源派生对象并按对象摘要重启。所有服务的真实启动解析器都拒绝同时给出 `server`/`serverFile`、两者都没有、空文件和不可读文件，不绕过 Secret-location 校验。
+
 
 本地 MinIO 工件桶在首次创建时通过固定版本的 `mc mb --with-lock` 启用 Object Lock，并单独校验桶的锁能力和版本控制。Bootstrap 不设置固定的桶默认保留期；Evaluation freeze 会为每个对象写入 Governance 模式和 `retainUntil`。如果已有桶缺少 Object Lock，启动会立即失败并保留原桶，不删除、重建或迁移其中的数据；需要使用本次运行拥有的本地环境重新执行 `down` 后再 `up`。
 

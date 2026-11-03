@@ -68,6 +68,7 @@ pub struct AccessAuthFile {
     /// `AccessGrant`, worker, and one-time authorization limits.
     pub grants: GrantRuntimeFileConfig,
     /// Mandatory mTLS `JetStream` connection.
+    #[serde(deserialize_with = "deserialize_nats_config")]
     pub nats: NatsFileConfig,
     /// Secret-file locators for the Access runtime.
     pub secrets: SecretFileConfig,
@@ -96,6 +97,37 @@ pub struct GrantRuntimeFileConfig {
     pub max_console_sessions: u16,
     pub environment_state_stream: String,
     pub environment_state_consumer: String,
+}
+
+/// Deserializes a startup NATS section with exactly one endpoint source.
+/// File contents are read once before typed configuration is exposed; diagnostics
+/// never contain the locator or endpoint. Remaining fields retain their owner's
+/// normal strict deserializer.
+pub fn deserialize_nats_config<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    use serde::de::Error as _;
+    let invalid = || D::Error::custom("LW_NATS_ENDPOINT_CONFIGURATION_INVALID");
+    let mut value = serde_yaml::Value::deserialize(deserializer)?;
+    let mapping = value.as_mapping_mut().ok_or_else(invalid)?;
+    let server = mapping.remove("server");
+    let file = mapping.remove("serverFile");
+    let endpoint = match (server, file) {
+        (Some(serde_yaml::Value::String(server)), None) if !server.trim().is_empty() => server,
+        (None, Some(serde_yaml::Value::String(path))) => {
+            let contents = std::fs::read_to_string(path).map_err(|_| invalid())?;
+            let endpoint = contents.trim();
+            if endpoint.is_empty() {
+                return Err(invalid());
+            }
+            endpoint.to_owned()
+        }
+        _ => return Err(invalid()),
+    };
+    mapping.insert("server".into(), serde_yaml::Value::String(endpoint));
+    serde_yaml::from_value(value).map_err(D::Error::custom)
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -1012,5 +1044,40 @@ nats:
                 .and_then(|value| value.oidc.role_mappings.get("platform_admin").cloned()),
             Some("platform_admin".to_owned())
         );
+    }
+}
+
+#[cfg(test)]
+mod nats_source_tests {
+    #[test]
+    fn access_server_file_is_exclusive_and_read_at_startup()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let file = directory.path().join("endpoint");
+        std::fs::write(&file, "tls://actual-nats:4222\n")?;
+        let mut value: serde_yaml::Value = serde_yaml::from_str(include_str!(
+            "../../../deploy/config/access-auth.yaml.example"
+        ))?;
+        value["nats"]
+            .as_mapping_mut()
+            .ok_or("NATS missing")?
+            .remove("server");
+        value["nats"]["serverFile"] = file.to_string_lossy().as_ref().into();
+        let parsed = super::AccessAuthFile::parse_yaml(&serde_yaml::to_string(&value)?)?;
+        assert_eq!(parsed.nats.server, "tls://actual-nats:4222");
+        let mut both = value.clone();
+        both["nats"]["server"] = "tls://duplicated:4222".into();
+        assert!(super::AccessAuthFile::parse_yaml(&serde_yaml::to_string(&both)?).is_err());
+        let mut neither = value.clone();
+        neither["nats"]
+            .as_mapping_mut()
+            .ok_or("NATS missing")?
+            .remove("serverFile");
+        assert!(super::AccessAuthFile::parse_yaml(&serde_yaml::to_string(&neither)?).is_err());
+        std::fs::write(&file, " \n")?;
+        assert!(super::AccessAuthFile::parse_yaml(&serde_yaml::to_string(&value)?).is_err());
+        std::fs::remove_file(&file)?;
+        assert!(super::AccessAuthFile::parse_yaml(&serde_yaml::to_string(&value)?).is_err());
+        Ok(())
     }
 }

@@ -11,6 +11,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 mod bundle_configuration;
 mod integration;
 mod platform_images;
+mod verified_apply;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -107,6 +108,7 @@ enum DeploymentStage {
     Identity,
     Storage,
     Services,
+    Configuration,
     Route,
 }
 
@@ -564,6 +566,28 @@ fn write_contract_artifacts(root: &Path) -> Result<(), AppError> {
 }
 
 fn deploy(args: &EnvironmentArgs) -> Result<(), AppError> {
+    if args.stage == DeploymentStage::Configuration {
+        if !args.yes {
+            return Err(AppError::ConfirmationRequired {
+                command: "deploy --stage configuration",
+            });
+        }
+        if args.mode.is_some()
+            || args.package_manifest.is_some()
+            || args.resource_package_manifest.is_some()
+            || args.target.is_some()
+            || args.scope.is_some()
+        {
+            return Err(AppError::InvalidArgument {
+                role: "configuration stage consumes only the authenticated managed Bundle",
+            });
+        }
+        return verified_apply::execute(
+            false,
+            |action| verified_apply::run(&repository_root(), action),
+            || verified_apply::run(&repository_root(), "apply"),
+        );
+    }
     if let Some(mode) = args.mode {
         return deploy_mode(args, mode);
     }
@@ -591,7 +615,7 @@ fn deploy_mode(args: &EnvironmentArgs, mode: DeploymentMode) -> Result<(), AppEr
             command: "deploy --mode",
         });
     }
-    let installation_id = bundle_mode_inputs(args, mode)?;
+    let (installation_id, initial_configuration) = bundle_mode_inputs(args, mode)?;
     if mode == DeploymentMode::Wipe {
         if args.package_manifest.is_some()
             || args.resource_package_manifest.is_some()
@@ -652,8 +676,7 @@ fn deploy_mode(args: &EnvironmentArgs, mode: DeploymentMode) -> Result<(), AppEr
             detail: error.to_string(),
         })?;
     platform_images::validate_profile(&resource_manifest, "resource", &repository_root())?;
-    // Each re-entry executes the same full preflight; a failed stage stops the plan.
-    execute_deployment_plan(mode, args.stage, |playbook, needs_package| {
+    let run = |playbook, needs_package: bool| {
         let selected_package = if playbook == "94-resource-application.yml" {
             resource_manifest.as_path()
         } else {
@@ -672,11 +695,32 @@ fn deploy_mode(args: &EnvironmentArgs, mode: DeploymentMode) -> Result<(), AppEr
                 ("LW_BUNDLE_INSTALLATION_ID", installation_id.clone()),
             ],
         )
-    })
+    };
+    let mut plan = deployment_plan(mode, args.stage).into_iter();
+    while let Some((playbook, needs_package)) = plan.next() {
+        if playbook == "93-platform-application.yml" {
+            return verified_apply::execute(
+                initial_configuration,
+                |action| verified_apply::run(&repository_root(), action),
+                || {
+                    run(playbook, needs_package)?;
+                    for (playbook, needs_package) in plan {
+                        run(playbook, needs_package)?;
+                    }
+                    Ok(())
+                },
+            );
+        }
+        run(playbook, needs_package)?;
+    }
+    Ok(())
 }
 
 /// Bind the mode to the authenticated Bundle snapshot, not ambient inventory or manifests.
-fn bundle_mode_inputs(args: &EnvironmentArgs, mode: DeploymentMode) -> Result<String, AppError> {
+fn bundle_mode_inputs(
+    args: &EnvironmentArgs,
+    mode: DeploymentMode,
+) -> Result<(String, bool), AppError> {
     let invalid = || AppError::InvalidArgument {
         role: "authenticated deployment Bundle source",
     };
@@ -721,7 +765,10 @@ fn bundle_mode_inputs(args: &EnvironmentArgs, mode: DeploymentMode) -> Result<St
             }
         }
     }
-    Ok(id.to_owned())
+    Ok((
+        id.to_owned(),
+        model["configurationMode"].as_str() == Some("initial_settings"),
+    ))
 }
 
 fn deployment_mode_name(mode: DeploymentMode) -> &'static str {
@@ -772,6 +819,7 @@ fn deployment_plan(mode: DeploymentMode, stage: DeploymentStage) -> Vec<(&'stati
                 Vec::new()
             }
         }
+        DeploymentStage::Configuration => Vec::new(),
         DeploymentStage::Services => {
             if mode == DeploymentMode::Upgrade || install_or_adopt {
                 vec![

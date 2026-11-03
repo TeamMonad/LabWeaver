@@ -47,6 +47,7 @@ struct DeploymentFile {
     object_store_session_token_file: Option<String>,
     control: ControlConfig,
     cleanup_interval_seconds: u64,
+    #[serde(deserialize_with = "auth::config::deserialize_nats_config")]
     nats: NatsFileConfig,
 }
 
@@ -676,5 +677,40 @@ mod deployment_contract_tests {
                 .starts_with("labweaver.control.quarantine.")
         );
         assert!(!example.contains(".v2"));
+    }
+}
+
+#[cfg(test)]
+mod nats_source_tests {
+    #[test]
+    fn control_server_file_is_exclusive_and_read_at_startup()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let file = directory.path().join("endpoint");
+        std::fs::write(&file, "tls://actual-nats:4222\n")?;
+        let mut value: serde_yaml::Value = serde_yaml::from_str(include_str!(
+            "../../../deploy/config/control-plane.yaml.example"
+        ))?;
+        value["nats"]
+            .as_mapping_mut()
+            .ok_or("NATS missing")?
+            .remove("server");
+        value["nats"]["serverFile"] = file.to_string_lossy().as_ref().into();
+        let parsed: super::DeploymentFile = serde_yaml::from_value(value.clone())?;
+        assert_eq!(parsed.nats.server, "tls://actual-nats:4222");
+        let mut both = value.clone();
+        both["nats"]["server"] = "tls://duplicated:4222".into();
+        assert!(serde_yaml::from_value::<super::DeploymentFile>(both).is_err());
+        let mut neither = value.clone();
+        neither["nats"]
+            .as_mapping_mut()
+            .ok_or("NATS missing")?
+            .remove("serverFile");
+        assert!(serde_yaml::from_value::<super::DeploymentFile>(neither).is_err());
+        std::fs::write(&file, " \n")?;
+        assert!(serde_yaml::from_value::<super::DeploymentFile>(value.clone()).is_err());
+        std::fs::remove_file(&file)?;
+        assert!(serde_yaml::from_value::<super::DeploymentFile>(value).is_err());
+        Ok(())
     }
 }

@@ -43,6 +43,7 @@ struct EvaluationConfiguration {
     database_url_file: PathBuf,
     database_max_connections: u32,
     api_tls: ServerTlsFileConfig,
+    #[serde(deserialize_with = "auth::config::deserialize_nats_config")]
     nats: NatsConfiguration,
     outbox_publish_timeout_milliseconds: u64,
     outbox_poll_interval_milliseconds: u64,
@@ -849,6 +850,41 @@ mod tests {
         let oversized_first = store_config(&oversized_first_path);
         let oversized_second = store_config(&oversized_second_path);
         assert!(load_materializer_ca_bundle([&oversized_first, &oversized_second]).is_err());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod nats_source_tests {
+    #[test]
+    fn evaluation_server_file_is_exclusive_and_read_at_startup()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let file = directory.path().join("endpoint");
+        std::fs::write(&file, "tls://actual-nats:4222\n")?;
+        let mut value: serde_yaml::Value = serde_yaml::from_str(include_str!(
+            "../../../deploy/config/evaluation-service.yaml.example"
+        ))?;
+        value["nats"]
+            .as_mapping_mut()
+            .ok_or("NATS missing")?
+            .remove("server");
+        value["nats"]["serverFile"] = file.to_string_lossy().as_ref().into();
+        let parsed: super::EvaluationConfiguration = serde_yaml::from_value(value.clone())?;
+        assert_eq!(parsed.nats.server, "tls://actual-nats:4222");
+        let mut both = value.clone();
+        both["nats"]["server"] = "tls://duplicated:4222".into();
+        assert!(serde_yaml::from_value::<super::EvaluationConfiguration>(both).is_err());
+        let mut neither = value.clone();
+        neither["nats"]
+            .as_mapping_mut()
+            .ok_or("NATS missing")?
+            .remove("serverFile");
+        assert!(serde_yaml::from_value::<super::EvaluationConfiguration>(neither).is_err());
+        std::fs::write(&file, " \n")?;
+        assert!(serde_yaml::from_value::<super::EvaluationConfiguration>(value.clone()).is_err());
+        std::fs::remove_file(&file)?;
+        assert!(serde_yaml::from_value::<super::EvaluationConfiguration>(value).is_err());
         Ok(())
     }
 }

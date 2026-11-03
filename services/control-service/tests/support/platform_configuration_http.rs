@@ -61,8 +61,12 @@ impl Drop for AuthorityHandle {
         self.task.abort();
     }
 }
-struct TlsServiceHandle {
-    base_url: reqwest::Url,
+#[allow(
+    dead_code,
+    reason = "only the executor integration target starts a TCP listener"
+)]
+pub(super) struct TlsServiceHandle {
+    pub(super) base_url: reqwest::Url,
     shutdown: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -81,7 +85,7 @@ pub(super) struct HttpFixture {
     pub other_actor: ActorId,
     issuer: AuthorityHandle,
     _access: TlsServiceHandle,
-    _temporary: tempfile::TempDir,
+    temporary: tempfile::TempDir,
     key: String,
     state: Arc<ApiState>,
 }
@@ -116,6 +120,7 @@ impl HttpFixture {
                     &issuer.issuer,
                     "labweaver-control".to_owned(),
                     BTreeSet::from([
+                        "labweaver-deployment-executor".to_owned(),
                         "labweaver-access".to_owned(),
                         "synthetic-executor".to_owned(),
                     ]),
@@ -152,12 +157,27 @@ impl HttpFixture {
             other_actor,
             issuer,
             _access: access,
-            _temporary: temporary,
+            temporary,
             key,
             state,
         })
     }
 
+    #[allow(
+        dead_code,
+        reason = "only the executor integration target starts a TCP listener"
+    )]
+    pub async fn serve_executor(
+        &self,
+    ) -> Result<(TlsServiceHandle, std::path::PathBuf), Box<dyn std::error::Error>> {
+        let (ca, leaf, key, _) = tls_material()?;
+        let ca_path = self.temporary.path().join("executor-ca.pem");
+        std::fs::write(&ca_path, ca)?;
+        Ok((
+            spawn_tls_service(self.router.clone(), &leaf, &key).await?,
+            ca_path,
+        ))
+    }
     #[allow(
         dead_code,
         reason = "only replica integration targets fork the shared fixture"
@@ -361,6 +381,9 @@ fn tls_config(
 fn tls_material() -> Result<(String, String, String, Value), Box<dyn std::error::Error>> {
     let ca_key = KeyPair::generate()?;
     let mut ca_parameters = CertificateParams::new(Vec::<String>::new())?;
+    ca_parameters
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "Synthetic configuration root");
     ca_parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     ca_parameters.key_usages = vec![
         KeyUsagePurpose::DigitalSignature,
@@ -369,6 +392,9 @@ fn tls_material() -> Result<(String, String, String, Value), Box<dyn std::error:
     ];
     let ca = CertifiedIssuer::self_signed(ca_parameters, ca_key)?;
     let mut leaf_parameters = CertificateParams::new(vec!["localhost".to_owned()])?;
+    leaf_parameters
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "localhost");
     leaf_parameters.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     leaf_parameters.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     let leaf_key = KeyPair::generate()?;

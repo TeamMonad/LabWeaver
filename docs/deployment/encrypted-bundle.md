@@ -133,6 +133,8 @@ nats:
 
 派生阶段将 databaseUrlFile 与 NATS CA 路径指向上述只读投影。Environment 的 Container/KubeVirt 执行器共用真实启动解析器，`server` 与 `serverFile` 必须恰好提供一个；缺失、同时提供或文件内容 trim 后为空均返回 `LW_ENVIRONMENT_CONFIG_INVALID`，保留未知字段拒绝。文件中的 endpoint 只读入进程内存，不写回 ConfigMap。原非 Bundle YAML 可继续提供单个 `server` 字符串。NATS clientCertificateFile、clientPrivateKeyFile、credentialsFile 继续由 TLS 客户端读取各执行器已有 Secret；databaseUrlFile 由启动代码读取。每个执行器的请求 subject 必须与同一 Bundle 的 owner providers.json 对应角色一致；工具不签发 NATS 用户、不扩大发布/订阅/响应权限。
 
+Control、Access、Agent、Agent build executor 和 Evaluation 的启动 NATS 配置同样支持且只能选择一个 `server` 或 `serverFile`；缺失、两者并存、文件不可读或内容为空均在启动解析时拒绝。非 Bundle 输入可继续使用原单个 `server`。管理 Bundle 的这些服务使用 `serverFile: /etc/labweaver/secrets/nats-server`，不能把 endpoint 内联回 ConfigMap。派生器从同一 Environment owner 的 `nats-server` 源文件生成各服务既有 Secret 挂载中的 endpoint 键；不新增凭据、权限或第二个 endpoint 真源。原 Secret-location 检查保持不变。
+
 可运行 `environment-service --check-runtime-executor-config <runtime.yaml>` 校验同一真实启动解析器及 NATS endpoint 文件读取；该入口不连接数据库、NATS、Kubernetes 或模型服务，不代表完整部署已启动。普通 local_dev 与 external-fixtures 的完整真实投影 YAML 均由 Python 部署回归送入此 Rust 入口，测试仅将挂载文件 locator 映射到临时 Secret 目录，不替换为内联 endpoint。
 
 有 `resource` profile 时，工具核对已有 Resource allowlist、Environment client ID、audience 和 OIDC issuer 与 owner 匹配，保留原权限集合。没有该 profile 时，外部 Resource 的对应 allowlist、原三个 ResourceUsage scope、CA 与服务身份必须由其原 owner 配置；本工具不能证明这些外部条件成立。
@@ -378,11 +380,12 @@ Cluster network、identity、verify、admin tools、foundation、Harbor、sandbo
 2. 如需自定义设置，改用 `--settings-file .private/initial/settings.yaml`，文件只包含完整 configuration 的三个设置组。
 3. 将模型设置为 `configurationMode: initial_settings`、`revision: 1`，引用该请求文件。
 4. 准备现有应用与 Resource 的完整安装输入，再验证和加密同一目录。
-5. 在单独获准安装窗口恢复归档，并使用既有安装入口部署。
-6. Control 可用后，由真实管理员提交恢复的零 revision 请求、`If-Match: "rev-0"` 和稳定幂等键。
-7. 读取 Control 创建的真实 desired 版本，后续导出使用 `managed_version`。
+5. 在获准窗口通过统一 `deploy --mode install` 部署初始服务。配置阶段返回 `LW_PLATFORM_CONFIGURATION_ADMIN_INITIALIZATION_REQUIRED`，不会报告 applied/verified；这不表示已经回滚服务部署。
+6. Control 可用后，由真实平台管理员通过门户 BFF 提交恢复的零 revision 请求、`If-Match: "rev-0"` 和稳定幂等键。执行服务账户没有管理员初始化权限。
+7. 导出 Control 创建的真实 desired 版本，将同一安装 ID 的 Bundle 改为 `managed_version` 并重新加密到新文件，登记实际密文并请求 apply。
+8. 设置管理员返回的 `LABWEAVER_PLATFORM_CONFIGURATION_APPLY_ID`，在该管理归档的 `exec` 中运行 `cargo xtask deploy --env <环境> --stage configuration --yes`。执行器部署管理投影，完成真实副本 loaded 核对后才报告 verified applied。首次未初始化不会自动跳过该阶段或返回成功。
 
-本地 revision 1 仅表示首装 Bundle 格式中的版本。Control 在提交前仍为未配置，工具不制造 Actor、版本时间或 applied。若目标已经保存新设置，零 revision 更新会冲突，不能把首装当作升级或重置。工具也不会初始化身份、写费率、清空账本或代替用户批准密文/目的地。
+本地 revision 1 仅表示首装 Bundle 格式中的版本。Control 在管理员提交前仍为未配置，工具不制造 Actor、版本时间或 applied。若目标已经保存新设置，零 revision 更新会冲突，不能把首装当作升级或重置。工具也不会初始化身份、写费率、清空账本或代替用户批准密文/目的地。`local_dev.py up` 在自己的全新一次性栈中，通过真实 Keycloak 管理员 OIDC 登录自动完成上述管理员步骤，再调用同一执行阶段；生产不使用本地测试账户。
 
 ## 解密、恢复和使用
 
@@ -501,6 +504,29 @@ Control 的本地进程入口读取 `LABWEAVER_PLATFORM_CONFIGURATION_VERSION_FI
 Kubernetes [AtomicWriter](https://github.com/kubernetes/kubernetes/blob/v1.35.0/pkg/volume/util/atomic_writer.go) 用同一代次目录和符号链接发布投影。因此初始化命令固定一个 `..data` 代次，校验字节checksum后写入普通0600文件，保留加载器原有的链接拒绝。主进程的身份来自 [Downward API](https://kubernetes.io/docs/concepts/workloads/pods/downward-api/)；挂载文件改变不会替换已经加载的进程快照。
 
 Control副本数在原Bundle的 `application.helmValues.workloads.control-service.replicas` 配置为1到16，默认1。Source及chart必须一致。不要手改派生值、加载环境路径、Downward身份或ConfigMap数据。任一来源、摘要或必需字段错误会明确失败。
+
+### 统一入口的配置执行器
+
+`cargo xtask deploy` 的应用服务阶段使用 `tools/verified_apply.py` 执行原 apply/report 状态机。管理 Bundle 可包含：
+
+```yaml
+configurationExecutor:
+  clientId: labweaver-deployment-executor
+  clientSecretFile: secrets/deployment-executor-client-secret
+```
+
+管理员提交 apply 后，将返回的真实 attempt ID 设置为 `LABWEAVER_PLATFORM_CONFIGURATION_APPLY_ID`，再运行同一归档的部署消费者。执行器通过现有内部 apply 路径的只读 GET 查询该准确 attempt；错误/过期 ID、其他执行客户端已接管的 attempt 或摘要不符均拒绝。该只读方法与 report 共用既有 apply 服务权限，不开放管理员保存、Bundle 登记或请求应用的内部写入口。生产的 desired/登记/apply 仍由真实平台管理员经现有 BFF API 完成；不能把执行账户加入管理员组。
+
+凭据文件纳入同一受限目录和 age 归档；Control 的 caller allowlist 由该声明派生。身份 foundation 中该客户端仅获得 Control 的 `control.platform_configuration.apply` client role，不获得 Access 网关转发、用户管理、realm 管理或平台管理员角色。该业务权限不是 OAuth scope；执行器向真实 Keycloak 发送 client-credentials 请求，Control 继续验证服务 JWT 的 issuer、audience、签名、期限、client allowlist 和权限。部署前必须通过既有身份入口准备真实客户端 Secret 和 assignment；工具不会从测试身份推导生产权限。
+
+执行器只读取本次 age 解密认证所使用的密文快照，核对原 desired revision、管理设置摘要及密文摘要。它按 `validating → applying → verifying → succeeded` 报告；只有真实 Control 全副本 loaded 观察与该版本及密文一致时才报告 succeeded。服务部署失败报告 external_result_unknown；副本不匹配或不可达报告 verification_failed，并保留 unverified 和最后验证的 applied，不会直接写数据库或跳过观察。
+
+观察仍复用下述 Deployment→ReplicaSet→Pod roster 与进程快照检查。统一执行器使用已有 kubectl 对准确的 Pod 做临时回环 port-forward；HTTPS 始终校验 Control Service DNS 与 Bundle 内的 CA，不依赖控制器能直连 Pod CIDR，不使用 Pod exec 或关闭 TLS。端口转发退出后必定回收。
+
+`cargo xtask deploy --env <环境> --stage configuration --yes` 是同一执行器的配置投影阶段：在 prepare 与 finish 之间，只写 Control 自己的 `control-service-config`，再使用现有 Helm chart 将实际管理版本、来源和策略挂载到已有 release。对象摘要驱动服务按同一输入重启，并等待升级完成；NATS endpoint 在各服务启动时从其既有只读 Secret 挂载读取。它不初始化其他基础设施或替换其权限，也不改写其他应用 ConfigMap/Secret：它们带有应用阶段绑定的包镜像（evaluation worker、build executor、authoring sandbox 和 BuildKit）。该阶段仍要求已经登记且请求应用的真实 intent；没有 bypass 旗标，命令退出成功也不能代替 Control loaded 观察。所绑定尝试已 succeeded 时，重入只重新观察实际副本，不再部署或报告；需要再次写入时由管理员提交新的应用尝试。部署失败后若失败报告也无法写入 Control，入口同时给出两个诊断码，尝试保持 unverified。
+
+内部 intent 读取只返回所绑定尝试及其 desired 版本的 `configurationSha256`；执行器在任何部署写入前核对它，而不是误用可能已被管理员推进的当前 desired。配置对象写入先核对 namespace 和 installation ID，只对显式 NotFound 创建新对象；已有对象以实际 UID/resourceVersion 条件替换。读取失败、归属不符、缺少该对象或并发替换均失败关闭，不通过名称相似认领对象。
+
 
 完成已获准部署后，原执行者在 `verifying` 阶段收集一次实际观察：
 

@@ -20,9 +20,9 @@
 
 `previousApplyId` 链接上一次尝试。重试或刷新后，管理员仍能读取原失败尝试。配置 revision 是不连续递增值，不能用加一猜测下一条历史版本。
 
-独立执行者使用 `PUT /internal/v1/platform-configuration/applies/{applyId}` 报告事实。该入口验证服务 JWT 的 issuer、audience、签名、期限、配置的客户端范围和 `control.platform_configuration.apply` 权限。Access 网关身份即使带该权限也不能报告。浏览器 SDK 不包含此内部入口。
+独立执行者使用 `GET /internal/v1/platform-configuration/applies/{applyId}`（`getPlatformConfigurationExecutorIntent`）读取它所绑定的尝试，并用 `PUT /internal/v1/platform-configuration/applies/{applyId}`（`reportPlatformConfigurationApply`）报告事实。两个入口都验证服务 JWT 的 issuer、audience、签名、期限、配置的客户端范围和 `control.platform_configuration.apply` 权限；Access 网关身份即使带该权限也不能调用。两者只返回 `PlatformConfigurationExecutorIntent`：聚合 revision、所绑定尝试（id、revision、desiredRevision、encryptedBundleSha256、stage、executorClientId）和该尝试 desired 版本的 `configurationSha256`。不返回 desired/applied 设置、管理员身份或其他版本。浏览器 SDK 不包含这两个内部入口。
 
-本 PR 没有配置生产执行者身份或授予其权限。需要已有获准的执行身份和部署窗口，执行者才能调用此入口。缺少身份或权限时，入口明确拒绝。不要让浏览器持有部署服务 Token。
+执行者身份 `labweaver-deployment-executor` 只获得 `control.platform_configuration.apply`。缺少身份或权限时，入口明确拒绝。不要让浏览器持有部署服务 Token。
 
 ## 编辑同一配置
 

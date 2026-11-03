@@ -57,9 +57,16 @@ identity_service_clients: # noqa: var-naming[no-role-prefix]
     audience: labweaver-resource
     secret_name: labweaver-resource-client
     secret_key: resource-client-secret
+  - client_id: labweaver-deployment-executor
+    audience: labweaver-deployment-executor
+    secret_name: labweaver-deployment-executor-client
+    secret_key: deployment-executor-client-secret
 # Roles are client roles on the target audience.  Each assignment grants the
 # named caller only the routes it actually invokes.
 identity_service_role_assignments: # noqa: var-naming[no-role-prefix]
+  - caller: labweaver-deployment-executor
+    target: labweaver-control
+    roles: [control.platform_configuration.apply]
   - caller: labweaver-access
     target: labweaver-control
     roles: [access.control.forward]

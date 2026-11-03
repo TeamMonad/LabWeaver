@@ -134,6 +134,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::platform_configuration::PlatformConfigurationApply
     );
     document!(
+        "schemas/contracts/v1/platform-configuration-executor-intent.schema.json",
+        crate::platform_configuration::PlatformConfigurationExecutorIntent
+    );
+    document!(
         "schemas/contracts/v1/platform-configuration-bundle.schema.json",
         crate::platform_configuration::PlatformConfigurationBundle
     );
@@ -1751,6 +1755,7 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 | "getPlatformConfigurationVersion"
                 | "applyPlatformConfiguration"
                 | "getPlatformConfigurationApply"
+                | "getPlatformConfigurationExecutorIntent"
                 | "reportPlatformConfigurationApply"
                 | "registerPlatformConfigurationBundle"
                 | "getPlatformConfigurationBundle"
@@ -2572,8 +2577,10 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "getPlatformConfiguration"
         | "updatePlatformConfiguration"
         | "applyPlatformConfiguration"
-        | "registerPlatformConfigurationBundle"
-        | "reportPlatformConfigurationApply" => contract_ref("platform-configuration-status"),
+        | "registerPlatformConfigurationBundle" => contract_ref("platform-configuration-status"),
+        "getPlatformConfigurationExecutorIntent" | "reportPlatformConfigurationApply" => {
+            contract_ref("platform-configuration-executor-intent")
+        }
         "getPlatformConfigurationVersion" => contract_ref("platform-configuration-version"),
         "getPlatformConfigurationBundle" => contract_ref("platform-configuration-bundle"),
         "getLoadedPlatformConfiguration" => {

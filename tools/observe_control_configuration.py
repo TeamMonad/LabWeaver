@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import argparse
 import datetime as dt
 import http.client
@@ -11,6 +12,8 @@ import json
 import os
 from pathlib import Path
 import socket
+import re
+import selectors
 import ssl
 import subprocess
 import sys
@@ -224,6 +227,57 @@ def peer_reader(token, ca_file, hostname, port):
             return json.loads(payload)
         finally:
             connection.close()
+
+    return read
+
+
+@contextmanager
+def pod_forward(namespace, name, port=9444):
+    """Forward one observed Pod, retaining TLS validation of the Service identity."""
+    process = subprocess.Popen(
+        ["kubectl", "-n", namespace, "port-forward", "--address", "127.0.0.1",
+         f"pod/{name}", f":{port}"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            if not selector.select(timeout=10):
+                fail()
+            line = process.stdout.readline(256)
+        match = re.fullmatch(rb"Forwarding from 127\.0\.0\.1:(\d+) -> \d+\r?\n", line)
+        if not match:
+            fail()
+        yield int(match[1])
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        process.stdout.close()
+
+
+def forwarded_peer_reader(token, ca_file, hostname):
+    """Use the same Pod roster/HTTPS observation on controllers without Pod routing."""
+    context = ssl.create_default_context(cafile=str(ca_file))
+
+    def read(pod):
+        with pod_forward(pod["metadata"]["namespace"], pod["metadata"]["name"]) as port:
+            connection = PodConnection("127.0.0.1", hostname, port, context)
+            try:
+                connection.request(
+                    "GET", "/internal/v1/platform-configuration/loaded",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                response = connection.getresponse()
+                payload = response.read(65537)
+                if response.status != 200 or len(payload) > 65536:
+                    fail()
+                return json.loads(payload)
+            finally:
+                connection.close()
 
     return read
 

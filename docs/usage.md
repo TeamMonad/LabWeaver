@@ -280,7 +280,7 @@ tar -czf vm-template.tar.gz disk/disk.qcow2
 3. 如需记录特权执行位置声明，可在“特权运行”中选择“允许，仅在专用节点池运行”，填写 nodeSelector 和 taint。nodeSelector 至少 1 项、最多 16 项；key 的 prefix 最长 253 字符、name 最长 63 字符，value 最长 63 字符且必须非空；taintKey 遵循同样的 key 规则，taintValue 最长 63 字符且必须非空。这些限制比原生 Kubernetes 对应字段更严格。该声明不启用当前容器的 privileged/DinD，执行侧仍拒绝 privileged=true；VM guest 特权位置尚无执行实现，因此不能选择。
 4. 点击“保存为新 desired 版本”。也可以在“高级 YAML”中编辑同一请求。
 5. 在受限本地目录导出并加密对应 Bundle，然后在“登记加密 Bundle”中选择实际的 `.age` 文件并点击“登记所选 Bundle”。核对页面显示的密文 SHA-256 与本地导出结果一致。登记不是批准，也不是部署。
-6. 点击“提交应用请求…”并在确认框中确认。页面只记录请求；获准执行者执行部署并报告阶段。完整验证成功后 applied 才会更新。
+6. 点击“提交应用请求…”并在确认框中确认。页面只记录请求，不会自行部署。获准操作者在同一加密 Bundle 的统一部署入口执行应用阶段；独立的 Keycloak 部署服务账户报告 validating、applying 和 verifying，再从所有实际 Control 副本读取 loaded 配置。版本、管理设置摘要和实际密文摘要全部一致且副本集合稳定后，才报告 succeeded 并更新 verified applied。任一副本不匹配或不可达时保留“待核对”和最后验证版本，页面不能把 rollout 就绪或请求已登记显示为应用成功。
 
 普通容器的 capabilities 允许清单、项目/课程普通预授权和默认 UID 已由同一后端契约接入执行消费。表单未提供的字段可通过现有“高级 YAML”编辑同一完整配置：默认 UID 可为 `0..4294967294`，能力只选平台支持且确有需要的集合，scope 预授权不得超过平台允许清单，也不能声明 privileged。保存 desired、登记 Bundle 不等于批准某个实例；实际运行只消费匹配的 verified applied 版本、原配置身份与原资金租约。
 

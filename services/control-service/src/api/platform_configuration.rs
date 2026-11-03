@@ -13,11 +13,12 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{get, post},
 };
 use contracts::http::IdempotencyKey;
 use contracts::platform_configuration::{
     ApplyPlatformConfigurationRequest, PLATFORM_CONFIGURATION_BUNDLE_MAX_BYTES,
+    PlatformConfigurationExecutorAttempt, PlatformConfigurationExecutorIntent,
     PlatformConfigurationStatus, RegisterPlatformConfigurationBundleRequest,
     ReportPlatformConfigurationApplyRequest, UpdatePlatformConfigurationRequest,
 };
@@ -55,7 +56,7 @@ pub(super) fn internal_routes(state: Arc<ApiState>, verifier: Arc<ServiceTokenVe
         .route("/internal/v1/platform-configuration/loaded", get(loaded))
         .route(
             "/internal/v1/platform-configuration/applies/{apply_id}",
-            put(report),
+            get(read_intent).put(report),
         )
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .with_state(state)
@@ -82,6 +83,48 @@ async fn loaded(State(state): State<Arc<ApiState>>) -> Result<Response, ApiError
         )
     })?;
     let mut response = Json(value).into_response();
+    response
+        .headers_mut()
+        .insert("Cache-Control", HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
+async fn read_intent(
+    State(state): State<Arc<ApiState>>,
+    Extension(executor): Extension<Executor>,
+    Path(id): Path<OperationId>,
+) -> Result<Response, ApiError> {
+    let value = configuration::get(&state.control.pool).await?;
+    executor_intent(&state, &value, id, &executor).await
+}
+
+/// Projects the aggregate down to the executor's bound attempt. Desired/applied settings,
+/// administrator identity and other versions never cross the apply-only service boundary.
+async fn executor_intent(
+    state: &ApiState,
+    value: &PlatformConfigurationStatus,
+    id: OperationId,
+    executor: &Executor,
+) -> Result<Response, ApiError> {
+    let attempt = value
+        .latest_apply
+        .as_ref()
+        .ok_or(ConfigurationError::NotFound)?;
+    if attempt.id != id
+        || attempt
+            .executor_client_id
+            .as_deref()
+            .is_some_and(|client| client != executor.0)
+    {
+        return Err(ConfigurationError::ApplyConflict.into());
+    }
+    let desired = configuration::get_version(&state.control.pool, attempt.desired_revision).await?;
+    let intent = PlatformConfigurationExecutorIntent {
+        revision: value.revision,
+        attempt: PlatformConfigurationExecutorAttempt::from_apply(attempt),
+        configuration_sha256: desired.configuration_sha256,
+    };
+    let mut response = response(&intent, value.revision, StatusCode::OK)?;
     response
         .headers_mut()
         .insert("Cache-Control", HeaderValue::from_static("no-store"));
@@ -221,6 +264,21 @@ async fn replay_completed(
     request: Value,
     status: StatusCode,
 ) -> Result<Option<Response>, ApiError> {
+    replayed_status(state, operation, key, request)
+        .await?
+        .map(|value| {
+            let revision = value.revision;
+            response(value, revision, status)
+        })
+        .transpose()
+}
+
+async fn replayed_status(
+    state: &ApiState,
+    operation: &str,
+    key: &IdempotencyKey,
+    request: Value,
+) -> Result<Option<PlatformConfigurationStatus>, ApiError> {
     let hash = Sha256Digest::of_canonical(&request)
         .map_err(|_| ApiError::bad_request("LW_PLATFORM_CONFIGURATION_INVALID"))?;
     let decision = IdempotencyStore::lookup(
@@ -233,12 +291,9 @@ async fn replay_completed(
     .await
     .map_err(|_| ApiError::internal("LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED"))?;
     match decision {
-        Some(IdempotencyDecision::Replay(value)) => {
-            let value: PlatformConfigurationStatus = serde_json::from_value(value)
-                .map_err(|_| ApiError::internal("LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED"))?;
-            let revision = value.revision;
-            Ok(Some(response(value, revision, status)?))
-        }
+        Some(IdempotencyDecision::Replay(value)) => serde_json::from_value(value)
+            .map(Some)
+            .map_err(|_| ApiError::internal("LW_PLATFORM_CONFIGURATION_PERSISTENCE_FAILED")),
         Some(IdempotencyDecision::Conflict) => Err(ApiError::new(
             StatusCode::CONFLICT,
             "LW_IDEMPOTENCY_CONFLICT",
@@ -442,16 +497,15 @@ async fn report(
 ) -> Result<Response, ApiError> {
     let request: ReportPlatformConfigurationApplyRequest = parse_json(&body)?;
     let key = idempotency(&headers)?;
-    if let Some(replay) = replay_completed(
+    if let Some(replay) = replayed_status(
         &state,
         "control_platform_configuration_report_v1",
         &key,
         json!({"executor": &executor.0, "id": id, "request": request}),
-        StatusCode::OK,
     )
     .await?
     {
-        return Ok(replay);
+        return executor_intent(&state, &replay, id, &executor).await;
     }
     fence(&headers, request.expected_revision.get())?;
     let value = configuration::report(
@@ -464,8 +518,7 @@ async fn report(
         now()?,
     )
     .await?;
-    let revision = value.revision;
-    response(value, revision, StatusCode::OK)
+    executor_intent(&state, &value, id, &executor).await
 }
 
 impl From<ConfigurationError> for ApiError {

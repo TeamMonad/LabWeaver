@@ -859,7 +859,10 @@ def environment_executor_bindings(
             ("clientPrivateKeyFile", "nats-client.key"),
             ("credentialsFile", "nats.creds"),
         ):
-            if nats.get(field) != "/etc/labweaver/secrets/" + key:
+            expected = {"/etc/labweaver/secrets/" + key}
+            if field == "caFile":
+                expected.add(authority_path + key)
+            if nats.get(field) not in expected:
                 raise BundleError("LW_BUNDLE_ENVIRONMENT_AUTHORITY_CONFLICT")
         nats.pop("server", None)
         nats["serverFile"] = authority_path + "nats-server"
@@ -1054,7 +1057,7 @@ def load_bundle(
     if MODEL_FILE not in files:
         raise BundleError("LW_BUNDLE_MODEL_MISSING")
     document = _document(files[MODEL_FILE])
-    optional = {"resource", "configurationMode", "infrastructure", "notifications"}
+    optional = {"resource", "configurationMode", "infrastructure", "notifications", "configurationExecutor"}
     model = _exact(
         document,
         {
@@ -1159,6 +1162,11 @@ def load_bundle(
     if "infrastructure" in model:
         _infrastructure_model(model, files, references)
     _notifications(model, files, references)
+    if "configurationExecutor" in model:
+        executor = _exact(model["configurationExecutor"], {"clientId", "clientSecretFile"})
+        if executor["clientId"] != "labweaver-deployment-executor":
+            raise BundleError("LW_BUNDLE_CONFIGURATION_EXECUTOR_INVALID")
+        references.add(_relative(executor["clientSecretFile"], "secrets"))
     if set(files) != references:
         raise BundleError("LW_BUNDLE_INVENTORY_MISMATCH")
     _configuration_policy(_settings(model, files))
@@ -1252,6 +1260,27 @@ def _stamp_objects(payload: bytes, installation_id: str | None) -> bytes:
     return yaml.safe_dump_all(documents, sort_keys=True).encode()
 
 
+def service_nats_endpoints(application: dict, files: dict, manifest: dict) -> dict[str, bytes]:
+    """Derive mounted endpoint files from the Environment owner's one source."""
+    projected = {}
+    for service in ("control-service", "access-service", "agent-service", "evaluation-service", "build-executor"):
+        config_name = service + "-config"
+        if config_name not in application["configMaps"]:
+            continue
+        config = _document(files[application["configMaps"][config_name]["config.yaml"]])
+        if not isinstance(config, dict) or "nats" not in config:
+            continue
+        nats = config["nats"]
+        if not isinstance(nats, dict) or "server" in nats or nats.get("serverFile") != "/etc/labweaver/secrets/nats-server":
+            raise BundleError("LW_BUNDLE_NATS_ENDPOINT_SOURCE_INVALID")
+        secret_name = service + "-secrets"
+        endpoint = files[application["secrets"]["environment-service-secrets"]["nats-server"]]
+        if "nats-server" not in manifest["secrets"][secret_name]:
+            manifest["secrets"][secret_name].append("nats-server")
+        projected[secret_name] = endpoint
+    return projected
+
+
 def derive_bundle(
     root: Path,
     output: Path,
@@ -1269,6 +1298,13 @@ def derive_bundle(
     workload_inputs, executor_configs, executor_authority = (
         environment_executor_bindings(model, files, _workload_inputs(application, manifest))
     )
+    if "configurationExecutor" in model:
+        control_env = workload_inputs["control-service"]["env"]
+        callers = control_env["LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS"].split(",")
+        if "labweaver-deployment-executor" not in callers:
+            control_env["LABWEAVER_SERVICE_ALLOWED_CLIENT_IDS"] = ",".join(
+                [*callers, "labweaver-deployment-executor"]
+            )
     notification = _notifications(model, files, set())
     version = _settings(model, files)
     notification["expiryReminderSeconds"] = version["configuration"]["lifecycle"]["expiryReminderSeconds"]
@@ -1276,6 +1312,7 @@ def derive_bundle(
     workload_inputs["control-service"]["env"]["LABWEAVER_NOTIFICATIONS_FILE"] = "/etc/labweaver/config/notifications.json"
     if notification["smtp"]:
         manifest["secrets"]["control-service-secrets"].extend(["smtp-password", "smtp-ca.pem"])
+    nats_endpoints = service_nats_endpoints(application, files, manifest)
     workload_inputs = _ha_workload_inputs(model, files, workload_inputs)
     manifest["namespace"] = model["target"]["namespace"]
     manifest_output = output / "object-manifest.json"
@@ -1292,6 +1329,8 @@ def derive_bundle(
     if notification["smtp"]:
         for field, key in (("passwordFile", "smtp-password"), ("caFile", "smtp-ca.pem")):
             _write(inputs / "secrets/control-service-secrets" / key, files[model["notifications"]["smtp"][field]])
+    for secret_name, endpoint in nats_endpoints.items():
+        _write(inputs / "secrets" / secret_name / "nats-server", endpoint)
     payload = _stamp_objects(objects.render_bundle(manifest_output, inputs), model["target"].get("installationId"))
     object_output = output / "application.yaml"
     _write(object_output, payload)
@@ -1518,7 +1557,7 @@ def _derive_resource(
     )
 
 
-def _private_file(path: Path) -> bytes:
+def _private_file(path: Path, max_bytes: int = objects.MAX_FILE_BYTES) -> bytes:
     _private_directory(path.absolute().parent)
     _no_symlink_ancestors(path.absolute())
     info = path.stat()
@@ -1526,7 +1565,7 @@ def _private_file(path: Path) -> bytes:
         not stat.S_ISREG(info.st_mode)
         or info.st_uid != os.getuid()
         or info.st_mode & 0o077
-        or not 0 < info.st_size <= objects.MAX_FILE_BYTES
+        or not 0 < info.st_size <= max_bytes
     ):
         raise BundleError("LW_BUNDLE_PERMISSIONS_INVALID")
     return path.read_bytes()
@@ -1761,7 +1800,7 @@ def opened_bundle(
                 stdin=ciphertext,
                 stdout=plaintext,
             )
-        ciphertext_path.unlink()
+        # Retain the authenticated ciphertext snapshot for the executor's exact binding.
         if archive_path.stat().st_size > MAX_ARCHIVE_BYTES:
             raise BundleError("LW_BUNDLE_LIMIT_EXCEEDED")
         root = temporary_root / "bundle"
@@ -1784,15 +1823,24 @@ def _interrupt(signum: int, _frame: Any) -> None:
 
 def _consume(command: list[str], environment: dict[str, str]) -> None:
     # Keep descendants in one process group. They must stop before plaintext disappears.
-    with subprocess.Popen(
+    with tempfile.TemporaryFile() as errors, subprocess.Popen(
         command,
         env=environment,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=errors,
         start_new_session=True,
     ) as process:
         try:
             if process.wait():
+                errors.seek(0, os.SEEK_END)
+                errors.seek(max(0, errors.tell() - 4096))
+                diagnostic = re.search(
+                    rb"(?:LW_PLATFORM_CONFIGURATION_[A-Z_]+|LW_CONTROL_REPLICA_OBSERVATION_FAILED)"
+                    rb":(?:identity|intent-binding|ciphertext-binding|control-api|prepare|apply|verify|verifying|release-ownership|control-unreachable|replica-roster|inputs-or-transport|transport)(?![a-z-])",
+                    errors.read(4096),
+                )
+                if diagnostic:
+                    raise BundleError(diagnostic[0].decode())
                 raise BundleError("LW_BUNDLE_COMMAND_FAILED")
         finally:
             try:
@@ -1908,6 +1956,7 @@ def main() -> int:
                         os.environ,
                         LW_BUNDLE_ROOT=str(root),
                         LW_BUNDLE_RENDERED_ROOT=str(rendered),
+                        LW_BUNDLE_CIPHERTEXT_FILE=str(root.parent / "source.age"),
                         LABWEAVER_APPLICATION_VARS_FILE=str(
                             rendered / "ansible-vars.yaml"
                         ),
