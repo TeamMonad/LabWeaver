@@ -1,4 +1,21 @@
 //! Agent-owned Anthropic transport: scoped capability, durable call fence, Resource accounting.
+//!
+//! Operational events use the shared telemetry `outcome` field: `accepted`, `admission-denied`,
+//! `upstream-connect-tls-or-timeout-error` (with `error_kind=timeout|connect-or-tls|transport`),
+//! and `upstream-http-status` (with the numeric status). Validated requests and upstream events
+//! carry the Agent run and attempt identifiers; upstream events also carry the fenced call id.
+//! Admission-denied events also carry verified run/attempt identity and the fenced call identity
+//! once known. Rejections before signature verification never attach caller-supplied identities.
+//! No URL, credential, request body, response body or raw transport error is logged.
+//!
+//! `model_gateway_request` ledger receipts mean only that an authoring capability reached the
+//! Messages handler. They do not imply admission, upstream delivery, token usage or settlement.
+//! Signature-verified expired capabilities also leave a request receipt, but are still rejected
+//! before authorization, cost admission or forwarding. Unsigned input cannot identify an attempt.
+//! Sandbox failure diagnostics combine this exact task-generation receipt with a process exit
+//! status and an allowlisted stderr category. Missing observations due to a read failure remain
+//! `unknown`, not `not-observed`, and reject the candidate with `LW_MODEL_CALL_ID_UNAVAILABLE`
+//! even if Claude exited successfully. Runs predating these receipts cannot establish non-delivery.
 use axum::{
     Router,
     body::{Body, Bytes},
@@ -102,6 +119,7 @@ impl ScopedTokenIssuer {
         let signature = hmac_sha256(&self.key, payload.as_bytes());
         format!("{payload}.{}", URL_SAFE_NO_PAD.encode(signature))
     }
+    #[cfg(test)]
     fn validate(&self, token: &str) -> Result<TokenClaims, &'static str> {
         self.validate_at(
             token,
@@ -111,7 +129,16 @@ impl ScopedTokenIssuer {
                 .as_secs(),
         )
     }
+    #[cfg(test)]
     fn validate_at(&self, token: &str, now: u64) -> Result<TokenClaims, &'static str> {
+        let claims = self.verify_signature(token)?;
+        if now >= claims.expires_at {
+            return Err("LW_MODEL_GATEWAY_TOKEN_EXPIRED");
+        }
+        Ok(claims)
+    }
+
+    fn verify_signature(&self, token: &str) -> Result<TokenClaims, &'static str> {
         let (payload, signature) = token
             .split_once('.')
             .ok_or("LW_MODEL_GATEWAY_TOKEN_SCOPE")?;
@@ -133,9 +160,6 @@ impl ScopedTokenIssuer {
             .map_err(|_| "LW_MODEL_GATEWAY_TOKEN_SCOPE")?;
         let claims: TokenClaims =
             serde_json::from_slice(&bytes).map_err(|_| "LW_MODEL_GATEWAY_TOKEN_SCOPE")?;
-        if now >= claims.expires_at {
-            return Err("LW_MODEL_GATEWAY_TOKEN_EXPIRED");
-        }
         Ok(claims)
     }
 }
@@ -325,11 +349,13 @@ impl GatewayState {
 
     async fn refuse_before_send(
         &self,
+        claims: &TokenClaims,
         hold_id: Uuid,
         call_id: Uuid,
         model: &str,
         code: &'static str,
     ) -> Response {
+        let error_response = verified_rejection(claims, Some(call_id));
         let Ok(event_id) = zero_settlement_event(call_id) else {
             return error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -451,6 +477,39 @@ pub async fn serve(state: GatewayState, listener: TcpListener) -> Result<(), std
     Ok(())
 }
 fn error_response(status: StatusCode, code: &'static str, message: &str) -> Response {
+    tracing::warn!(
+        event = "agent.model_gateway.request_completed",
+        outcome = "admission-denied",
+        diagnostic_code = code,
+        http_status = status.as_u16()
+    );
+    error_payload(status, code, message)
+}
+
+fn verified_rejection(
+    claims: &TokenClaims,
+    call_id: Option<Uuid>,
+) -> impl Fn(StatusCode, &'static str, &str) -> Response + Copy + use<> {
+    let run_id = claims.agent_run_id;
+    let attempt = claims.attempt;
+    move |status, code, message| {
+        tracing::warn!(
+            event = "agent.model_gateway.request_completed",
+            component = "agent-service",
+            operation = "model_gateway.request",
+            outcome = "admission-denied",
+            duration_ms = 0_u64,
+            diagnostic_code = code,
+            http_status = status.as_u16(),
+            run_id = %run_id,
+            attempt,
+            operation_id = call_id.as_ref().map(tracing::field::display),
+        );
+        error_payload(status, code, message)
+    }
+}
+
+fn error_payload(status: StatusCode, code: &'static str, message: &str) -> Response {
     (status,axum::Json(json!({"type":"error","error":{"type":"invalid_request_error","message":message},"lwCode":code}))).into_response()
 }
 fn identity(parts: &[&[u8]]) -> Uuid {
@@ -492,12 +551,38 @@ async fn messages(
             "gateway token required",
         );
     };
-    let claims = match state.issuer.validate(token) {
+    // Verify the signature before associating an observation with a run. Expiry is enforced
+    // below the receipt so a signed-but-expired attempt is not mislabeled as no gateway traffic.
+    let claims = match state.issuer.verify_signature(token) {
         Ok(value) => value,
         Err(code) => {
             return error_response(StatusCode::UNAUTHORIZED, code, "gateway token rejected");
         }
     };
+    let error_response = verified_rejection(&claims, None);
+    tracing::info!(event = "agent.model_gateway.request_received", outcome = "received", run_id = %claims.agent_run_id, attempt = claims.attempt);
+    if let ModelGatewayScope::Authoring { task_run_id, .. } = &claims.scope {
+        // This receipt means only "a validated capability reached Messages", not admission,
+        // upstream delivery or billable usage. The task id distinguishes schema generations.
+        if sqlx::query("INSERT INTO agent.idempotency_ledger(operation,idempotency_key,request_sha256,state) VALUES('model_gateway_request',$1,$2,'in_progress') ON CONFLICT DO NOTHING")
+            .bind(task_run_id.to_string()).bind(format!("{:x}", Sha256::digest(&body)))
+            .execute(&state.pool).await.is_err()
+        {
+            return error_response(StatusCode::SERVICE_UNAVAILABLE, "LW_MODEL_CALL_ID_UNAVAILABLE", "gateway request observation unavailable; no upstream request sent");
+        }
+    }
+    if SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        >= claims.expires_at
+    {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "LW_MODEL_GATEWAY_TOKEN_EXPIRED",
+            "gateway token rejected",
+        );
+    }
     let expected_model = match state.authorize(&claims).await {
         Ok(model) => model,
         Err(code) => {
@@ -548,6 +633,7 @@ async fn messages(
             );
         }
     };
+    let error_response = verified_rejection(&claims, Some(call_id));
     let accepted: Result<bool, _> = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent.idempotency_ledger WHERE operation='model_gateway_call' AND idempotency_key=$1)")
         .bind(call_id.to_string()).fetch_one(&state.pool).await;
     match accepted {
@@ -603,10 +689,21 @@ async fn messages(
         .await
     {
         Ok(value) => value,
-        Err(_) => {
+        Err(error) => {
+            let code = match error {
+                task_execution::resource::ResourceClientError::Admission(code) => code,
+                _ => "LW_MODEL_ADMISSION_REJECTED",
+            };
+            if let ModelGatewayScope::Authoring { task_run_id, .. } = &claims.scope {
+                let recorded = sqlx::query("UPDATE agent.idempotency_ledger SET result=jsonb_build_object('admissionDiagnostic',$2::text) WHERE operation='model_gateway_request' AND idempotency_key=$1")
+                    .bind(task_run_id.to_string()).bind(code).execute(&state.pool).await;
+                if recorded.is_err() {
+                    tracing::warn!(event = "agent.model_gateway.admission_observation_unavailable", outcome = "unknown", run_id = %claims.agent_run_id, diagnostic_code = code);
+                }
+            }
             return error_response(
                 StatusCode::PAYMENT_REQUIRED,
-                "LW_MODEL_ADMISSION_REJECTED",
+                code,
                 "model Credits admission rejected; no upstream request sent",
             );
         }
@@ -623,6 +720,13 @@ async fn messages(
             );
         }
     }
+    tracing::info!(
+        event = "agent.model_gateway.request_accepted",
+        outcome = "accepted",
+        run_id = %claims.agent_run_id,
+        attempt = claims.attempt,
+        operation_id = %call_id
+    );
     let (sender, receiver) = tokio::sync::oneshot::channel();
     // The task owns the irreversible request and settlement, independently of the HTTP handler.
     let background = state.background.clone();
@@ -656,12 +760,13 @@ async fn forward(
     call_id: Uuid,
     claims: TokenClaims,
 ) -> Response {
+    let error_response = verified_rejection(&claims, Some(call_id));
     // Admission may race revocation, cancellation, or a changed egress policy. No request has
     // left the platform yet, so this path has a known zero observation, never unknown usage.
     let allowed = state.preflight(&claims, &headers, &body, &model).await;
     if let Err(code) = allowed {
         return state
-            .refuse_before_send(hold_id, call_id, &model, code)
+            .refuse_before_send(&claims, hold_id, call_id, &model, code)
             .await;
     }
     let Ok(url) = state.upstream.join("v1/messages") else {
@@ -683,14 +788,29 @@ async fn forward(
             request = request.header(name, value);
         }
     }
-    let Ok(upstream) = request.send().await else {
-        return error_response(
-            StatusCode::BAD_GATEWAY,
-            "LW_MODEL_UPSTREAM_FAILED",
-            "model upstream failed; hold pending reconciliation",
-        );
+    let upstream = match request.send().await {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            tracing::warn!(
+                event = "agent.model_gateway.request_completed",
+                outcome = "upstream-connect-tls-or-timeout-error",
+                error_kind = upstream_transport_class(&error),
+                run_id = %claims.agent_run_id,
+                attempt = claims.attempt,
+                operation_id = %call_id
+            );
+            return (StatusCode::BAD_GATEWAY, axum::Json(json!({"type":"error","error":{"type":"invalid_request_error","message":"model upstream failed; hold pending reconciliation"},"lwCode":"LW_MODEL_UPSTREAM_FAILED"}))).into_response();
+        }
     };
     let status = upstream.status();
+    tracing::info!(
+        event = "agent.model_gateway.request_completed",
+        outcome = "upstream-http-status",
+        http_status = status.as_u16(),
+        run_id = %claims.agent_run_id,
+        attempt = claims.attempt,
+        operation_id = %call_id,
+    );
     let content_type = upstream
         .headers()
         .get(header::CONTENT_TYPE)
@@ -737,6 +857,17 @@ async fn forward(
         Body::from_stream(stream),
     )
         .into_response()
+}
+
+fn upstream_transport_class(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        // reqwest intentionally does not expose a stable TLS-specific error discriminator.
+        "connect-or-tls"
+    } else {
+        "transport"
+    }
 }
 async fn settle(
     state: &GatewayState,
@@ -927,8 +1058,7 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 use crate::build_billing;
 #[cfg(test)]
-#[path = "../tests/support/model_authorization.rs"]
-mod model_authorization;
+use crate::model_authorization;
 
 #[cfg(test)]
 mod tests {
@@ -998,12 +1128,25 @@ async fn authorize_tool(
             "gateway token required",
         );
     };
-    let claims = match state.issuer.validate(token) {
+    let claims = match state.issuer.verify_signature(token) {
         Ok(claims) => claims,
         Err(code) => {
             return error_response(StatusCode::UNAUTHORIZED, code, "gateway token rejected");
         }
     };
+    let error_response = verified_rejection(&claims, None);
+    if SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        >= claims.expires_at
+    {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "LW_MODEL_GATEWAY_TOKEN_EXPIRED",
+            "gateway token rejected",
+        );
+    }
     match state.authorize(&claims).await {
         Ok(_) => {
             let input: Value = match contracts::parse_strict_json(&body) {

@@ -667,7 +667,13 @@ impl SandboxAuthoringProcess {
                         .map_err(|_| ClaudeCodeProcessError::Io)?;
                     let frozen: FrozenSandboxReceipt = serde_json::from_value(canonical)
                         .map_err(|_| ClaudeCodeProcessError::Io)?;
-                    let output = frozen.assemble(self.objects.as_ref(), false).await?;
+                    let output = Self::assemble_output(
+                        self.store.pool(),
+                        self.objects.as_ref(),
+                        &frozen,
+                        false,
+                    )
+                    .await?;
                     self.store
                         .complete_sandbox_attempt(
                             &intent,
@@ -1014,10 +1020,13 @@ impl SandboxAuthoringProcess {
                         return Err(ClaudeCodeProcessError::Io);
                     }
                 }
-                return frozen
-                    .assemble(self.objects.as_ref(), true)
-                    .await
-                    .map_err(Into::into);
+                return Self::assemble_output(
+                    self.store.pool(),
+                    self.objects.as_ref(),
+                    &frozen,
+                    true,
+                )
+                .await;
             }
             let status = self
                 .resources
@@ -1092,10 +1101,13 @@ impl SandboxAuthoringProcess {
                         .map_err(|_| ClaudeCodeProcessError::Io)?;
                     let canonical: FrozenSandboxReceipt =
                         serde_json::from_value(value).map_err(|_| ClaudeCodeProcessError::Io)?;
-                    return canonical
-                        .assemble(self.objects.as_ref(), false)
-                        .await
-                        .map_err(Into::into);
+                    return Self::assemble_output(
+                        self.store.pool(),
+                        self.objects.as_ref(),
+                        &canonical,
+                        false,
+                    )
+                    .await;
                 }
                 KubernetesJobObservation::Running
                     if !cancellation.is_cancelled() && tokio::time::Instant::now() < deadline =>
@@ -1313,6 +1325,36 @@ impl SandboxAuthoringProcess {
         objects: &[ExecutionObjectRef],
     ) -> ExecutionCleanupStatus {
         cleanup_recovery_with_poll(&self.api, identity, objects).await
+    }
+
+    async fn assemble_output(
+        pool: &sqlx::PgPool,
+        objects: &dyn ImmutableObjectStore,
+        frozen: &FrozenSandboxReceipt,
+        verify_export: bool,
+    ) -> Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
+        let output = frozen.assemble(objects, verify_export).await?;
+        let observation = sqlx::query_scalar::<_, Option<serde_json::Value>>("SELECT result FROM agent.idempotency_ledger WHERE operation='model_gateway_request' AND idempotency_key=$1")
+            .bind(frozen.task_run_id.to_string()).fetch_optional(pool).await;
+        let (observed, admission) = if let Ok(row) = observation {
+            let admission = row
+                .as_ref()
+                .and_then(Option::as_ref)
+                .and_then(|value| value.get("admissionDiagnostic"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(task_execution::resource::resource_admission_diagnostic);
+            (Some(row.is_some()), admission)
+        } else {
+            tracing::warn!(event = "agent.authoring.sandbox.gateway_observation_unavailable", task_run_id = %frozen.task_run_id, outcome = "unknown");
+            return Err(ClaudeCodeProcessError::GatewayObservationUnavailable(
+                output
+                    .with_gateway_request_observed(None)
+                    .process_diagnostic(),
+            ));
+        };
+        Ok(output
+            .with_gateway_request_observed(observed)
+            .with_resource_admission(admission))
     }
 }
 
@@ -1986,13 +2028,19 @@ fn bridge_cancellation(cancellation: &RunCancellation) -> (CancellationToken, Ca
 fn map_task_resource(error: &TaskResourceError) -> ClaudeCodeProcessError {
     match error {
         TaskResourceError::Cancelled => ClaudeCodeProcessError::Cancelled,
-        TaskResourceError::ResourceLeaseExpired => ClaudeCodeProcessError::ResourceLeaseExpired,
+        TaskResourceError::ResourceLeaseExpired
+        | TaskResourceError::Client(task_execution::resource::ResourceClientError::LeaseExpired) => {
+            ClaudeCodeProcessError::ResourceLeaseExpired
+        }
         TaskResourceError::ResourceApprovalExpired => {
             ClaudeCodeProcessError::ResourceApprovalExpired
         }
         TaskResourceError::ResourceApprovalTimeout => {
             ClaudeCodeProcessError::ResourceApprovalTimeout
         }
+        TaskResourceError::Client(task_execution::resource::ResourceClientError::Admission(
+            code,
+        )) => ClaudeCodeProcessError::ResourceAdmission(code),
         _ => ClaudeCodeProcessError::Io,
     }
 }
@@ -2022,7 +2070,10 @@ fn sandbox_failure(diagnostic: &str) -> ClaudeCodeProcessError {
         "LW_RESOURCE_TASK_LEASE_EXPIRED" => ClaudeCodeProcessError::ResourceLeaseExpired,
         "LW_RESOURCE_APPROVAL_EXPIRED" => ClaudeCodeProcessError::ResourceApprovalExpired,
         "LW_TASK_RESOURCE_APPROVAL_TIMEOUT" => ClaudeCodeProcessError::ResourceApprovalTimeout,
-        _ => ClaudeCodeProcessError::Io,
+        _ => task_execution::resource::resource_admission_diagnostic(diagnostic).map_or(
+            ClaudeCodeProcessError::Io,
+            ClaudeCodeProcessError::ResourceAdmission,
+        ),
     }
 }
 
@@ -2200,6 +2251,9 @@ impl ClaudeCodeProcess for SandboxAuthoringProcess {
 }
 
 #[cfg(test)]
+use crate::model_authorization;
+
+#[cfg(test)]
 mod tests {
     use super::{
         SandboxReceipt, SandboxReceiptError, map_task_resource, parse_receipt, sandbox_failure,
@@ -2215,9 +2269,35 @@ mod tests {
     use crate::claude_code::AuthoringAttemptScope;
     use contracts::authoring::AgentTrackKind;
     use contracts::{ActorId, AgentRunId, CourseId, ProjectId};
-
     #[test]
-    fn resource_approval_timeout_keeps_its_resource_diagnostic() {
+    fn resource_admission_diagnostic_is_not_collapsed_to_provider_failure() {
+        let error =
+            TaskResourceError::Client(task_execution::resource::ResourceClientError::Admission(
+                "LW_RESOURCE_RATE_UNCONFIGURED",
+            ));
+        assert_eq!(
+            map_task_resource(&error),
+            ClaudeCodeProcessError::ResourceAdmission("LW_RESOURCE_RATE_UNCONFIGURED")
+        );
+        assert_eq!(
+            crate::claude_code::ClaudeCodeRuntimeError::ResourceAdmission(
+                "LW_RESOURCE_RATE_UNCONFIGURED"
+            )
+            .diagnostic_code(),
+            "LW_RESOURCE_RATE_UNCONFIGURED"
+        );
+        assert_eq!(
+            map_task_resource(&TaskResourceError::ResourceTerminal),
+            ClaudeCodeProcessError::Io
+        );
+        assert_eq!(
+            sandbox_failure("LW_RESOURCE_RATE_UNCONFIGURED"),
+            ClaudeCodeProcessError::ResourceAdmission("LW_RESOURCE_RATE_UNCONFIGURED")
+        );
+        assert_eq!(
+            sandbox_failure("LW_RESOURCE_TASK_LEASE_EXPIRED"),
+            ClaudeCodeProcessError::ResourceLeaseExpired
+        );
         assert_eq!(
             map_task_resource(&TaskResourceError::ResourceApprovalTimeout),
             ClaudeCodeProcessError::ResourceApprovalTimeout
@@ -2227,15 +2307,14 @@ mod tests {
             ClaudeCodeProcessError::ResourceApprovalTimeout
         );
         assert_eq!(
-            map_task_resource(&TaskResourceError::Cancelled),
-            ClaudeCodeProcessError::Cancelled
+            sandbox_failure("LW_RESOURCE_APPROVAL_EXPIRED"),
+            ClaudeCodeProcessError::ResourceApprovalExpired
         );
         assert_eq!(
-            map_task_resource(&TaskResourceError::ResourceTerminal),
+            sandbox_failure("LW_UNKNOWN_SECRET"),
             ClaudeCodeProcessError::Io
         );
     }
-
     #[tokio::test]
     async fn sandbox_process_receives_only_scoped_gateway_credentials()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -2432,6 +2511,7 @@ mod tests {
     }
     struct ReceiptObjects {
         export: Vec<u8>,
+        result: Vec<u8>,
         stream_reads: std::sync::atomic::AtomicUsize,
         paths: std::sync::Mutex<Vec<std::path::PathBuf>>,
     }
@@ -2483,19 +2563,33 @@ mod tests {
         }
         async fn read_verified(
             &self,
-            _key: &str,
-            _expected: &contracts::ArtifactRef,
+            key: &str,
+            expected: &contracts::ArtifactRef,
         ) -> Result<artifact_store::VerifiedObject, artifact_store::ObjectStoreError> {
-            // This fixture has only an export: accepting a byte read would hide a streaming regression.
-            Err(artifact_store::ObjectStoreError::StreamingUnsupported)
+            if key != "own/result"
+                || self.result.is_empty()
+                || expected.size_bytes != self.result.len() as u64
+            {
+                return Err(artifact_store::ObjectStoreError::StreamingUnsupported);
+            }
+            Ok(artifact_store::VerifiedObject {
+                reference: expected.clone(),
+                bytes: self.result.clone(),
+            })
         }
         async fn freeze_current(
             &self,
-            _key: &str,
-            _size: u64,
-            _media: &str,
+            key: &str,
+            size: u64,
+            media: &str,
         ) -> Result<artifact_store::VerifiedObject, artifact_store::ObjectStoreError> {
-            Err(artifact_store::ObjectStoreError::StreamingUnsupported)
+            if key != "own/result" || self.result.is_empty() || size != self.result.len() as u64 {
+                return Err(artifact_store::ObjectStoreError::StreamingUnsupported);
+            }
+            Ok(artifact_store::VerifiedObject {
+                reference: Self::reference(size, media),
+                bytes: self.result.clone(),
+            })
         }
         async fn freeze_current_file(
             &self,
@@ -2521,6 +2615,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let objects = ReceiptObjects {
             export: b"oci-layout-test".to_vec(),
+            result: Vec::new(),
             stream_reads: std::sync::atomic::AtomicUsize::new(0),
             paths: std::sync::Mutex::new(Vec::new()),
         };
@@ -2587,6 +2682,572 @@ mod tests {
                 .map_err(|_| "lock poisoned")?
                 .iter()
                 .all(|p| !p.exists())
+        );
+        Ok(())
+    }
+    struct ReceiptProcess {
+        version: String,
+        replies: std::sync::Mutex<
+            std::collections::VecDeque<
+                Result<crate::claude_code::ClaudeCodeProcessOutput, ClaudeCodeProcessError>,
+            >,
+        >,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::claude_code::ClaudeCodeProcess for ReceiptProcess {
+        async fn recover_authoring_terminal(
+            &self,
+            _scope: &AuthoringAttemptScope,
+            cancellation: crate::claude_code::RunCancellation,
+        ) -> Result<crate::claude_code::ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
+            Err(if cancellation.is_cancelled() {
+                ClaudeCodeProcessError::Cancelled
+            } else {
+                ClaudeCodeProcessError::TimedOut
+            })
+        }
+        async fn version(&self) -> Result<String, ClaudeCodeProcessError> {
+            Ok(self.version.clone())
+        }
+        async fn execute(
+            &self,
+            _scope: &crate::claude_code::ExecutionScope,
+            _command: crate::claude_code::ClaudeCodeCommand,
+            _cancellation: crate::claude_code::RunCancellation,
+        ) -> Result<crate::claude_code::ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.replies
+                .lock()
+                .map_err(|_| ClaudeCodeProcessError::Io)?
+                .pop_front()
+                .ok_or(ClaudeCodeProcessError::Io)?
+        }
+    }
+
+    fn receipt_runtime(
+        policy: contracts::authoring::ProjectLlmEgressPolicy,
+        replies: Vec<Result<crate::claude_code::ClaudeCodeProcessOutput, ClaudeCodeProcessError>>,
+    ) -> Result<
+        (
+            crate::claude_code::ClaudeCodeRuntime,
+            std::sync::Arc<ReceiptProcess>,
+        ),
+        crate::claude_code::ClaudeCodeRuntimeError,
+    > {
+        let process = std::sync::Arc::new(ReceiptProcess {
+            version: policy.binding.claude_code_version.clone(),
+            replies: std::sync::Mutex::new(replies.into()),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let runtime = crate::claude_code::ClaudeCodeRuntime::new(policy, process.clone())?;
+        Ok((runtime, process))
+    }
+
+    fn cli_result(
+        candidate: Option<&serde_json::Value>,
+        usage: u64,
+        cost: i64,
+        failed: bool,
+    ) -> Vec<u8> {
+        use serde_json::json;
+        let session = uuid::Uuid::now_v7();
+        let mut events = vec![json!({"type":"system","subtype":"init","session_id":session})];
+        if let Some(candidate) = candidate {
+            events.push(json!({"type":"assistant","session_id":session,"message":{"role":"assistant","content":[{"type":"text","text":candidate.to_string()}]}}));
+        }
+        let mut envelope = json!({"type":"result","subtype":if failed {"error_during_execution"} else {"success"}, "is_error":failed,"session_id":session,
+            "num_turns":1,"total_cost_usd":cost,"usage":{"input_tokens":usage,"output_tokens":0},"permission_denials":[]});
+        if failed {
+            envelope["terminal_reason"] = json!("model_error");
+        }
+        events.push(envelope);
+        events
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into_bytes()
+    }
+
+    async fn assemble_fixture(
+        pool: &sqlx::PgPool,
+        task: uuid::Uuid,
+        version: &str,
+        bytes: Vec<u8>,
+        exit: i32,
+    ) -> Result<crate::claude_code::ClaudeCodeProcessOutput, ClaudeCodeProcessError> {
+        let empty = Sha256Digest::of_bytes(&[]).to_string();
+        let receipt = SandboxReceipt {
+            result_size_bytes: bytes.len() as u64,
+            result_sha256: Sha256Digest::of_bytes(&bytes).to_string(),
+            stderr_size_bytes: 0,
+            stderr_sha256: empty.clone(),
+            exit_code: exit,
+            claude_version: version.to_owned(),
+            export_size_bytes: 0,
+            export_sha256: empty,
+        };
+        let objects = ReceiptObjects {
+            export: Vec::new(),
+            result: bytes,
+            stream_reads: std::sync::atomic::AtomicUsize::new(0),
+            paths: std::sync::Mutex::new(Vec::new()),
+        };
+        let frozen = super::freeze_terminal_receipt(
+            &objects,
+            task,
+            &receipt,
+            ["own/result", "own/stderr", "own/export"],
+        )
+        .await?;
+        super::SandboxAuthoringProcess::assemble_output(pool, &objects, &frozen, false).await
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "native receipt, database read faults, runtime parsing and public persistence form one boundary scenario"
+    )]
+    async fn sandbox_assembly_preserves_ledger_diagnostic_and_database_observation_states()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::claude_code::RunCancellation;
+        use crate::run_store::PostgresAgentRunStore;
+        use serde_json::json;
+        use testcontainers::{ImageExt, runners::AsyncRunner};
+        use testcontainers_modules::postgres::Postgres;
+
+        let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(12)
+            .connect(&format!(
+                "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+                postgres.get_host_port_ipv4(5432).await?
+            ))
+            .await?;
+        let billing = crate::build_billing::BuildBillingFixture::start(pool.clone()).await?;
+        super::model_authorization::apply(&pool, persistence_sqlx::Domain::Agent).await?;
+        let authority =
+            super::model_authorization::ModelAuthorizationFixture::start(pool.clone(), &billing)
+                .await?;
+        let (policy, prepared) = authority.runtime_input(&pool).await?;
+        let task_run_id = match authority.scope {
+            crate::model_gateway::ModelGatewayScope::Authoring { task_run_id, .. } => {
+                task_run_id.as_uuid()
+            }
+            crate::model_gateway::ModelGatewayScope::Review { .. } => {
+                return Err("authoring task required".into());
+            }
+        };
+        let session_id = uuid::Uuid::now_v7();
+        let result = format!("{}\n{}\n",
+            json!({"type":"system","subtype":"init","session_id":session_id}),
+            json!({"type":"result","subtype":"error_during_execution","is_error":true,"session_id":session_id,
+                "num_turns":1,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0},
+                "permission_denials":[],"terminal_reason":"model_error"})).into_bytes();
+        let objects = ReceiptObjects {
+            export: Vec::new(),
+            result,
+            stream_reads: std::sync::atomic::AtomicUsize::new(0),
+            paths: std::sync::Mutex::new(Vec::new()),
+        };
+        let empty = Sha256Digest::of_bytes(&[]).to_string();
+        let receipt = SandboxReceipt {
+            result_size_bytes: objects.result.len() as u64,
+            result_sha256: Sha256Digest::of_bytes(&objects.result).to_string(),
+            stderr_size_bytes: 0,
+            stderr_sha256: empty.clone(),
+            exit_code: 1,
+            claude_version: policy.binding.claude_code_version.clone(),
+            export_size_bytes: 0,
+            export_sha256: empty,
+        };
+        let frozen = super::freeze_terminal_receipt(
+            &objects,
+            task_run_id,
+            &receipt,
+            ["own/result", "own/stderr", "own/export"],
+        )
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+        let store = PostgresAgentRunStore::new(pool.clone());
+        for (name, present, read_error, gateway, expected_code) in [
+            (
+                "absent",
+                false,
+                false,
+                "not-observed",
+                "LW_PROVIDER_UNAVAILABLE",
+            ),
+            (
+                "present",
+                true,
+                false,
+                "observed",
+                "LW_RESOURCE_RATE_UNCONFIGURED",
+            ),
+            (
+                "read-error",
+                true,
+                true,
+                "unknown",
+                "LW_MODEL_CALL_ID_UNAVAILABLE",
+            ),
+        ] {
+            sqlx::query("DELETE FROM agent.model_diagnostics WHERE run_id=$1")
+                .bind(authority.run_id.as_uuid())
+                .execute(&pool)
+                .await?;
+            sqlx::query("DELETE FROM agent.idempotency_ledger WHERE operation='model_gateway_request' AND idempotency_key=$1").bind(task_run_id.to_string()).execute(&pool).await?;
+            if present {
+                sqlx::query("INSERT INTO agent.idempotency_ledger(operation,idempotency_key,request_sha256,state,result) VALUES('model_gateway_request',$1,$2,'in_progress',$3)")
+                    .bind(task_run_id.to_string()).bind(Sha256Digest::of_bytes(b"authorized request").to_string())
+                    .bind(json!({"admissionDiagnostic":"LW_RESOURCE_RATE_UNCONFIGURED"})).execute(&pool).await?;
+            }
+            if read_error {
+                sqlx::query(
+                    "ALTER TABLE agent.idempotency_ledger RENAME TO unavailable_idempotency_ledger",
+                )
+                .execute(&pool)
+                .await?;
+            }
+            let output =
+                super::SandboxAuthoringProcess::assemble_output(&pool, &objects, &frozen, false)
+                    .await;
+            if read_error {
+                sqlx::query(
+                    "ALTER TABLE agent.unavailable_idempotency_ledger RENAME TO idempotency_ledger",
+                )
+                .execute(&pool)
+                .await?;
+            }
+            let (runtime, process) = receipt_runtime(policy.clone(), vec![output])?;
+            let failure = runtime
+                .generate(
+                    AgentTrackKind::Environment,
+                    prepared.clone(),
+                    RunCancellation::new(),
+                )
+                .await
+                .err()
+                .ok_or("receipt failure must not become a candidate")?;
+            assert_eq!(process.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(failure.diagnostic_code(), expected_code, "{name}");
+            // A populated session confirms the valid envelope path, not malformed-output fallback.
+            assert_eq!(failure.audit().session_id.is_some(), !read_error, "{name}");
+            let mut transaction = pool.begin().await?;
+            crate::model_diagnostics::record_failure(
+                &mut transaction,
+                authority.run_id,
+                authority.attempt,
+                failure.audit(),
+                failure.user_guidance(),
+                authority.now,
+            )
+            .await?;
+            transaction.commit().await?;
+            let diagnostics = store.diagnostics(authority.run_id).await?;
+            assert_eq!(diagnostics.items.len(), 1, "{name}");
+            assert_eq!(
+                diagnostics.items[0].diagnostic_code, expected_code,
+                "{name}"
+            );
+            assert!(
+                diagnostics.items[0].reason.contains(&format!(
+                    "exit_status=1; gateway_request={gateway}; stderr_category=empty"
+                )),
+                "{name}"
+            );
+            assert!(!serde_json::to_string(&diagnostics)?.contains("model_error"));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "generation and review must independently preserve admission while validating each accounting boundary"
+    )]
+    async fn resource_admission_priority_survives_usage_errors_at_runtime_entries()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::claude_code::{
+            ClaudeCodeProcessOutput, ClaudeCodeRuntimeError, RunCancellation,
+        };
+        use serde_json::json;
+        use testcontainers::{ImageExt, runners::AsyncRunner};
+        use testcontainers_modules::postgres::Postgres;
+        let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(12)
+            .connect(&format!(
+                "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+                postgres.get_host_port_ipv4(5432).await?
+            ))
+            .await?;
+        let billing = crate::build_billing::BuildBillingFixture::start(pool.clone()).await?;
+        super::model_authorization::apply(&pool, persistence_sqlx::Domain::Agent).await?;
+        let authority =
+            super::model_authorization::ModelAuthorizationFixture::start(pool.clone(), &billing)
+                .await?;
+        let (policy, prepared) = authority.runtime_input(&pool).await?;
+        let task = match &authority.scope {
+            crate::model_gateway::ModelGatewayScope::Authoring { task_run_id, .. } => {
+                task_run_id.as_uuid()
+            }
+            crate::model_gateway::ModelGatewayScope::Review { .. } => {
+                return Err("authoring task required".into());
+            }
+        };
+        for scenario in ["invalid-usage", "accumulation-overflow", "budget-exceeded"] {
+            for admission in [false, true] {
+                sqlx::query("DELETE FROM agent.idempotency_ledger WHERE operation='model_gateway_request' AND idempotency_key=$1").bind(task.to_string()).execute(&pool).await?;
+                if admission {
+                    sqlx::query("INSERT INTO agent.idempotency_ledger(operation,idempotency_key,request_sha256,state,result) VALUES('model_gateway_request',$1,$2,'in_progress',$3)")
+                        .bind(task.to_string()).bind(Sha256Digest::of_bytes(b"request").to_string()).bind(json!({"admissionDiagnostic":"LW_RESOURCE_RATE_UNCONFIGURED"})).execute(&pool).await?;
+                }
+                let mut policy = policy.clone();
+                let (tokens, cost, expected_usage, observed, usage_error, calls) = match scenario {
+                    "invalid-usage" => {
+                        (0, -1, 0, false, ClaudeCodeRuntimeError::ProtocolInvalid, 1)
+                    }
+                    "accumulation-overflow" => {
+                        policy.budget.max_input_tokens = u64::MAX;
+                        (
+                            u64::MAX,
+                            0,
+                            1,
+                            false,
+                            ClaudeCodeRuntimeError::BudgetExceeded,
+                            2,
+                        )
+                    }
+                    _ => (
+                        policy.budget.max_input_tokens + 1,
+                        0,
+                        policy.budget.max_input_tokens + 1,
+                        true,
+                        ClaudeCodeRuntimeError::BudgetExceeded,
+                        1,
+                    ),
+                };
+                let output = assemble_fixture(
+                    &pool,
+                    task,
+                    &policy.binding.claude_code_version,
+                    cli_result(None, tokens, cost, true),
+                    1,
+                )
+                .await;
+                let mut replies = Vec::new();
+                if scenario == "accumulation-overflow" {
+                    replies.push(Ok(ClaudeCodeProcessOutput::from_raw(
+                        Some(0),
+                        cli_result(Some(&json!({})), 1, 0, false),
+                        b"",
+                    )));
+                }
+                replies.push(output);
+                let expected = if admission {
+                    "LW_RESOURCE_RATE_UNCONFIGURED"
+                } else {
+                    usage_error.diagnostic_code()
+                };
+                let (runtime, process) = receipt_runtime(policy.clone(), replies.clone())?;
+                let failure = runtime
+                    .generate(
+                        AgentTrackKind::Environment,
+                        prepared.clone(),
+                        RunCancellation::new(),
+                    )
+                    .await
+                    .err()
+                    .ok_or("generation must reject invalid accounting")?;
+                assert_eq!(
+                    failure.diagnostic_code(),
+                    expected,
+                    "generation {scenario} admission={admission}"
+                );
+                assert_eq!(
+                    failure.audit().usage_diagnostic_code.as_deref(),
+                    Some(usage_error.diagnostic_code()),
+                    "{scenario}"
+                );
+                assert_eq!(
+                    failure.audit().usage.input_tokens,
+                    expected_usage,
+                    "{scenario}"
+                );
+                assert_eq!(failure.audit().usage_observed, observed, "{scenario}");
+                assert_eq!(
+                    process.calls.load(std::sync::atomic::Ordering::Relaxed),
+                    calls
+                );
+                let (runtime, process) = receipt_runtime(policy, replies)?;
+                let failure = runtime
+                    .review_with_usage(
+                        b"bounded review input".to_vec(),
+                        &["README.md".to_owned()],
+                        RunCancellation::new(),
+                    )
+                    .await
+                    .err()
+                    .ok_or("review must reject invalid accounting")?;
+                assert_eq!(
+                    failure.error.diagnostic_code(),
+                    expected,
+                    "review {scenario} admission={admission}"
+                );
+                assert_eq!(failure.usage_error, Some(usage_error));
+                assert_eq!(
+                    failure.usage.map(|usage| usage.input_tokens),
+                    if scenario == "invalid-usage" {
+                        None
+                    } else {
+                        Some(expected_usage)
+                    }
+                );
+                assert_eq!(
+                    process.calls.load(std::sync::atomic::Ordering::Relaxed),
+                    calls
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the identical successful frozen output must fail closed only when the real receipt query fails"
+    )]
+    async fn successful_frozen_candidate_is_rejected_when_gateway_receipt_read_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::claude_code::{RunCancellation, RuntimeAuditOutcome};
+        use crate::run_store::PostgresAgentRunStore;
+        use testcontainers::{ImageExt, runners::AsyncRunner};
+        use testcontainers_modules::postgres::Postgres;
+        let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(12)
+            .connect(&format!(
+                "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+                postgres.get_host_port_ipv4(5432).await?
+            ))
+            .await?;
+        let billing = crate::build_billing::BuildBillingFixture::start(pool.clone()).await?;
+        super::model_authorization::apply(&pool, persistence_sqlx::Domain::Agent).await?;
+        let authority =
+            super::model_authorization::ModelAuthorizationFixture::start(pool.clone(), &billing)
+                .await?;
+        let (policy, prepared) = authority.runtime_input(&pool).await?;
+        let task = match &authority.scope {
+            crate::model_gateway::ModelGatewayScope::Authoring { task_run_id, .. } => {
+                task_run_id.as_uuid()
+            }
+            crate::model_gateway::ModelGatewayScope::Review { .. } => {
+                return Err("authoring task required".into());
+            }
+        };
+        let candidate: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../examples/linux-config-probe/environment.yaml"
+        ))?;
+        let result = cli_result(Some(&candidate), 1, 0, false);
+        let mut receipt = receipt();
+        receipt
+            .claude_version
+            .clone_from(&policy.binding.claude_code_version);
+        receipt.result_size_bytes = result.len() as u64;
+        receipt.result_sha256 = Sha256Digest::of_bytes(&result).to_string();
+        let objects = ReceiptObjects {
+            export: Vec::new(),
+            result,
+            stream_reads: std::sync::atomic::AtomicUsize::new(0),
+            paths: std::sync::Mutex::new(Vec::new()),
+        };
+        let frozen = super::freeze_terminal_receipt(
+            &objects,
+            task,
+            &receipt,
+            ["own/result", "own/stderr", "own/export"],
+        )
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+        let normal =
+            super::SandboxAuthoringProcess::assemble_output(&pool, &objects, &frozen, false).await;
+        let (runtime, _) = receipt_runtime(policy.clone(), vec![normal])?;
+        let execution = runtime
+            .generate(
+                AgentTrackKind::Environment,
+                prepared.clone(),
+                RunCancellation::new(),
+            )
+            .await?;
+        assert_eq!(execution.audit.outcome, RuntimeAuditOutcome::Succeeded);
+        assert_eq!(
+            execution.document,
+            crate::claude_code::CandidateDocument::Environment(serde_json::from_value(candidate)?)
+        );
+        sqlx::query(
+            "ALTER TABLE agent.idempotency_ledger RENAME TO unavailable_idempotency_ledger",
+        )
+        .execute(&pool)
+        .await?;
+        let failed =
+            super::SandboxAuthoringProcess::assemble_output(&pool, &objects, &frozen, false).await;
+        sqlx::query(
+            "ALTER TABLE agent.unavailable_idempotency_ledger RENAME TO idempotency_ledger",
+        )
+        .execute(&pool)
+        .await?;
+        assert!(matches!(
+            failed,
+            Err(ClaudeCodeProcessError::GatewayObservationUnavailable(_))
+        ));
+        let (runtime, _) = receipt_runtime(policy, vec![failed])?;
+        let failure = runtime
+            .generate(
+                AgentTrackKind::Environment,
+                prepared,
+                RunCancellation::new(),
+            )
+            .await
+            .err()
+            .ok_or("a receipt read failure must not yield a candidate")?;
+        assert_eq!(failure.diagnostic_code(), "LW_MODEL_CALL_ID_UNAVAILABLE");
+        assert_eq!(failure.audit().outcome, RuntimeAuditOutcome::Failed);
+        assert!(failure.audit().output_sha256.is_none());
+        assert!(!failure.audit().usage_observed);
+        let process = failure
+            .audit()
+            .process_diagnostic
+            .as_ref()
+            .ok_or("sanitized process evidence missing")?;
+        assert_eq!(process.exit_status, Some(0));
+        assert_eq!(process.gateway_request_observed, None);
+        let mut transaction = pool.begin().await?;
+        crate::model_diagnostics::record_failure(
+            &mut transaction,
+            authority.run_id,
+            authority.attempt,
+            failure.audit(),
+            failure.user_guidance(),
+            authority.now,
+        )
+        .await?;
+        transaction.commit().await?;
+        let diagnostics = PostgresAgentRunStore::new(pool)
+            .diagnostics(authority.run_id)
+            .await?;
+        assert_eq!(
+            diagnostics.items[0].diagnostic_code,
+            "LW_MODEL_CALL_ID_UNAVAILABLE"
+        );
+        assert!(
+            diagnostics.items[0]
+                .reason
+                .contains("exit_status=0; gateway_request=unknown; stderr_category=empty")
         );
         Ok(())
     }

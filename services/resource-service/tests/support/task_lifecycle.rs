@@ -30,7 +30,8 @@ use reqwest::Url;
 use resource_service::credits::PgCreditStore;
 use rustls::{ServerConfig, pki_types::PrivateKeyDer};
 use task_execution::resource::{
-    ResourceClient, ResourceClientConfiguration, TaskResourceError, TaskResourceLifecycle,
+    ResourceClient, ResourceClientConfiguration, ResourceClientError, TaskResourceError,
+    TaskResourceLifecycle,
 };
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
@@ -371,6 +372,45 @@ async fn restart_and_changed_configuration_keep_first_deadline_and_lost_timeout_
     ));
     assert_eq!(fixture.event_count().await?, events);
     assert!(!restarted_store.expire_pending_task_once().await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unresolved_handoff_conflict_reads_current_state_and_preserves_its_code() -> TestResult {
+    let fixture = Fixture::start().await?;
+    let request = fixture.lifecycle.create(Duration::from_secs(30)).await?;
+    approve(&fixture.faults.store, &request).await?;
+    let claimed = fixture.wait_for_claim().await?;
+    let before = fixture.event_count().await?;
+    let mut stale = claimed.clone();
+    stale.claim_revision = Revision::new(claimed.claim_revision.get() + 1)?;
+    let error = fixture
+        .lifecycle
+        .acknowledge(&stale, "labweaver-evaluation")
+        .await
+        .err()
+        .ok_or("a mismatched handoff fence must be rejected")?;
+    assert!(matches!(
+        error,
+        TaskResourceError::Client(ResourceClientError::Conflict(
+            "LW_RESOURCE_CAPACITY_CLAIM_STATE_CONFLICT"
+        ))
+    ));
+    assert_eq!(
+        error.to_string(),
+        "LW_RESOURCE_CAPACITY_CLAIM_STATE_CONFLICT"
+    );
+    let current = fixture.lifecycle.load_status().await?;
+    assert_eq!(current.claim_revision, claimed.claim_revision);
+    assert_eq!(current.lease_revision, claimed.lease_revision);
+    assert_eq!(current.request.state, ResourceRequestState::Allocating);
+    assert_eq!(fixture.event_count().await?, before);
+    let active = fixture
+        .lifecycle
+        .acknowledge(&claimed, "labweaver-evaluation")
+        .await?;
+    assert_eq!(active.request.state, ResourceRequestState::Active);
+    assert!(fixture.lifecycle.release(&active).await?.cleanup_confirmed);
     Ok(())
 }
 

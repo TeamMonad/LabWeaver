@@ -674,6 +674,9 @@ pub struct ClaudeCodeProcessOutput {
     stderr_sha256: Option<Sha256Digest>,
     stderr_bytes: u64,
     failure_class: Option<RuntimeFailureClass>,
+    gateway_request_observed: Option<bool>,
+    resource_admission: Option<&'static str>,
+    stderr_category: StderrCategory,
     image_export: Option<contracts::supply_chain::ExportedOciImage>,
 }
 
@@ -687,6 +690,9 @@ impl ClaudeCodeProcessOutput {
             stderr_sha256: (!stderr.is_empty()).then(|| Sha256Digest::of_bytes(stderr)),
             stderr_bytes: u64::try_from(stderr.len()).unwrap_or(u64::MAX),
             failure_class: classify_runtime_stderr(stderr),
+            gateway_request_observed: None,
+            resource_admission: None,
+            stderr_category: classify_stderr_category(stderr),
             image_export: None,
         }
     }
@@ -720,7 +726,44 @@ impl ClaudeCodeProcessOutput {
     }
 
     fn classified_error(&self) -> Option<ClaudeCodeRuntimeError> {
-        self.failure_class.map(RuntimeFailureClass::runtime_error)
+        self.resource_admission
+            .map(ClaudeCodeRuntimeError::ResourceAdmission)
+            .or_else(|| self.failure_class.map(RuntimeFailureClass::runtime_error))
+    }
+
+    fn admission_priority(&self, error: ClaudeCodeRuntimeError) -> ClaudeCodeRuntimeError {
+        self.resource_admission
+            .map_or(error, ClaudeCodeRuntimeError::ResourceAdmission)
+    }
+    // Usage validation, overflow checks and budget enforcement still run. Their independent
+    // diagnostic is retained in the audit/review failure instead of replacing verified admission.
+
+    // A verified Resource receipt is authoritative even when the CLI emits a generic model-error
+    // envelope. Without that receipt, preserve the existing envelope-before-stderr precedence.
+    fn envelope_failure(&self, envelope: &ClaudeCodeResultEnvelope) -> ClaudeCodeRuntimeError {
+        self.resource_admission
+            .map(ClaudeCodeRuntimeError::ResourceAdmission)
+            .or_else(|| envelope.runtime_error())
+            .or_else(|| self.failure_class.map(RuntimeFailureClass::runtime_error))
+            .unwrap_or(ClaudeCodeRuntimeError::ExecutionFailed)
+    }
+
+    pub(crate) fn with_gateway_request_observed(mut self, observed: Option<bool>) -> Self {
+        self.gateway_request_observed = observed;
+        self
+    }
+
+    pub(crate) fn with_resource_admission(mut self, code: Option<&'static str>) -> Self {
+        self.resource_admission = code;
+        self
+    }
+
+    pub(crate) fn process_diagnostic(&self) -> ClaudeCodeProcessDiagnostic {
+        ClaudeCodeProcessDiagnostic {
+            exit_status: self.exit_code,
+            gateway_request_observed: self.gateway_request_observed,
+            stderr_category: self.stderr_category,
+        }
     }
 }
 
@@ -734,9 +777,155 @@ impl Debug for ClaudeCodeProcessOutput {
             .field("stderr_sha256", &self.stderr_sha256)
             .field("stderr_bytes", &self.stderr_bytes)
             .field("failure_class", &self.failure_class)
+            .field("gateway_request_observed", &self.gateway_request_observed)
+            .field("resource_admission", &self.resource_admission)
+            .field("stderr_category", &self.stderr_category)
             .field("has_image_export", &self.image_export.is_some())
             .finish()
     }
+}
+
+/// Finite process evidence; no provider payload, command, URL or credential is retained.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClaudeCodeProcessDiagnostic {
+    /// Numeric process exit status; absent when terminated without a status.
+    pub exit_status: Option<i32>,
+    /// `None` means observation is unavailable, not that the gateway was never reached.
+    pub gateway_request_observed: Option<bool>,
+    /// Fixed category inferred from bounded stderr, not proof of an upstream response.
+    pub stderr_category: StderrCategory,
+}
+
+impl ClaudeCodeProcessDiagnostic {
+    pub(crate) fn safe_summary(&self) -> String {
+        let exit = self
+            .exit_status
+            .map_or_else(|| "signal-or-unknown".to_owned(), |code| code.to_string());
+        let gateway = match self.gateway_request_observed {
+            Some(true) => "observed",
+            Some(false) => "not-observed",
+            None => "unknown",
+        };
+        format!(
+            "exit_status={exit}; gateway_request={gateway}; stderr_category={}",
+            self.stderr_category.as_str()
+        )
+    }
+}
+
+/// Allowlisted stderr classification, never a snippet of stderr itself.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StderrCategory {
+    /// No stderr bytes were returned.
+    Empty,
+    /// Rate-limit marker.
+    RateLimited,
+    /// Upstream overload or server-error marker.
+    UpstreamUnavailable,
+    /// Authentication or authorization failure marker.
+    Authentication,
+    /// DNS, connection, TLS or timeout marker.
+    Connection,
+    /// Missing executable, invalid option or local permission marker.
+    RuntimeConfiguration,
+    /// Explicit refusal marker.
+    Refused,
+    /// Non-empty stderr without a recognized marker.
+    Unclassified,
+}
+
+impl StderrCategory {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::RateLimited => "rate-limited",
+            Self::UpstreamUnavailable => "upstream-unavailable",
+            Self::Authentication => "authentication",
+            Self::Connection => "connection",
+            Self::RuntimeConfiguration => "runtime-configuration",
+            Self::Refused => "refused",
+            Self::Unclassified => "unclassified",
+        }
+    }
+}
+
+fn classify_stderr_category(stderr: &[u8]) -> StderrCategory {
+    if stderr.is_empty() {
+        return StderrCategory::Empty;
+    }
+    for (category, markers) in [
+        (
+            StderrCategory::Authentication,
+            [
+                "authentication_error",
+                "http 401",
+                "http 403",
+                "invalid api key",
+            ]
+            .as_slice(),
+        ),
+        (
+            StderrCategory::Connection,
+            [
+                "econnrefused",
+                "enotfound",
+                "certificate",
+                "tls",
+                "connection error",
+                "connection refused",
+                "timed out",
+            ]
+            .as_slice(),
+        ),
+        (
+            StderrCategory::RuntimeConfiguration,
+            [
+                "command not found",
+                "cannot find module",
+                "unknown option",
+                "permission denied",
+                "enoent",
+            ]
+            .as_slice(),
+        ),
+        (
+            StderrCategory::RateLimited,
+            [
+                "rate_limit_error",
+                "rate limit",
+                "http 429",
+                "status code: 429",
+            ]
+            .as_slice(),
+        ),
+        (
+            StderrCategory::UpstreamUnavailable,
+            [
+                "overloaded_error",
+                "http 500",
+                "http 502",
+                "http 503",
+                "http 529",
+                "status code: 500",
+                "status code: 502",
+                "status code: 503",
+                "status code: 529",
+            ]
+            .as_slice(),
+        ),
+        (StderrCategory::Refused, ["refusal", "refused"].as_slice()),
+    ] {
+        if markers.iter().any(|marker| {
+            stderr
+                .windows(marker.len())
+                .any(|window| window.eq_ignore_ascii_case(marker.as_bytes()))
+        }) {
+            return category;
+        }
+    }
+    StderrCategory::Unclassified
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -983,32 +1172,14 @@ async fn execute_process(
     // retained below.
     let outcome = tokio::select! {
         biased;
-        () = cancellation.cancelled() => ProcessOutcome::Cancelled,
-        () = tokio::time::sleep(command.timeout) => ProcessOutcome::TimedOut,
-        result = lifecycle.complete() => ProcessOutcome::Finished(result),
+        () = cancellation.cancelled() => Err(ClaudeCodeProcessError::Cancelled),
+        () = tokio::time::sleep(command.timeout) => Err(ClaudeCodeProcessError::TimedOut),
+        result = lifecycle.complete() => result,
     };
-    match outcome {
-        ProcessOutcome::Finished(result) => {
-            if result.is_err() {
-                lifecycle.abort().await;
-            }
-            result
-        }
-        ProcessOutcome::Cancelled => {
-            lifecycle.abort().await;
-            Err(ClaudeCodeProcessError::Cancelled)
-        }
-        ProcessOutcome::TimedOut => {
-            lifecycle.abort().await;
-            Err(ClaudeCodeProcessError::TimedOut)
-        }
+    if outcome.is_err() {
+        lifecycle.abort().await;
     }
-}
-
-enum ProcessOutcome {
-    Finished(Result<ClaudeCodeProcessOutput, ClaudeCodeProcessError>),
-    Cancelled,
-    TimedOut,
+    outcome
 }
 
 struct ProcessLifecycle {
@@ -1193,6 +1364,11 @@ pub enum ClaudeCodeProcessError {
     /// Resource approval did not complete before the bounded wait expired.
     #[error("Claude Code worker resource approval timed out")]
     ResourceApprovalTimeout,
+    #[error("{0}")]
+    ResourceAdmission(&'static str),
+    /// The durable gateway receipt could not be read; no candidate may be accepted.
+    #[error("LW_MODEL_CALL_ID_UNAVAILABLE")]
+    GatewayObservationUnavailable(ClaudeCodeProcessDiagnostic),
     #[error("LW_RESOURCE_APPROVAL_EXPIRED")]
     ResourceApprovalExpired,
     #[error("LW_RESOURCE_TASK_LEASE_EXPIRED")]
@@ -1333,8 +1509,14 @@ pub struct ClaudeCodeAudit {
     pub usage: LlmUsage,
     /// Whether Claude Code returned an envelope from which usage could be observed.
     pub usage_observed: bool,
+    /// Independent usage-validation or accounting diagnostic; never raw provider output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_diagnostic_code: Option<String>,
     /// Raw stderr identity without its content.
     pub stderr_sha256: Option<Sha256Digest>,
+    /// Bounded process and gateway evidence, including failures with no result envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_diagnostic: Option<ClaudeCodeProcessDiagnostic>,
     /// Frozen sandbox layout export produced by this exact attempt, when present.
     pub image_export: Option<contracts::supply_chain::ExportedOciImage>,
     /// Final outcome.
@@ -1438,6 +1620,14 @@ impl ClaudeCodeFailure {
                 "任务的资源批准或租约已到期。",
                 "重新申请资源后重试，不复用已到期的执行授权。",
             ),
+            E::ResourceAdmission(_) => (
+                "资源准入配置未满足，任务未启动模型调用。",
+                "检查 Resource 费率、额度和准入配置后重试。",
+            ),
+            E::GatewayObservationUnavailable => (
+                "模型调用观测不可用，未接受本次候选。",
+                "请管理员检查 Agent 数据库及模型调用观测后显式重试。",
+            ),
             E::RateLimited => (
                 "模型服务限流，任务未完成。",
                 "稍后显式重试，并查看已有用量。",
@@ -1488,6 +1678,8 @@ pub struct ClaudeCodeReviewFailure {
     pub error: ClaudeCodeRuntimeError,
     /// Cumulative usage observed across all provider attempts, when available.
     pub usage: Option<LlmUsage>,
+    /// Independent usage-validation or accounting failure, retained even when admission is primary.
+    pub usage_error: Option<ClaudeCodeRuntimeError>,
 }
 
 struct AuditContext<'a> {
@@ -1919,6 +2111,10 @@ impl ClaudeCodeRuntime {
                     .await
             };
             let process_output = process_result.map_err(|error| {
+                let process_diagnostic = match error {
+                    ClaudeCodeProcessError::GatewayObservationUnavailable(detail) => Some(detail),
+                    _ => None,
+                };
                 let runtime_error = match error {
                     ClaudeCodeProcessError::Unavailable => {
                         ClaudeCodeRuntimeError::RuntimeUnavailable
@@ -1933,6 +2129,12 @@ impl ClaudeCodeRuntime {
                     }
                     ClaudeCodeProcessError::ResourceApprovalTimeout => {
                         ClaudeCodeRuntimeError::ResourceApprovalTimeout
+                    }
+                    ClaudeCodeProcessError::ResourceAdmission(code) => {
+                        ClaudeCodeRuntimeError::ResourceAdmission(code)
+                    }
+                    ClaudeCodeProcessError::GatewayObservationUnavailable(_) => {
+                        ClaudeCodeRuntimeError::GatewayObservationUnavailable
                     }
                     ClaudeCodeProcessError::OutputLimitExceeded => {
                         ClaudeCodeRuntimeError::OutputLimitExceeded
@@ -1950,6 +2152,7 @@ impl ClaudeCodeRuntime {
                 );
                 failure.audit.usage = total_usage;
                 failure.audit.usage_observed = false;
+                failure.audit.process_diagnostic = process_diagnostic;
                 failure
             })?;
             let mut parsed = self
@@ -1981,6 +2184,7 @@ impl ClaudeCodeRuntime {
                     );
                     failure.audit.usage = total_usage;
                     failure.audit.usage_observed = false;
+                    failure.audit.usage_diagnostic_code = Some(error.diagnostic_code().to_owned());
                     failure
                 })?;
             }
@@ -1996,6 +2200,7 @@ impl ClaudeCodeRuntime {
                 );
                 failure.audit.usage = total_usage;
                 failure.audit.usage_observed = all_usage_observed;
+                failure.audit.usage_diagnostic_code = Some(error.diagnostic_code().to_owned());
                 return Err(failure);
             }
             if cancellation.is_cancelled() {
@@ -2225,6 +2430,14 @@ impl ClaudeCodeRuntime {
                         ClaudeCodeRuntimeError::OutputLimitExceeded,
                         usage_option(total_usage),
                     ),
+                    ClaudeCodeProcessError::ResourceAdmission(code) => review_failure(
+                        ClaudeCodeRuntimeError::ResourceAdmission(code),
+                        usage_option(total_usage),
+                    ),
+                    ClaudeCodeProcessError::GatewayObservationUnavailable(_) => review_failure(
+                        ClaudeCodeRuntimeError::GatewayObservationUnavailable,
+                        usage_option(total_usage),
+                    ),
                     ClaudeCodeProcessError::Io => review_failure(
                         ClaudeCodeRuntimeError::ExecutionFailed,
                         usage_option(total_usage),
@@ -2246,19 +2459,21 @@ impl ClaudeCodeRuntime {
                 }
             };
             let envelope = parsed.envelope;
-            let usage = envelope
-                .usage()
-                .map_err(|error| review_failure(error, usage_option(total_usage)))?;
-            total_usage = accumulate_usage(total_usage, usage)
-                .map_err(|error| review_failure(error, usage_option(total_usage)))?;
-            enforce_budget(&self.policy.budget, total_usage)
-                .map_err(|error| review_failure(error, usage_option(total_usage)))?;
-            if !process_output.is_success() || envelope.is_error {
+            let usage = envelope.usage().map_err(|error| {
+                review_usage_failure(&process_output, error, usage_option(total_usage))
+            })?;
+            total_usage = accumulate_usage(total_usage, usage).map_err(|error| {
+                review_usage_failure(&process_output, error, usage_option(total_usage))
+            })?;
+            enforce_budget(&self.policy.budget, total_usage).map_err(|error| {
+                review_usage_failure(&process_output, error, usage_option(total_usage))
+            })?;
+            if process_output.resource_admission.is_some()
+                || !process_output.is_success()
+                || envelope.is_error
+            {
                 return Err(review_failure(
-                    envelope
-                        .runtime_error()
-                        .or_else(|| process_output.classified_error())
-                        .unwrap_or(ClaudeCodeRuntimeError::ExecutionFailed),
+                    process_output.envelope_failure(&envelope),
                     usage_option(total_usage),
                 ));
             }
@@ -2358,7 +2573,7 @@ impl ClaudeCodeRuntime {
         };
         let envelope = stream.envelope;
         let usage = envelope.usage().map_err(|error| {
-            self.failure(
+            let mut failure = self.failure(
                 track,
                 input,
                 schema,
@@ -2366,7 +2581,9 @@ impl ClaudeCodeRuntime {
                 tool_policy,
                 error,
                 Some(process_output),
-            )
+            );
+            failure.audit.usage_diagnostic_code = Some(error.diagnostic_code().to_owned());
+            failure
         })?;
         let mut audit = self.audit(AuditContext {
             track,
@@ -2381,15 +2598,15 @@ impl ClaudeCodeRuntime {
         });
         if audit.schema_sha256.is_none() {
             return Err(failure_with_audit(
-                ClaudeCodeRuntimeError::ProtocolInvalid,
+                process_output.admission_priority(ClaudeCodeRuntimeError::ProtocolInvalid),
                 audit,
             ));
         }
-        if !process_output.is_success() || envelope.is_error {
-            let error = envelope
-                .runtime_error()
-                .or_else(|| process_output.classified_error())
-                .unwrap_or(ClaudeCodeRuntimeError::ExecutionFailed);
+        if process_output.resource_admission.is_some()
+            || !process_output.is_success()
+            || envelope.is_error
+        {
+            let error = process_output.envelope_failure(&envelope);
             return Err(failure_with_audit(error, audit));
         }
         if envelope.kind != "result" || envelope.subtype != "success" || audit.session_id.is_none()
@@ -2808,6 +3025,7 @@ impl ClaudeCodeRuntime {
         error: ClaudeCodeRuntimeError,
         process_output: Option<&ClaudeCodeProcessOutput>,
     ) -> ClaudeCodeFailure {
+        let primary_error = process_output.map_or(error, |output| output.admission_priority(error));
         // The returned audit deliberately carries no reason, so the stable
         // diagnostic and the closed error kind are recorded here: an authoring
         // attempt that fails before any cluster object exists is otherwise
@@ -2816,7 +3034,7 @@ impl ClaudeCodeRuntime {
             event = "agent.authoring.runtime.failed",
             track = ?track,
             error_kind = ?error,
-            diagnostic_code = error.diagnostic_code(),
+            diagnostic_code = primary_error.diagnostic_code(),
             "authoring runtime refused the attempt",
         );
         let audit = self.audit(AuditContext {
@@ -2830,7 +3048,7 @@ impl ClaudeCodeRuntime {
             usage: zero_usage(),
             usage_observed: false,
         });
-        failure_with_audit(error, audit)
+        failure_with_audit(primary_error, audit)
     }
 
     fn audit(&self, context: AuditContext<'_>) -> ClaudeCodeAudit {
@@ -2867,9 +3085,13 @@ impl ClaudeCodeRuntime {
             session_id: context.session_id,
             usage: context.usage,
             usage_observed: context.usage_observed,
+            usage_diagnostic_code: None,
             stderr_sha256: context
                 .process_output
                 .and_then(|output| output.stderr_sha256),
+            process_diagnostic: context
+                .process_output
+                .map(ClaudeCodeProcessOutput::process_diagnostic),
             image_export: context
                 .process_output
                 .and_then(|output| output.image_export().cloned()),
@@ -2898,6 +3120,12 @@ impl ClaudeCodeRuntime {
                     }
                     ClaudeCodeProcessError::ResourceApprovalTimeout => {
                         ClaudeCodeRuntimeError::ResourceApprovalTimeout
+                    }
+                    ClaudeCodeProcessError::ResourceAdmission(code) => {
+                        ClaudeCodeRuntimeError::ResourceAdmission(code)
+                    }
+                    ClaudeCodeProcessError::GatewayObservationUnavailable(_) => {
+                        ClaudeCodeRuntimeError::GatewayObservationUnavailable
                     }
                     ClaudeCodeProcessError::Cancelled
                     | ClaudeCodeProcessError::Io
@@ -3809,7 +4037,29 @@ fn review_failure(
     error: ClaudeCodeRuntimeError,
     usage: Option<LlmUsage>,
 ) -> ClaudeCodeReviewFailure {
-    ClaudeCodeReviewFailure { error, usage }
+    ClaudeCodeReviewFailure {
+        error,
+        usage,
+        usage_error: None,
+    }
+}
+
+fn review_usage_failure(
+    output: &ClaudeCodeProcessOutput,
+    error: ClaudeCodeRuntimeError,
+    usage: Option<LlmUsage>,
+) -> ClaudeCodeReviewFailure {
+    tracing::warn!(
+        event = "agent.claude_code.usage_rejected",
+        diagnostic_code = output.admission_priority(error).diagnostic_code(),
+        error_kind = error.diagnostic_code(),
+        outcome = "rejected"
+    );
+    ClaudeCodeReviewFailure {
+        error: output.admission_priority(error),
+        usage,
+        usage_error: Some(error),
+    }
 }
 
 fn enforce_budget(budget: &LlmBudget, usage: LlmUsage) -> Result<(), ClaudeCodeRuntimeError> {
@@ -4110,6 +4360,11 @@ pub enum ClaudeCodeRuntimeError {
     ResourceApprovalExpired,
     #[error("LW_RESOURCE_TASK_LEASE_EXPIRED")]
     ResourceLeaseExpired,
+    #[error("{0}")]
+    ResourceAdmission(&'static str),
+    /// A durable model gateway observation could not be read.
+    #[error("LW_MODEL_CALL_ID_UNAVAILABLE")]
+    GatewayObservationUnavailable,
     /// Claude Code reported provider throttling after its own bounded retries.
     #[error("LW_LLM_RATE_LIMITED: Claude Code provider rate limit exhausted")]
     RateLimited,
@@ -4145,6 +4400,8 @@ impl ClaudeCodeRuntimeError {
             Self::ResourceLeaseExpired => "LW_RESOURCE_TASK_LEASE_EXPIRED",
             Self::ResourceApprovalExpired => "LW_RESOURCE_APPROVAL_EXPIRED",
             Self::ResourceApprovalTimeout => "LW_TASK_RESOURCE_APPROVAL_TIMEOUT",
+            Self::ResourceAdmission(code) => code,
+            Self::GatewayObservationUnavailable => "LW_MODEL_CALL_ID_UNAVAILABLE",
             Self::RateLimited => diagnostic::RATE_LIMITED,
             Self::Refused => diagnostic::PROVIDER_REJECTED,
         }
@@ -4183,6 +4440,49 @@ mod tests {
     use crate::platform_images::{PlatformImageEntry, PlatformImageKind, PlatformImageStatus};
 
     #[test]
+    fn sandbox_exit_diagnostic_distinguishes_gateway_and_redacts_stderr()
+    -> Result<(), Box<dyn Error>> {
+        for (stderr, category) in [
+            (b"".as_slice(), "empty"),
+            (
+                b"HTTP 401 https://secret.example/ api-key-secret",
+                "authentication",
+            ),
+            (b"TLS certificate failure api-key-secret", "connection"),
+            (
+                b"command not found /private/path api-key-secret",
+                "runtime-configuration",
+            ),
+            (b"status code: 429 api-key-secret", "rate-limited"),
+            (b"overloaded_error api-key-secret", "upstream-unavailable"),
+            (b"model refusal api-key-secret", "refused"),
+            (b"api-key-secret", "unclassified"),
+        ] {
+            for (observed, gateway) in [
+                (Some(true), "observed"),
+                (Some(false), "not-observed"),
+                (None, "unknown"),
+            ] {
+                let output = ClaudeCodeProcessOutput::from_raw(Some(17), Vec::new(), stderr)
+                    .with_gateway_request_observed(observed);
+                let diagnostic = output.process_diagnostic();
+                assert_eq!(
+                    diagnostic.safe_summary(),
+                    format!(
+                        "exit_status=17; gateway_request={gateway}; stderr_category={category}"
+                    )
+                );
+                let encoded = serde_json::to_string(&diagnostic)?;
+                assert!(encoded.len() < 160);
+                assert!(!encoded.contains("api-key-secret"));
+                assert!(!encoded.contains("secret.example"));
+                assert!(!encoded.contains("/private/path"));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn evaluation_document_parse_errors_keep_inner_serde_path() -> Result<(), Box<dyn Error>> {
         let mut evaluation = serde_json::to_value(
             contracts::evaluation::EvaluationSpec::from_yaml(include_str!(
@@ -4204,6 +4504,49 @@ mod tests {
         assert_eq!(diagnostic.schema_path, "/evaluation/apiVersion");
         assert_eq!(diagnostic.category, "required_field_missing");
         assert_eq!(diagnostic.diagnostic_code, "LW_EVAL_SPEC_DOCUMENT_INVALID");
+        Ok(())
+    }
+
+    #[test]
+    fn gateway_resource_admission_takes_precedence_over_generic_cli_failure() {
+        let output =
+            ClaudeCodeProcessOutput::from_raw(Some(1), Vec::new(), b"private provider error")
+                .with_gateway_request_observed(Some(true))
+                .with_resource_admission(Some("LW_RESOURCE_RATE_UNCONFIGURED"));
+        assert_eq!(
+            output
+                .classified_error()
+                .map(ClaudeCodeRuntimeError::diagnostic_code),
+            Some("LW_RESOURCE_RATE_UNCONFIGURED")
+        );
+    }
+
+    #[test]
+    fn verified_resource_admission_precedes_envelope_without_reordering_stderr()
+    -> Result<(), Box<dyn Error>> {
+        let mut envelope: ClaudeCodeResultEnvelope = serde_json::from_value(json!({
+            "type":"result", "subtype":"error_during_execution", "is_error":true,
+            "session_id":"01900000-0000-7000-8000-000000000001", "num_turns":1,
+            "total_cost_usd":0, "usage":{"input_tokens":0,"output_tokens":0},
+            "permission_denials":[], "terminal_reason":"model_error"
+        }))?;
+        let output =
+            ClaudeCodeProcessOutput::from_raw(Some(1), Vec::new(), b"rate limit private stderr");
+        assert_eq!(
+            output.envelope_failure(&envelope).diagnostic_code(),
+            "LW_PROVIDER_UNAVAILABLE"
+        );
+        envelope.terminal_reason = None;
+        assert_eq!(
+            output.envelope_failure(&envelope).diagnostic_code(),
+            "LW_RATE_LIMITED"
+        );
+        envelope.terminal_reason = Some("model_error".to_owned());
+        let output = output.with_resource_admission(Some("LW_RESOURCE_RATE_UNCONFIGURED"));
+        assert_eq!(
+            output.envelope_failure(&envelope).diagnostic_code(),
+            "LW_RESOURCE_RATE_UNCONFIGURED"
+        );
         Ok(())
     }
 
