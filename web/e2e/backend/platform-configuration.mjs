@@ -125,7 +125,10 @@ try {
         observedConfigurationSha256: null, observedEncryptedBundleSha256: null }),
     })
     assert.equal(response.status, 200, `executor ${stage} rejected`)
-    attempt = (await response.json()).latestApply
+    const intent = await response.json()
+    // The apply-only executor sees its bound attempt and digest, never administrator state.
+    assert.deepEqual(Object.keys(intent).sort(), ['attempt', 'configurationSha256', 'revision'])
+    attempt = intent.attempt
   }
   const final = await page.evaluate(async ({ gatewayToken, admin, session, failedId, desiredRevision }) => {
     const api = await import('/src/api/client.ts')
