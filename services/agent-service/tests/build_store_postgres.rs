@@ -702,6 +702,90 @@ async fn database_now(pool: &sqlx::PgPool) -> Result<UtcTimestamp, Box<dyn std::
     Ok(UtcTimestamp::from_utc(value)?)
 }
 
+/// Hides build metering reads behind an empty view while keeping the physical table, its rows
+/// and every FK. Both DDL statements commit together; on any failure the SQLx transaction
+/// guard rolls back on drop, so neither the schema nor the pooled connection is left half-done.
+async fn install_metering_visibility_fault(
+    pool: &sqlx::PgPool,
+    view: MeteringFaultView,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("ALTER TABLE resource.build_metering_attempts RENAME TO visibility_fault_build_metering_attempts")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(match view {
+        MeteringFaultView::HideAll => "CREATE VIEW resource.build_metering_attempts AS SELECT * FROM resource.visibility_fault_build_metering_attempts WHERE false",
+        // Deterministic runtime DDL failure for the rollback regression.
+        MeteringFaultView::Invalid => "CREATE VIEW resource.build_metering_attempts AS SELECT * FROM resource.no_such_relation",
+    })
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
+}
+
+async fn remove_metering_visibility_fault(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("DROP VIEW resource.build_metering_attempts")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("ALTER TABLE resource.visibility_fault_build_metering_attempts RENAME TO build_metering_attempts")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await
+}
+
+#[derive(Clone, Copy)]
+enum MeteringFaultView {
+    HideAll,
+    Invalid,
+}
+
+async fn metering_relation_kind(
+    pool: &sqlx::PgPool,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    Ok(sqlx::query_scalar::<_, Option<String>>(
+        "SELECT (SELECT relkind::text FROM pg_class WHERE oid = to_regclass('resource.build_metering_attempts'))",
+    )
+    .fetch_one(pool)
+    .await?)
+}
+
+#[tokio::test]
+async fn failed_metering_visibility_fault_rolls_back_schema_and_keeps_connection_usable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let postgres = Postgres::default().with_tag("17.5-alpine").start().await?;
+    // One connection: if a failed batch left it inside an aborted transaction, every later
+    // query on this pool would be rejected.
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&format!(
+            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+            postgres.get_host_port_ipv4(5432).await?
+        ))
+        .await?;
+    apply_agent_migrations(&pool).await?;
+    let _billing = BuildBillingFixture::start(pool.clone()).await?;
+    assert_eq!(metering_relation_kind(&pool).await?.as_deref(), Some("r"));
+    assert!(
+        install_metering_visibility_fault(&pool, MeteringFaultView::Invalid)
+            .await
+            .is_err(),
+        "an invalid view definition must fail at runtime"
+    );
+    // The rename was rolled back together with the failed view, and the connection is clean.
+    assert_eq!(metering_relation_kind(&pool).await?.as_deref(), Some("r"));
+    install_metering_visibility_fault(&pool, MeteringFaultView::HideAll).await?;
+    assert_eq!(metering_relation_kind(&pool).await?.as_deref(), Some("v"));
+    remove_metering_visibility_fault(&pool).await?;
+    assert_eq!(metering_relation_kind(&pool).await?.as_deref(), Some("r"));
+    assert!(
+        remove_metering_visibility_fault(&pool).await.is_err(),
+        "removing an absent fault must fail"
+    );
+    assert_eq!(metering_relation_kind(&pool).await?.as_deref(), Some("r"));
+    Ok(())
+}
+
 fn build_command() -> Result<AgentBuildRequested, Box<dyn std::error::Error>> {
     let project_id = ProjectId::new();
     let course_id = CourseId::new();
@@ -2642,9 +2726,7 @@ async fn native_build_admission_preserves_resource_codes_through_executor_and_pu
             // view while retaining the physical row, its actual hold, and every FK constraint.
             // The native tariff API reprices a new admission; native Credits detects the
             // existing hold mismatch. No Resource handler/response or principal is replaced.
-            // PostgreSQL DDL is transactional: the rename and the filtered view are installed
-            // in one statement batch, so a failure leaves the original schema untouched.
-            sqlx::raw_sql("BEGIN; ALTER TABLE resource.build_metering_attempts RENAME TO visibility_fault_build_metering_attempts; CREATE VIEW resource.build_metering_attempts AS SELECT * FROM resource.visibility_fault_build_metering_attempts WHERE false; COMMIT;").execute(&pool).await?;
+            install_metering_visibility_fault(&pool, MeteringFaultView::HideAll).await?;
         }
         // Everything between installing and removing the visibility fault runs inside one
         // future so the schema is restored before any error or panic propagates.
@@ -2719,13 +2801,10 @@ async fn native_build_admission_preserves_resource_codes_through_executor_and_pu
           result
         }))
         .await;
-        // Restore atomically before evaluating the faulted result, then report the first
-        // failure: a test error or panic takes precedence over a restore failure.
+        // Restore before evaluating the faulted result, then report the first failure: a test
+        // error or panic takes precedence over a restore failure.
         let restored = if code == "LW_CREDITS_CONFLICT" {
-            sqlx::raw_sql("BEGIN; DROP VIEW resource.build_metering_attempts; ALTER TABLE resource.visibility_fault_build_metering_attempts RENAME TO build_metering_attempts; COMMIT;")
-                .execute(&pool)
-                .await
-                .map(|_| ())
+            remove_metering_visibility_fault(&pool).await
         } else {
             Ok(())
         };
@@ -2735,14 +2814,8 @@ async fn native_build_admission_preserves_resource_codes_through_executor_and_pu
         };
         restored?;
         if code == "LW_CREDITS_CONFLICT" {
-            let restored_table: Option<String> = sqlx::query_scalar(
-                "SELECT relkind::text FROM pg_class WHERE oid = to_regclass('resource.build_metering_attempts')",
-            )
-            .fetch_optional(&pool)
-            .await?
-            .flatten();
             assert_eq!(
-                restored_table.as_deref(),
+                metering_relation_kind(&pool).await?.as_deref(),
                 Some("r"),
                 "the physical metering table must be restored after the visibility fault"
             );
