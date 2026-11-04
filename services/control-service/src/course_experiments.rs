@@ -100,7 +100,13 @@ impl ControlService {
     ) -> Result<CourseExperiment, ControlError> {
         let member: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM control.course_memberships WHERE course_id=$1 AND actor_id=$2 AND state='active' AND (expires_at IS NULL OR expires_at>clock_timestamp()))")
             .bind(course_id.as_uuid()).bind(_actor.actor_id.as_uuid()).fetch_one(&self.pool).await.map_err(db)?;
-        if !member && !_actor.roles.contains(&contracts::PlatformRole::PlatformAdmin) { return Err(ControlError::CourseGovernanceDenied); }
+        if !member
+            && !_actor
+                .roles
+                .contains(&contracts::PlatformRole::PlatformAdmin)
+        {
+            return Err(ControlError::CourseGovernanceDenied);
+        }
         let row = sqlx::query("SELECT experiment_id,course_id,contract FROM control.course_experiments WHERE experiment_id=$1 AND course_id=$2").bind(experiment_id.as_uuid()).bind(course_id.as_uuid()).fetch_optional(&self.pool).await.map_err(db)?.ok_or(ControlError::NotFound)?;
         decode_experiment(&row)
     }
