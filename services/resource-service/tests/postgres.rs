@@ -2297,9 +2297,11 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
     ))
     .execute(&pool)
     .await?;
-    sqlx::raw_sql(include_str!("../../../migrations/resource/0026_retained_storage_consumer.sql"))
-        .execute(&pool)
-        .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0026_retained_storage_consumer.sql"
+    ))
+    .execute(&pool)
+    .await?;
     let store = PgResourceStore::new(pool.clone());
     let resolve_request = ResolveEnvironmentResourceReservationRequest {
         version: 1,
@@ -7118,22 +7120,60 @@ async fn assert_retained_disk_consumer(
         Err(ResourceStoreError::CapacityReadbackInvalid)
     ));
     // Same aggregate revision can advance only the cumulative measurement watermark.
-    status.retained_storage_usage.as_mut().ok_or("usage")?.measured_until = UtcTimestamp::from_utc(started.get() + time::Duration::milliseconds(750))?;
-    store.consume_environment_cleanup_status(&item, &status).await?;
-    assert_eq!(sqlx::query_scalar::<_,String>("SELECT sum(amount)::text FROM resource.retained_storage_platform_costs").fetch_one(&pool).await?, "1");
+    status
+        .retained_storage_usage
+        .as_mut()
+        .ok_or("usage")?
+        .measured_until =
+        UtcTimestamp::from_utc(started.get() + time::Duration::milliseconds(750))?;
+    store
+        .consume_environment_cleanup_status(&item, &status)
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT sum(amount)::text FROM resource.retained_storage_platform_costs"
+        )
+        .fetch_one(&pool)
+        .await?,
+        "1"
+    );
     let mut delayed = status.clone();
-    delayed.retained_storage_usage.as_mut().ok_or("usage")?.measured_until = measured;
-    assert!(matches!(store.consume_environment_cleanup_status(&item, &delayed).await, Err(ResourceStoreError::CapacityReadbackInvalid)));
+    delayed
+        .retained_storage_usage
+        .as_mut()
+        .ok_or("usage")?
+        .measured_until = measured;
+    assert!(matches!(
+        store
+            .consume_environment_cleanup_status(&item, &delayed)
+            .await,
+        Err(ResourceStoreError::CapacityReadbackInvalid)
+    ));
     let mut successor = CreateResourceRateRequest {
-        unit: ResourceBillingUnit::StorageByteSecond, unit_quantity: 1,
-        gpu_class: None, gpu_mode: None, builder_binding: None, model_binding: None, max_preauthorization: None,
-        unit_price: Money { currency: "CREDITS".into(), amount: FixedDecimal::parse("0.000002")? },
+        unit: ResourceBillingUnit::StorageByteSecond,
+        unit_quantity: 1,
+        gpu_class: None,
+        gpu_mode: None,
+        builder_binding: None,
+        model_binding: None,
+        max_preauthorization: None,
+        unit_price: Money {
+            currency: "CREDITS".into(),
+            amount: FixedDecimal::parse("0.000002")?,
+        },
         effective_from: UtcTimestamp::from_utc(started.get() + time::Duration::milliseconds(500))?,
         effective_until: None,
     };
-    assert!(matches!(store.create_rate("retained-history-rewrite", &successor).await, Err(ResourceStoreError::RateSettledConflict)));
+    assert!(matches!(
+        store
+            .create_rate("retained-history-rewrite", &successor)
+            .await,
+        Err(ResourceStoreError::RateSettledConflict)
+    ));
     successor.effective_from = UtcTimestamp::from_utc(started.get() + time::Duration::seconds(1))?;
-    store.create_rate("retained-rate-successor", &successor).await?;
+    store
+        .create_rate("retained-rate-successor", &successor)
+        .await?;
     status.revision = Revision::new(4)?;
     let closed_at = if reactivated {
         let at = UtcTimestamp::from_utc(started.get() + time::Duration::seconds(5))?;
@@ -7178,7 +7218,14 @@ async fn assert_retained_disk_consumer(
         .await?,
         3
     );
-    assert_eq!(sqlx::query_scalar::<_,String>("SELECT sum(amount)::text FROM resource.retained_storage_platform_costs").fetch_one(&pool).await?, if reactivated { "9" } else { "1209599" });
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT sum(amount)::text FROM resource.retained_storage_platform_costs"
+        )
+        .fetch_one(&pool)
+        .await?,
+        if reactivated { "9" } else { "1209599" }
+    );
     assert_eq!(credits.account(request.project_id).await?, before);
     assert_eq!(store.get_budget(request.project_id).await?, budget);
     assert_eq!(

@@ -468,7 +468,10 @@ pub(crate) async fn consume_cleanup_status(
         return Err(ResourceStoreError::CapacityReadbackInvalid);
     }
     if let Some(usage) = &status.retained_storage_usage {
-        let disk = status.disk_retention.as_ref().ok_or(ResourceStoreError::CapacityReadbackInvalid)?;
+        let disk = status
+            .disk_retention
+            .as_ref()
+            .ok_or(ResourceStoreError::CapacityReadbackInvalid)?;
         let close_at = disk.purged_at.or(disk.reactivated_at);
         if usage.started_at != disk.started_at
             || disk.compute_retired_at.is_none()
@@ -612,8 +615,14 @@ async fn price_retained_interval(
     // then append only the unpaid delta; frequent sub-microcredit polls cannot lose cost.
     let previous: String = sqlx::query_scalar("SELECT COALESCE(sum(amount),0)::text FROM resource.retained_storage_platform_costs WHERE environment_id=$1 AND started_at=$2")
         .bind(environment_id).bind(started_at).fetch_one(&mut **tx).await?;
-    let amount = amount.checked_sub(previous.parse::<i128>().map_err(|_| ResourceStoreError::NumericOverflow)?)
-        .filter(|value| *value >= 0).ok_or(ResourceStoreError::NumericOverflow)?;
+    let amount = amount
+        .checked_sub(
+            previous
+                .parse::<i128>()
+                .map_err(|_| ResourceStoreError::NumericOverflow)?,
+        )
+        .filter(|value| *value >= 0)
+        .ok_or(ResourceStoreError::NumericOverflow)?;
     let snapshots = serde_json::to_value(&lines)?;
     sqlx::query("INSERT INTO resource.retained_storage_platform_costs(cost_id,environment_id,started_at,measured_from,measured_until,storage_bytes,rate_snapshots,amount,currency) VALUES($1,$2,$3,$4,$5,$6,$7,$8::text::numeric,$9) ON CONFLICT(environment_id,started_at,measured_until) DO NOTHING")
         .bind(Uuid::now_v7()).bind(environment_id).bind(started_at).bind(from).bind(until)
