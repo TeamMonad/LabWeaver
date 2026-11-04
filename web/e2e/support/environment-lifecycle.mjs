@@ -213,3 +213,50 @@ export async function deleteEnvironmentByUi(page, {
   return await waitForDeleted(page, environmentId, label)
 }
 
+/**
+ * Restore a deleted environment's retained disk through the visible "磁盘保留与恢复"
+ * panel and its confirmation. The server accepts restore as one `restore`
+ * operation that leaves a stopped instance on a newer generation, keeping the
+ * original retention deadline. No request fallback exists.
+ */
+export async function restoreEnvironmentByUi(page, {
+  routePrefix = 'student',
+  projectId,
+  environmentId,
+  label = 'ENVIRONMENT_RESTORE',
+} = {}) {
+  if (!projectId || !environmentId) throw new Error(`${label}_CONTEXT_REQUIRED`)
+  const before = await readEnvironment(page, environmentId, `${label}_READ_FAILED`)
+  if (!before) throw new Error(`${label}_ENVIRONMENT_NOT_FOUND`)
+  const disk = before.diskRetention
+  if (before.desiredState !== 'deleted' || disk?.state !== 'retained') {
+    throw new Error(`${label}_DISK_NOT_RETAINED:${disk?.state ?? 'none'}`)
+  }
+
+  await openEnvironmentPage(page, routePrefix, projectId, environmentId)
+  const restoreButton = page.getByRole('button', { name: '恢复磁盘', exact: true })
+  await expect(restoreButton).toBeEnabled({ timeout: PAGE_TIMEOUT_MS })
+  const responsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return response.request().method() === 'POST'
+      && url.pathname === `/api/v1/environments/${environmentId}/recover`
+  })
+  await restoreButton.click()
+  const dialog = page.getByRole('alertdialog', { name: '恢复磁盘到新的运行代次', exact: true })
+  await expect(dialog).toBeVisible({ timeout: PAGE_TIMEOUT_MS })
+  await dialog.getByRole('button', { name: '恢复磁盘', exact: true }).click()
+  const accepted = await expectJson(await responsePromise, `${label}_ACCEPT_FAILED`)
+  expect(accepted).toMatchObject({ environmentId, operationId: expect.any(String), statusUrl: expect.any(String) })
+  await waitForOperation(page, accepted, label)
+  const restored = await pollJson(
+    page.request,
+    `/api/v1/environments/${encodeURIComponent(environmentId)}`,
+    (value) => value.observedState === 'stopped' && value.diskRetention?.state === 'restored',
+    `${label}_ENVIRONMENT_STATUS_FAILED`,
+    OPERATION_TIMEOUT_MS,
+  )
+  if (!(restored.generation > before.generation)) throw new Error(`${label}_GENERATION_NOT_ADVANCED`)
+  if (restored.diskRetention.expiresAt !== disk.expiresAt) throw new Error(`${label}_RETENTION_WINDOW_CHANGED`)
+  return restored
+}
+

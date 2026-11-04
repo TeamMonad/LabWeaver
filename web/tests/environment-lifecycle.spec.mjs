@@ -37,7 +37,7 @@ vi.mock('@playwright/test', () => {
   return { expect: fakeExpect }
 })
 
-const { deleteEnvironmentByUi } = await import('../e2e/support/environment-lifecycle.mjs')
+const { deleteEnvironmentByUi, restoreEnvironmentByUi } = await import('../e2e/support/environment-lifecycle.mjs')
 
 function response(body, status = 200) {
   return {
@@ -115,5 +115,72 @@ describe('environment lifecycle cleanup', () => {
       environmentId: 'environment',
     })
     expect(page.mutations).toEqual(['cancel', 'delete'])
+  })
+})
+
+function restorePage(environmentStates) {
+  let environmentRead = 0
+  const clicks = []
+  const mutations = []
+  const locator = (name) => ({
+    click: async () => { clicks.push(name) },
+    getByRole: (_role, options) => locator(options?.name ?? 'unnamed'),
+  })
+  return {
+    clicks,
+    mutations,
+    request: {
+      get: async (path) => {
+        if (path === '/api/v1/environments/environment') {
+          return response(environmentStates[Math.min(environmentRead++, environmentStates.length - 1)])
+        }
+        if (path.endsWith('/restore-operation')) return response({ state: 'succeeded' })
+        throw new Error(`UNEXPECTED_GET:${path}`)
+      },
+    },
+    goto: async () => {},
+    getByRole: (_role, options) => locator(options?.name ?? 'unnamed'),
+    waitForResponse: async () => {
+      mutations.push('recover')
+      return response({
+        environmentId: 'environment',
+        operationId: 'restore-operation',
+        statusUrl: '/api/v1/environments/environment/operations/restore-operation',
+      })
+    },
+  }
+}
+
+const RETAINED = Object.freeze({
+  desiredState: 'deleted',
+  observedState: 'deleted',
+  generation: 2,
+  diskRetention: { state: 'retained', expiresAt: '2026-11-11T00:00:00.000Z' },
+})
+
+describe('environment disk restore', () => {
+  it('confirms the visible restore dialog once and returns the stopped newer generation', async () => {
+    const page = restorePage([
+      RETAINED,
+      { desiredState: 'stopped', observedState: 'stopped', generation: 3, diskRetention: { state: 'restored', expiresAt: RETAINED.diskRetention.expiresAt } },
+    ])
+    const restored = await restoreEnvironmentByUi(page, { projectId: 'project', environmentId: 'environment' })
+    expect(page.mutations).toEqual(['recover'])
+    expect(page.clicks).toEqual(['恢复磁盘', '恢复磁盘'])
+    expect(restored.generation).toBe(3)
+  })
+
+  it('refuses to submit when the disk is not retained', async () => {
+    const page = restorePage([{ ...RETAINED, diskRetention: { state: 'purged', expiresAt: RETAINED.diskRetention.expiresAt } }])
+    await expect(restoreEnvironmentByUi(page, { projectId: 'project', environmentId: 'environment' })).rejects.toThrow('ENVIRONMENT_RESTORE_DISK_NOT_RETAINED:purged')
+    expect(page.mutations).toEqual([])
+  })
+
+  it('fails when the restored window differs from the original deadline', async () => {
+    const page = restorePage([
+      RETAINED,
+      { desiredState: 'stopped', observedState: 'stopped', generation: 3, diskRetention: { state: 'restored', expiresAt: '2026-11-18T00:00:00.000Z' } },
+    ])
+    await expect(restoreEnvironmentByUi(page, { projectId: 'project', environmentId: 'environment' })).rejects.toThrow('ENVIRONMENT_RESTORE_RETENTION_WINDOW_CHANGED')
   })
 })

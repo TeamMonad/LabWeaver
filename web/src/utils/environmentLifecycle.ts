@@ -37,14 +37,39 @@ export function lifecycleConfirmationText(data: EnvironmentDetailSchema, action:
   return `停止${name}${sessions}工作目录和磁盘会保留，之后可以重新启动。${STOP_IMPACT_NOTICE}确定停止吗？`
 }
 
+/**
+ * Delete stops compute and starts (or, for a restored disk, keeps) the server's
+ * fixed seven-day retention window; purge at its end is what loses data for good.
+ */
 export function deleteDialogCopy(data: EnvironmentDetailSchema | null) {
   const retry = Boolean(data && failedCleanup(data))
+  const vm = data?.runtimeKind === 'virtual_machine'
+  const disk = vm ? '虚拟机系统盘' : '工作盘 /workspace'
+  const unaffected = '项目材料、已冻结的提交、评测成绩和资源与费用记录不受影响。'
+  const retention = data?.diskRetention
+  if (retry) {
+    return {
+      title: '重试回收环境',
+      description: retention
+        ? `上次回收失败，计算释放尚未确认。重试会继续停止并释放计算；${disk}继续按原保留期保留至 ${formatTimestamp(retention.expiresAt)}，重试不会延长保留期。${unaffected}确定继续吗？`
+        : `上次回收失败，资源释放尚未确认。重试会继续回收该环境，并删除仍存在的工作目录及关联容器存储或虚拟机磁盘；操作不可恢复。${unaffected}确定继续吗？`,
+      confirmText: '重试回收',
+    }
+  }
+  const window = retention?.state === 'restored' && !retention.reactivatedAt
+    ? `${disk}仍按原期限保留至 ${formatTimestamp(retention.expiresAt)}，再次删除不会重新开始七天`
+    : `${disk}从计算确认停止起保留七天`
   return {
-    title: retry ? '重试回收环境' : '删除环境',
-    description: retry
-      ? '上次回收失败，资源释放尚未确认。重试会继续回收该环境，并删除仍存在的工作目录及关联容器存储或虚拟机磁盘；操作不可恢复。项目材料、已冻结提交和评测记录不在本环境回收范围内。确定继续吗？'
-      : '删除会回收整个环境，删除工作目录及关联容器存储或虚拟机磁盘；操作不可恢复。项目材料、已冻结提交和评测记录不在本环境删除范围内。确定继续吗？',
-    confirmText: retry ? '重试回收' : '删除',
+    title: '删除环境',
+    description: [
+      '删除会立即停止并释放这个环境的计算：终端、桌面、SSH 和 Web 应用连接断开，正在运行的程序结束。',
+      vm ? '' : '容器中 /workspace 以外的改动（例如另行安装的软件）不会保留。',
+      `${window}，期间可以在环境页恢复；保留期间的存储费用由平台承担。`,
+      `保留期结束后，平台自动永久清除${disk}及其中全部文件，无法再恢复或找回。`,
+      unaffected,
+      '确定删除吗？',
+    ].join(''),
+    confirmText: '删除',
   }
 }
 

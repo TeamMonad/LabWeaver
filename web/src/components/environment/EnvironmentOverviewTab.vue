@@ -27,6 +27,8 @@
                     </details>
                   </div>
 
+                  <EnvironmentDiskRetentionPanel :data="data" />
+
                   <EnvironmentConnectionSummary
                     :instance="data"
                     :endpoints="access.endpoints"
@@ -47,6 +49,8 @@
                     v-if="data.class === 'work'"
                     :data="data"
                   />
+
+                  <EnvironmentRuntimePermissions :data="data" />
 
                   <div class="access-section">
                     <h4 class="section-subtitle">
@@ -253,6 +257,8 @@ import SvgIcon from '@/components/common/SvgIcon.vue'
 import CopyButton from '@/components/common/CopyButton.vue'
 import EnvironmentConnectionSummary from '@/components/environment/EnvironmentConnectionSummary.vue'
 import WorkTemplateUpgradePanel from '@/components/environment/WorkTemplateUpgradePanel.vue'
+import EnvironmentDiskRetentionPanel from '@/components/environment/EnvironmentDiskRetentionPanel.vue'
+import EnvironmentRuntimePermissions from '@/components/environment/EnvironmentRuntimePermissions.vue'
 import type { DataTableColumn } from '@/components/common/DataTable.vue'
 import type { EnvironmentDetailSchema } from '@/generated/contracts'
 import { useEnvironmentEntryContext } from '@/composables/useEnvironmentEntry'

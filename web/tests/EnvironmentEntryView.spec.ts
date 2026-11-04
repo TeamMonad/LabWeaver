@@ -655,9 +655,9 @@ describe('EnvironmentEntryView', () => {
 
     await wrapper.find('button[aria-label="删除"]').trigger('click')
     const dialog = wrapper.findComponent({ name: 'ConfirmDialog' })
-    expect(dialog.props('description')).toContain('工作目录及关联容器存储或虚拟机磁盘')
-    expect(dialog.props('description')).toContain('操作不可恢复')
-    expect(dialog.props('description')).toContain('项目材料、已冻结提交和评测记录不在本环境删除范围内')
+    expect(dialog.props('description')).toContain('保留七天')
+    expect(dialog.props('description')).toContain('平台自动永久清除工作盘 /workspace')
+    expect(dialog.props('description')).toContain('项目材料、已冻结的提交、评测成绩和资源与费用记录不受影响')
   })
 
   it('does not claim a stopped experiment released its GPU capacity', async () => {
@@ -746,7 +746,7 @@ describe('EnvironmentEntryView', () => {
     ))
     expect(lifecycleButtons).toHaveLength(4)
     expect(lifecycleButtons.every((button) => (button.element as HTMLButtonElement).disabled)).toBe(true)
-    expect(wrapper.text()).toContain('此项目环境已删除')
+    expect(wrapper.text()).toContain('此环境已删除，没有保留的磁盘')
     expect(wrapper.find('.environment-selector').exists()).toBe(false)
     expect(wrapper.find('button[aria-expanded="false"]').exists()).toBe(true)
   })

@@ -1,7 +1,7 @@
 import { reactive, ref, type Ref } from 'vue'
 import type { EnvironmentDetailSchema, EnvironmentOperationSnapshotSchema, ObjectAction } from '@/generated/contracts'
 import type { ProjectAvailableActions } from '@/composables/useProjectAvailableActions'
-import { retryEnvironment } from '@/generated/contracts'
+import { recoverEnvironment, retryEnvironment } from '@/generated/contracts'
 import { environmentOperationKindLabel, environmentStateLabel } from '@/utils/stateLabels'
 import {
   STOPPED_IMPACT_NOTICE,
@@ -11,6 +11,14 @@ import {
   type EnvironmentLifecycleAction,
 } from '@/utils/environmentLifecycle'
 import {
+  DISK_STATE_LABEL,
+  RESTORE_FUNDING_NOTICE,
+  diskRecoveryDiagnostic,
+  environmentDiagnostic,
+  failedPurge,
+  retentionExpired,
+} from '@/utils/environmentRetention'
+import {
   createEnvironment,
   startEnvironment,
   stopEnvironment,
@@ -19,9 +27,11 @@ import {
 } from '@/generated/contracts'
 import type { CreateEnvironmentRequestSchema, EnvironmentOperationAcceptedSchema } from '@/generated/contracts'
 import { extractProblemDetails, isRestartOutcomeUnknown, makeDiagnostic, type DiagnosticViewModel } from '@/types/async'
-import { idempotencyKey, ifMatch } from '@/utils/format'
+import { formatTimestamp, idempotencyKey, ifMatch } from '@/utils/format'
 
 export type LifecycleAction = 'start' | 'stop' | 'restart' | 'delete'
+
+const ACTION_NAME: Record<LifecycleAction, string> = { start: '启动', stop: '停止', restart: '重启', delete: '删除' }
 
 /**
  * Public create only attaches to the environment that Resource's approved
@@ -116,9 +126,10 @@ export function useEnvironmentLifecycle(
         const problem = extractProblemDetails(result.error)
         return {
           ok: false,
-          diagnostic: makeDiagnostic(
+          diagnostic: environmentDiagnostic(
             problem?.diagnosticCode ?? `ENVIRONMENT_${action.toUpperCase()}_FAILED`,
-            problem?.detail ?? `${action} 失败`,
+            problem?.detail,
+            `${ACTION_NAME[action]}环境的请求没有被受理。`,
             problem?.retryable ?? true,
             problem,
           ),
@@ -131,13 +142,66 @@ export function useEnvironmentLifecycle(
     }
   }
 
-  return reactive({ operating, lastAccepted, create, act })
+  /**
+   * `POST /recover`: the server restores a retained disk to a new stopped
+   * generation, or continues a failed purge. The caller pins `key` to one
+   * intent and `revision` to the revision it confirmed, so a retry replays the
+   * original receipt instead of submitting a second operation.
+   */
+  async function recover(environmentId: string, revision: number, key: string): Promise<LifecycleMutationResult> {
+    track(`${environmentId}:recover`, true)
+    try {
+      const result = await recoverEnvironment({
+        path: { environmentId },
+        headers: { 'Idempotency-Key': key, 'If-Match': ifMatch(revision) },
+      })
+      if (result.error) {
+        const problem = extractProblemDetails(result.error)
+        return {
+          ok: false,
+          diagnostic: diskRecoveryDiagnostic(
+            problem?.diagnosticCode ?? 'ENVIRONMENT_RECOVER_FAILED',
+            problem?.detail,
+            '磁盘恢复请求没有被受理。',
+            problem?.retryable ?? true,
+            problem,
+          ),
+        }
+      }
+      lastAccepted.value = result.data
+      return { ok: true, accepted: result.data }
+    } catch (error) {
+      const problem = extractProblemDetails(error)
+      return {
+        ok: false,
+        diagnostic: diskRecoveryDiagnostic(
+          problem?.diagnosticCode ?? 'ENVIRONMENT_RECOVER_UNCONFIRMED',
+          problem?.detail,
+          '请求结果尚未确认，平台可能已经受理。',
+          problem?.retryable ?? true,
+          problem,
+        ),
+      }
+    } finally {
+      track(`${environmentId}:recover`, false)
+    }
+  }
+
+  return reactive({ operating, lastAccepted, create, act, recover })
 }
 
 interface LifecycleTarget {
   environmentId: string
   revision: number
   action: EnvironmentLifecycleAction
+}
+
+export type DiskRecoveryIntent = 'restore' | 'purge'
+
+interface DiskRecoveryTarget {
+  environmentId: string
+  revision: number
+  intent: DiskRecoveryIntent
 }
 
 type InstanceState = { kind: string; data?: EnvironmentDetailSchema }
@@ -193,6 +257,13 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
   const lastLifecycleTarget = ref<LifecycleTarget | null>(null)
   const deleteEnvironment = ref<EnvironmentDetailSchema | null>(null)
   const lifecycleConfirmation = ref<{ data: EnvironmentDetailSchema; action: ConfirmedLifecycleAction } | null>(null)
+  const diskRecoveryConfirmation = ref<{ data: EnvironmentDetailSchema; intent: DiskRecoveryIntent } | null>(null)
+  const diskRecoveryDiagnostic = ref<DiagnosticViewModel | null>(null)
+  /** The last restore/purge continuation the server accepted on this page. */
+  const diskRecoveryAccepted = ref<(DiskRecoveryTarget & { operationId: string }) | null>(null)
+  const recoveringDisk = ref(false)
+  const lastDiskRecovery = ref<DiskRecoveryTarget | null>(null)
+  const diskRecoveryKeys = new Map<string, string>()
 
   function currentInstance(): EnvironmentDetailSchema | undefined {
     return env.instance.kind === 'success' ? env.instance.data : undefined
@@ -248,16 +319,104 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
     return permissions.allows('edit')
   }
 
+  /** A deleted environment keeps its disk for the server's fixed window; say where it stands. */
+  function deletedHint(data: EnvironmentDetailSchema): string {
+    const disk = data.diskRetention
+    if (!disk) return '此环境已删除，没有保留的磁盘；控制台和生命周期操作均不可用。需要环境时请提交新的资源申请。'
+    if (disk.state === 'retained' && !retentionExpired(disk, Date.now())) {
+      return `此环境已删除，计算已停止。磁盘保留至 ${formatTimestamp(disk.expiresAt)}，可在概览的“磁盘保留与恢复”中恢复；控制台和其他生命周期操作不可用。`
+    }
+    return `此环境已删除，计算已停止（${DISK_STATE_LABEL[disk.state]}）；控制台和生命周期操作均不可用。`
+  }
+
+  // ---- Retained disk: restore, or continue a failed purge (both `POST /recover`) ----
+
+  /**
+   * Restore is offered only for a retained disk inside its window; purge only
+   * continues one the server already started and that failed. Both are checked
+   * as `edit`, like the server's recover route.
+   */
+  function diskRecoveryBlockReason(data: EnvironmentDetailSchema, intent: DiskRecoveryIntent, now = Date.now()): string | null {
+    const denied = permissions.denialReason('edit', intent === 'restore' ? '恢复磁盘' : '继续清除磁盘')
+    if (denied) return denied
+    const disk = data.diskRetention
+    if (!disk) return '这个环境没有保留的磁盘。'
+    if (lifecycle.operating.has(`${data.id}:recover`) || recoveringDisk.value) return '请求正在提交，请等待结果。'
+    if (intent === 'purge') return failedPurge(data) ? null : '只有保留期结束后未完成的清除可以继续。'
+    if (data.desiredState !== 'deleted') return '环境没有被删除，不需要恢复磁盘。'
+    if (hasActiveLifecycleOperation(data)) return `当前正在${environmentOperationKindLabel(activeOperation.value?.kind ?? data.operation.kind)}，请等待操作完成。`
+    if (disk.state === 'retiring') return '计算尚未确认停止，确认后才能恢复磁盘。'
+    if (disk.state !== 'retained') return `${DISK_STATE_LABEL[disk.state]}，不能恢复。`
+    if (retentionExpired(disk, now)) return `七天保留期已于 ${formatTimestamp(disk.expiresAt)} 结束，不能恢复。`
+    return null
+  }
+
+  function requestDiskRecovery(data: EnvironmentDetailSchema, intent: DiskRecoveryIntent) {
+    if (diskRecoveryBlockReason(data, intent) !== null) return
+    diskRecoveryConfirmation.value = { data, intent }
+  }
+
+  /**
+   * One Idempotency-Key per (intent, environment, confirmed revision), kept for
+   * this page: retrying after a lost answer replays the original receipt. After
+   * a refresh the If-Match fence rejects a second command for a revision the
+   * first one already advanced, so neither path submits a second operation.
+   */
+  async function submitDiskRecovery(target: DiskRecoveryTarget) {
+    if (recoveringDisk.value) return
+    const scope = `${target.intent}:${target.environmentId}:${target.revision}`
+    const key = diskRecoveryKeys.get(scope) ?? idempotencyKey()
+    diskRecoveryKeys.set(scope, key)
+    lastDiskRecovery.value = target
+    diskRecoveryDiagnostic.value = null
+    recoveringDisk.value = true
+    try {
+      const result = await lifecycle.recover(target.environmentId, target.revision, key)
+      if (!result.ok) {
+        diskRecoveryDiagnostic.value = result.diagnostic
+        refreshPermissionsAfter(result.diagnostic)
+        return
+      }
+      diskRecoveryKeys.delete(scope)
+      lastDiskRecovery.value = null
+      diskRecoveryAccepted.value = { ...target, operationId: result.accepted.operationId }
+    } finally {
+      recoveringDisk.value = false
+    }
+    await Promise.all([env.load(), operations.load()])
+  }
+
+  async function confirmDiskRecovery() {
+    const pending = diskRecoveryConfirmation.value
+    diskRecoveryConfirmation.value = null
+    if (!pending) return
+    const data = currentInstance()
+    if (!data || data.id !== pending.data.id || data.revision !== pending.data.revision) return
+    if (diskRecoveryBlockReason(data, pending.intent) !== null) return
+    await submitDiskRecovery({ environmentId: data.id, revision: data.revision, intent: pending.intent })
+  }
+
+  /** Retry resends the unconfirmed command itself: same key, same revision. */
+  async function retryDiskRecovery() {
+    const target = lastDiskRecovery.value
+    if (!target || currentInstance()?.id !== target.environmentId) return
+    if (!permissions.allows('edit')) return
+    await submitDiskRecovery(target)
+  }
+
   function lifecycleActionReason(data: EnvironmentDetailSchema, action: EnvironmentLifecycleAction): string {
-    if (data.observedState === 'deleted') return '此项目环境已删除，不能再执行生命周期操作。请返回项目环境列表创建新的环境。'
+    if (data.observedState === 'deleted') return deletedHint(data)
     const denied = permissions.denialReason(
       LIFECYCLE_OBJECT_ACTION[action],
       action === 'restart' ? '重启环境' : action === 'delete' ? '删除环境' : undefined,
     )
     if (denied) return denied
     if (failedCleanup(data) && !hasActiveLifecycleOperation(data)) return action === 'delete'
-      ? '上次回收失败，资源释放尚未确认；重新回收会删除仍存在的工作目录和关联磁盘数据。'
+      ? data.diskRetention
+        ? '上次回收失败，计算释放尚未确认；重新回收会继续停止计算，工作盘仍按原保留期保留。'
+        : '上次回收失败，资源释放尚未确认；重新回收会删除仍存在的工作目录和关联磁盘数据。'
       : '环境正在等待回收，只能重试回收，不能重新启动或恢复环境。'
+    if (failedPurge(data)) return '磁盘清除没有完成，只能在“磁盘保留与恢复”中继续清除。'
     if (data.observedState === 'deleting' || data.desiredState === 'deleted') return '删除已请求/正在回收，请等待清理完成。'
     if (hasActiveLifecycleOperation(data) && (action !== 'delete' || data.operation.kind === 'delete')) {
       return `当前正在${environmentOperationKindLabel(activeOperation.value?.kind ?? data.operation.kind)}，请等待操作完成。`
@@ -271,11 +430,19 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
   }
 
   function lifecycleActionHint(data: EnvironmentDetailSchema): string {
-    if (data.observedState === 'deleted') return '此项目环境已删除，控制台和生命周期操作均不可用。请返回项目环境列表创建新的环境。'
-    if (failedCleanup(data) && !hasActiveLifecycleOperation(data)) return '环境回收失败，资源释放尚未确认。请重试回收；回收完成前不能打开控制台或重新启动环境。'
+    if (data.observedState === 'deleted') return deletedHint(data)
+    if (failedCleanup(data) && !hasActiveLifecycleOperation(data)) {
+      return data.diskRetention
+        ? '环境回收失败，计算释放尚未确认；工作盘仍按原保留期保留。请重试回收；回收完成前不能打开控制台或重新启动环境。'
+        : '环境回收失败，资源释放尚未确认。请重试回收；回收完成前不能打开控制台或重新启动环境。'
+    }
+    if (failedPurge(data)) return '计算已停止，磁盘清除没有完成。请在“磁盘保留与恢复”中查看原因并继续清除。'
     if (data.observedState === 'deleting' || data.desiredState === 'deleted') return '删除已请求/正在回收，控制台和其他生命周期操作会保持禁用，直到清理完成。'
     if (hasActiveLifecycleOperation(data)) return `当前正在${environmentOperationKindLabel(activeOperation.value?.kind ?? data.operation.kind)}，请在操作完成后继续。`
     if (data.observedState === 'ready') return '环境已就绪，可以打开终端；重启会中断当前运行。'
+    if (data.observedState === 'stopped' && data.diskRetention?.state === 'restored' && !data.diskRetention.reactivatedAt) {
+      return `磁盘已恢复到第 ${data.diskRetention.restoredGeneration ?? data.generation} 代，环境已停止。${RESTORE_FUNDING_NOTICE}如果在 ${formatTimestamp(data.diskRetention.expiresAt)} 前没有重新运行，平台仍会按原期限清除磁盘。`
+    }
     if (data.observedState === 'stopped') return `环境已停止，启动后才能打开终端。工作目录和磁盘仍保留。${STOPPED_IMPACT_NOTICE}`
     if (data.observedState === 'failed') {
       if (data.operation.state === 'failed' && isRestartOutcomeUnknown(data.operation.diagnosticCode)) {
@@ -312,7 +479,12 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
    */
   function failedEnvironmentDiagnostic(data: EnvironmentDetailSchema): DiagnosticViewModel {
     if (failedCleanup(data)) {
-      return { code: '', message: '环境回收失败，剩余工作目录和关联磁盘数据可能仍存在，资源释放尚未确认。请使用顶部操作栏的“重试回收”。', retryable: false }
+      return data.diskRetention
+        ? { code: '', message: '环境回收失败，计算释放尚未确认；工作盘按原保留期保留。请使用顶部操作栏的“重试回收”。', retryable: false }
+        : { code: '', message: '环境回收失败，剩余工作目录和关联磁盘数据可能仍存在，资源释放尚未确认。请使用顶部操作栏的“重试回收”。', retryable: false }
+    }
+    if (failedPurge(data)) {
+      return { code: data.operation.diagnosticCode ?? '', message: '保留期已结束，但磁盘清除没有完成，磁盘可能仍然存在。请在概览的“磁盘保留与恢复”中继续清除。', retryable: false }
     }
     const code = data.operation.state === 'failed' ? data.operation.diagnosticCode : null
     if (isRestartOutcomeUnknown(code)) {
@@ -423,6 +595,9 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
   function resetDiagnostics() {
     lifecycleDiagnostic.value = null
     retryDiagnostic.value = null
+    diskRecoveryDiagnostic.value = null
+    diskRecoveryAccepted.value = null
+    lastDiskRecovery.value = null
   }
 
   return {
@@ -450,5 +625,14 @@ export function useEnvironmentLifecycleControls(deps: EnvironmentLifecycleContro
     openDelete,
     confirmDeleteEnvironment,
     resetDiagnostics,
+    diskRecoveryConfirmation,
+    diskRecoveryDiagnostic,
+    diskRecoveryAccepted,
+    recoveringDisk,
+    lastDiskRecovery,
+    diskRecoveryBlockReason,
+    requestDiskRecovery,
+    confirmDiskRecovery,
+    retryDiskRecovery,
   }
 }
