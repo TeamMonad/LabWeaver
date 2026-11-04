@@ -1,5 +1,5 @@
 //! Real Resource admission and approval fences against the persisted course calendar.
-use super::{TestResult, super::candidate_publication_fixture};
+use super::{TestResult, super::{authoring_publication_fixture, PublicationCase}};
 use contracts::resource::{ResourceApproval, ResourceRequest};
 use resource_service::{
     ApprovalPolicy,
@@ -10,7 +10,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 
 #[tokio::test]
 async fn course_calendar_runtime_start_boundaries_preserve_lease_usage_and_charges() -> TestResult {
-    Box::pin(candidate_publication_fixture(None, None)).await
+    Box::pin(authoring_publication_fixture(PublicationCase::Publication, None)).await
 }
 
 #[allow(clippy::too_many_lines)]
