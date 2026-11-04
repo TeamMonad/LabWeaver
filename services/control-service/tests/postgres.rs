@@ -51,6 +51,8 @@ use uuid::Uuid;
 
 #[path = "cases/manual_work_templates.rs"]
 mod manual_work_template_cases;
+#[path = "cases/course_experiment.rs"]
+mod course_experiment_cases;
 #[path = "cases/membership_governance.rs"]
 mod membership_governance_cases;
 #[path = "cases/rubric_model_input.rs"]

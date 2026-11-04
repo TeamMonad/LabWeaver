@@ -29,8 +29,25 @@ CREATE TABLE control.experiment_group_members (
     PRIMARY KEY (group_id, actor_id)
 );
 CREATE INDEX experiment_group_members_actor_idx ON control.experiment_group_members(actor_id, group_id);
+CREATE OR REPLACE FUNCTION control.prevent_experiment_payer_change()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.payer_project_id <> OLD.payer_project_id
+       OR NEW.payer_actor_id <> OLD.payer_actor_id
+       OR NEW.payer_consent <> OLD.payer_consent THEN
+        RAISE EXCEPTION 'LW_COURSE_EXPERIMENT_PAYER_IMMUTABLE';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER experiment_group_payer_immutable
+BEFORE UPDATE ON control.experiment_groups
+FOR EACH ROW EXECUTE FUNCTION control.prevent_experiment_payer_change();
+
 CREATE VIEW control.course_experiment_windows AS
-SELECT e.course_id, e.release_id, e.policy,
+SELECT e.course_id, e.release_id, e.policy, e.revision,
        c.open_at, c.due_at, c.late_policy, c.late_until, c.time_zone
 FROM control.course_experiments e
 JOIN control.course_calendars c ON c.course_id = e.course_id;

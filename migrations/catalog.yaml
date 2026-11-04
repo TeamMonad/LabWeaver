@@ -75,7 +75,7 @@ domains:
         sha256: 577a01dd03506e3551619f68f5f7ea22f0b4bebfac58b807daf896ae43b36e9d
       - id: 23
         file: control/0023_course_experiments_groups.sql
-        sha256: 414d9de3af5cabcfed1f419a890fd9e67c33f621dd409ec1f26fb65ba47665d0
+        sha256: 7edc7948266910637f910c9a006887aaf201c9049bd906eca21f83d1fff746be
   - name: access
     migrations:
       - id: 1
