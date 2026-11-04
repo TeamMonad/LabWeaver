@@ -302,6 +302,23 @@ describe('WorkEnvironmentsView', () => {
     wrapper.unmount()
   })
 
+  it('keeps deleted Work reachable for its disk retention instead of hiding it', async () => {
+    vi.mocked(listEnvironments).mockResolvedValue({
+      data: { items: [workSummary, { ...workSummary, id: 'env-deleted', displayLabel: '旧论文 Work', observedState: 'deleted', desiredState: 'deleted' }], nextCursor: null },
+      error: undefined,
+    } as never)
+    const { wrapper } = await mountAt()
+    expect(wrapper.findAll('.work-list').at(0)!.find('[data-environment-id="env-deleted"]').exists()).toBe(false)
+    const deleted = wrapper.get('[data-testid="deleted-work"]')
+    expect(deleted.text()).toContain('已删除的 Work（1）')
+    expect(deleted.text()).toContain('保留七天')
+    const row = deleted.get('[data-environment-id="env-deleted"]')
+    expect(row.text()).toContain('已删除，计算已停止')
+    expect(row.get('a').text()).toBe('查看磁盘保留')
+    expect(row.get('a').attributes('href')).toContain('environmentId=env-deleted')
+    wrapper.unmount()
+  })
+
   it('points to manual publication when there is no Work template and no model, and opens the form', async () => {
     vi.mocked(listEnvironmentTemplateReleases).mockResolvedValue({ data: { items: [withdrawnRelease, experimentRelease], nextCursor: null }, error: undefined } as never)
     const { wrapper } = await mountAt()

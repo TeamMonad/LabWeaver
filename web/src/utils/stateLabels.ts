@@ -82,6 +82,8 @@ const ENVIRONMENT_OPERATION_KIND: Record<string, string> = {
   expire: '处理过期环境',
   delete: '删除环境',
   cleanup: '清理环境',
+  restore: '恢复磁盘',
+  purge: '清除磁盘',
   freeze: '冻结提交',
 }
 

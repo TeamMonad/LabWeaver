@@ -48,7 +48,33 @@
                 </RouterLink>
               </li>
             </ul>
-            <p v-if="hiddenDeletedCount(data) > 0" class="section-hint">已隐藏 {{ hiddenDeletedCount(data) }} 个已删除的 Work。</p>
+            <details v-if="deletedEnvironments(data).length > 0" class="deleted-section" data-testid="deleted-work">
+              <summary>已删除的 Work（{{ deletedEnvironments(data).length }}）</summary>
+              <p class="section-hint">
+                删除后计算已停止，磁盘从计算确认停止起保留七天，期间可以打开 Work 恢复；保留期结束后平台自动永久清除磁盘。列表不包含磁盘保留状态，打开 Work 查看保留期限和能否恢复。
+              </p>
+              <ul class="work-list">
+                <li
+                  v-for="environment in deletedEnvironments(data)"
+                  :key="environment.id"
+                  class="work-row work-row--ended md-card"
+                  :data-environment-id="environment.id"
+                >
+                  <div class="work-row__main">
+                    <strong>{{ environment.displayLabel }}</strong>
+                    <span class="work-row__meta">
+                      {{ runtimeKindLabel(environment.runtimeKind) }} · 已删除，计算已停止 · 更新于 {{ formatTimestamp(environment.updatedAt) }}
+                    </span>
+                  </div>
+                  <RouterLink
+                    class="outlined-button small"
+                    :to="{ path: '/researcher/environments', query: { projectId, environmentId: environment.id } }"
+                  >
+                    查看磁盘保留
+                  </RouterLink>
+                </li>
+              </ul>
+            </details>
           </template>
         </AsyncStateView>
       </section>
@@ -379,8 +405,9 @@ function visibleEnvironments(items: EnvironmentSummary[]) {
   return items.filter((item) => item.observedState !== 'deleted')
 }
 
-function hiddenDeletedCount(items: EnvironmentSummary[]) {
-  return items.length - visibleEnvironments(items).length
+/** The summary carries no disk fact, so each deleted Work links to its detail for retention and restore. */
+function deletedEnvironments(items: EnvironmentSummary[]) {
+  return items.filter((item) => item.observedState === 'deleted')
 }
 
 function openById() {
@@ -405,6 +432,8 @@ function openById() {
 .work-row__meta { color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-body-small); }
 .work-row__meta--error { color: var(--md-sys-color-error); }
 .work-row--ended { grid-template-columns: minmax(0, 1fr) auto; }
+.deleted-section { display: grid; gap: var(--space-2); margin-top: var(--space-2); }
+.deleted-section > summary { cursor: pointer; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-large); }
 .work-row__actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .subsection-title { margin: var(--space-1) 0 0; color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-large); }
 .create-card { padding: var(--space-5); border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-large); }

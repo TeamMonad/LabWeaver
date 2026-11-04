@@ -900,6 +900,7 @@ export async function restartEnvironment() { return unsupportedResponse('重启�
 export async function deleteEnvironment() { return unsupportedResponse('删除环境') }
 export async function cancelEnvironmentOperation() { return unsupportedResponse('取消环境操作') }
 export async function retryEnvironment() { return unsupportedResponse('重试环境操作') }
+export async function recoverEnvironment() { return unsupportedResponse('恢复环境磁盘') }
 export async function revokeAccessGrant() { return unsupportedResponse('撤销访问授权') }
 export async function createResourceRequest() { return unsupportedResponse('创建资源申请') }
 export async function cancelResourceRequest() { return unsupportedResponse('取消资源申请') }

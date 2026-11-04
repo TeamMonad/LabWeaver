@@ -38,7 +38,7 @@ import {
 import { readActorId } from '../support/real-experiment.mjs'
 import { runTerminalCommandByUi, runTerminalCudaProbe } from '../support/real-gpu.mjs'
 import { approveResourceRequestByUi } from '../support/real-resource.mjs'
-import { confirmEnvironmentLifecycleByUi } from '../support/environment-lifecycle.mjs'
+import { confirmEnvironmentLifecycleByUi, deleteEnvironmentByUi, restoreEnvironmentByUi } from '../support/environment-lifecycle.mjs'
 import {
   createRealWorkSshIdentity,
   openPinnedSshSession,
@@ -1635,6 +1635,33 @@ test('checks access controls for an already reclaimed Work environment', async (
   }
 
   await assertConnectionBlockedAfterLeaseRevoke(page, projectId, { id: environmentId })
+})
+
+const RESTORE_CHECK_IDS = Object.freeze({
+  projectId: process.env.LABWEAVER_E2E_WORK_RESTORE_PROJECT_ID?.trim() ?? '',
+  environmentId: process.env.LABWEAVER_E2E_WORK_RESTORE_ENVIRONMENT_ID?.trim() ?? '',
+})
+const RESTORE_CHECK_VALUES = Object.values(RESTORE_CHECK_IDS)
+const RESTORE_CHECK_ENABLED = RESTORE_CHECK_VALUES.every(Boolean)
+if (RESTORE_CHECK_VALUES.some(Boolean) && !RESTORE_CHECK_ENABLED) {
+  throw new Error('LABWEAVER_E2E_WORK_RESTORE_IDS_INCOMPLETE')
+}
+if (RESTORE_CHECK_ENABLED && RESTORE_CHECK_VALUES.some((value) => !UUID.test(value))) {
+  throw new Error('LABWEAVER_E2E_WORK_RESTORE_IDS_INVALID')
+}
+
+test('restores a deleted Work disk inside its retention window and deletes it again without extending the window', async ({ page }) => {
+  test.skip(!RESTORE_CHECK_ENABLED, 'set LABWEAVER_E2E_WORK_RESTORE_PROJECT_ID and _ENVIRONMENT_ID to a deleted Work whose disk is retained')
+  const { projectId, environmentId } = RESTORE_CHECK_IDS
+  const restored = await restoreEnvironmentByUi(page, { routePrefix: 'researcher', projectId, environmentId, label: 'WORK_RESTORE' })
+  const panel = page.getByTestId('disk-retention')
+  await expect(panel).toHaveAttribute('data-disk-state', 'restored', { timeout: 120_000 })
+  await expect(panel.getByTestId('retention-steps')).toContainText('等待启动')
+
+  const deleted = await deleteEnvironmentByUi(page, { routePrefix: 'researcher', projectId, environmentId, label: 'WORK_RESTORE_DELETE' })
+  if (deleted?.diskRetention && deleted.diskRetention.expiresAt !== restored.diskRetention.expiresAt) {
+    throw new Error('WORK_RESTORE_DELETE_RETENTION_WINDOW_CHANGED')
+  }
 })
 
 test('continues finance verification for an already released exclusive Work run', async ({ page, browser, baseURL }) => {
