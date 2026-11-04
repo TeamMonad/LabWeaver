@@ -1008,13 +1008,15 @@ impl PgResourceStore {
                 // insert takes KEY SHARE locks for both foreign keys, so acquire the optional
                 // Lease lock first and keep every request/lease transaction in the same order.
                 let locked_lease = if let Some(lease_id) = lease_id {
-                    let lease_row = sqlx::query("SELECT l.request_id,l.state,COALESCE(c.compute_released,false) AS compute_released FROM resource.resource_leases l LEFT JOIN resource.capacity_claims c ON c.claim_id=l.claim_id WHERE l.lease_id=$1 FOR UPDATE OF l")
+                    let lease_row = sqlx::query("SELECT l.request_id,l.state,COALESCE(c.compute_released,false) AS compute_released,f.compute_retired_at FROM resource.resource_leases l LEFT JOIN resource.capacity_claims c ON c.claim_id=l.claim_id LEFT JOIN resource.environment_cleanup_fences f ON f.lease_id=l.lease_id WHERE l.lease_id=$1 FOR UPDATE OF l")
                     .bind(lease_id.as_uuid())
                     .fetch_optional(&mut *transaction)
                     .await?
                     .ok_or(ResourceStoreError::LeaseNotFound)?;
                     if lease_row.try_get::<bool, _>("compute_released")?
                         && input.kind == ResourceUsageKind::Compute
+                        && lease_row.try_get::<Option<time::OffsetDateTime>, _>("compute_retired_at")?
+                            .is_none_or(|retired| input.measured_until.get() > retired)
                     {
                         return Err(ResourceStoreError::UsageConflict);
                     }
@@ -1266,6 +1268,7 @@ impl PgResourceStore {
     /// Attempts one durable pending settlement. Missing rate configuration leaves the usage row
     /// pending so a later rate publication can settle it; no zero-value charge is synthesized.
     pub async fn settle_pending_usage_once(&self) -> Result<bool, ResourceStoreError> {
+        let retained_work = crate::environment_funding::settle_retained_storage_once(&self.pool).await?;
         let rows = sqlx::query(
             "SELECT usage_record_id, contract
              FROM resource.resource_usage_records
@@ -1276,9 +1279,9 @@ impl PgResourceStore {
         .fetch_all(&self.pool)
         .await?;
         if rows.is_empty() {
-            return Ok(false);
+            return Ok(retained_work);
         }
-        let mut did_work = false;
+        let mut did_work = retained_work;
         for row in rows {
             let usage_record_id: uuid::Uuid = row.try_get("usage_record_id")?;
             let usage = match decode_usage(row.try_get("contract")?) {

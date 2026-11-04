@@ -6920,23 +6920,27 @@ async fn retained_storage_migration_replays_on_real_postgres()
     Ok(())
 }
 
-#[tokio::test]
-async fn retained_disk_consumer_releases_compute_tracks_platform_cost_and_closes_once()
+async fn assert_retained_disk_consumer(reactivated: bool, arrears: bool)
 -> Result<(), Box<dyn std::error::Error>> {
     use contracts::environment::{
         EnvironmentDiskRetention, EnvironmentDiskState, EnvironmentRetainedStorageUsage,
         ObservedEnvironmentState, ResourceWorkCleanupStatus,
     };
     let (_container, pool) = migrated_pool().await?;
-    let (store, request, claim, lease, _actor) = work_handoff_fixture(&pool).await?;
+    let (store, request, claim, lease, actor) = work_handoff_fixture(&pool).await?;
     let claim = store
         .mark_capacity_handed_off(claim.id, claim.revision, lease.id, lease.revision)
         .await?;
-    let item = store
+    let mut item = store
         .next_active_environment_cleanup(None)
         .await?
         .ok_or("active cleanup")?;
     assert_eq!(item.claim.id, claim.id);
+    if arrears {
+        store.revoke_lease("arrears-cleanup", lease.id, lease.revision, "isolated arrears retention".into(), actor, "arrears-cleanup").await?;
+        item = store.next_lease_cleanup(actor).await?.ok_or("arrears cleanup")?;
+        item.claim = store.mark_capacity_releasing(item.claim.id, item.claim.revision).await?;
+    }
     let ResourceTarget::Environment { environment_id, .. } = request.target else {
         return Err("environment target".into());
     };
@@ -7043,27 +7047,40 @@ async fn retained_disk_consumer_releases_compute_tracks_platform_cost_and_closes
         Err(ResourceStoreError::CapacityReadbackInvalid)
     ));
     status.revision = Revision::new(4)?;
-    status.storage_purged = true;
-    status.cleanup_complete = true;
-    status.disk_retention.as_mut().ok_or("retention")?.state = EnvironmentDiskState::Purged;
-    status.disk_retention.as_mut().ok_or("retention")?.purged_at = Some(expires);
+    let closed_at = if reactivated {
+        let at = UtcTimestamp::from_utc(started.get() + time::Duration::seconds(5))?;
+        let disk = status.disk_retention.as_mut().ok_or("retention")?;
+        disk.state = EnvironmentDiskState::Restored;
+        disk.restored_generation = Some(2);
+        disk.reactivated_at = Some(at);
+        status.generation = 2;
+        status.compute_retired = false;
+        status.observed_state = ObservedEnvironmentState::Ready;
+        at
+    } else {
+        status.storage_purged = true;
+        status.cleanup_complete = true;
+        status.disk_retention.as_mut().ok_or("retention")?.state = EnvironmentDiskState::Purged;
+        status.disk_retention.as_mut().ok_or("retention")?.purged_at = Some(expires);
+        expires
+    };
     let usage = status.retained_storage_usage.as_mut().ok_or("storage")?;
     usage.closed = true;
-    usage.measured_until = expires;
+    usage.measured_until = closed_at;
     store
         .consume_environment_cleanup_status(&item, &status)
         .await?;
     store
         .consume_environment_cleanup_status(&item, &status)
         .await?;
-    assert_eq!(sqlx::query_as::<_, (bool,bool)>("SELECT compute_released,storage_released FROM resource.capacity_claims WHERE claim_id=$1").bind(claim.id.as_uuid()).fetch_one(&pool).await?, (true,true));
+    assert_eq!(sqlx::query_as::<_, (bool,bool)>("SELECT compute_released,storage_released FROM resource.capacity_claims WHERE claim_id=$1").bind(claim.id.as_uuid()).fetch_one(&pool).await?, (true,!reactivated));
     assert_eq!(
         sqlx::query_as::<_, (bool, time::OffsetDateTime)>(
             "SELECT closed,closed_at FROM resource.retained_storage_intervals"
         )
         .fetch_one(&pool)
         .await?,
-        (true, expires.get())
+        (true, closed_at.get())
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -7087,4 +7104,19 @@ async fn retained_disk_consumer_releases_compute_tracks_platform_cost_and_closes
         0
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn retained_disk_delete_purge_closes_once() -> Result<(), Box<dyn std::error::Error>> {
+    assert_retained_disk_consumer(false, false).await
+}
+
+#[tokio::test]
+async fn retained_disk_arrears_expiry_closes_once() -> Result<(), Box<dyn std::error::Error>> {
+    assert_retained_disk_consumer(false, true).await
+}
+
+#[tokio::test]
+async fn retained_disk_reactivated_boundary_closes_without_old_compute_grant() -> Result<(), Box<dyn std::error::Error>> {
+    assert_retained_disk_consumer(true, false).await
 }

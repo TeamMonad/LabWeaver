@@ -837,8 +837,24 @@ async fn retired_compute_rejects_old_grant_and_usage_without_billing() -> Result
             .await?
             .can_authorize_execution
     );
-    sqlx::query("UPDATE resource.capacity_claims SET compute_released=true WHERE claim_id=(SELECT claim_id FROM resource.resource_leases WHERE lease_id=$1)")
-        .bind(lease_id.as_uuid()).execute(&pool).await?;
+    let claim_id: Uuid = sqlx::query_scalar("SELECT claim_id FROM resource.resource_leases WHERE lease_id=$1").bind(lease_id.as_uuid()).fetch_one(&pool).await?;
+    let pending = store.refresh_provisioning_claim(claim_id.to_string().parse()?).await?.ok_or("provisioning")?;
+    store.mark_capacity_handed_off(pending.claim.id, pending.claim.revision, lease_id, pending.lease.revision).await?;
+    let item = store.next_active_environment_cleanup(None).await?.ok_or("cleanup")?;
+    let ResourceTarget::Environment { environment_id, .. } = request.target else { return Err("environment".into()); };
+    let status = contracts::environment::ResourceWorkCleanupStatus {
+        version: 1, environment_id, project_id: request.project_id, course_id: request.course_id,
+        owner_actor_id: request.requester_id, lease_id, lease_revision: item.lease.revision,
+        capacity_binding: item.claim.id.to_string(), revision: Revision::new(3)?,
+        observed_state: contracts::environment::ObservedEnvironmentState::Deleted,
+        cleanup_complete: false, generation: 1, compute_retired: true, storage_purged: false,
+        disk_retention: Some(contracts::environment::EnvironmentDiskRetention {
+            state: contracts::environment::EnvironmentDiskState::Retained,
+            started_at: from, expires_at: at(from, 7 * 24 * 3600)?, retired_generation: 1,
+            compute_retired_at: Some(from), restored_generation: None, reactivated_at: None, purged_at: None,
+        }), retained_storage_usage: None, diagnostic_code: None,
+    };
+    store.consume_environment_cleanup_status(&item, &status).await?;
     assert!(
         !store
             .environment_credit_grant(OWNER, lease_id)

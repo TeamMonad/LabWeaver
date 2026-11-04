@@ -62,6 +62,11 @@ pub(crate) async fn fund_window(
     initial: bool,
 ) -> Result<(), ResourceStoreError> {
     let (claim, approval) = original_approval(tx, request, lease).await?;
+    let compute_released: bool = sqlx::query_scalar("SELECT compute_released FROM resource.capacity_claims WHERE claim_id=$1")
+        .bind(claim.id.as_uuid()).fetch_one(&mut **tx).await?;
+    if compute_released {
+        return Err(ResourceStoreError::UsageConflict);
+    }
     if !matches!(
         claim.state,
         CapacityClaimState::Provisioning
@@ -432,6 +437,7 @@ impl PgResourceStore {
     }
 }
 
+#[allow(clippy::too_many_lines, reason = "receipt fence, independent release and retained watermark commit together")]
 pub(crate) async fn consume_cleanup_status(
     pool: &sqlx::PgPool,
     expected: &crate::store::ProvisioningCapacityClaim,
@@ -509,7 +515,7 @@ pub(crate) async fn consume_cleanup_status(
                 .bind(usage.measured_until.get()).bind(i64::try_from(usage.storage_bytes)?)
                 .bind(interval_closed).bind(closed_at).execute(&mut *tx).await?;
             match price_retained_interval(&mut tx, environment_id.as_uuid(), usage.started_at.get()).await {
-                Ok(_) | Err(ResourceStoreError::RateUnconfigured) => {},
+                Ok(()) | Err(ResourceStoreError::RateUnconfigured) => {},
                 Err(error) => return Err(error),
             }
         }
@@ -588,4 +594,17 @@ async fn price_retained_interval(
         .bind(environment_id).bind(started_at).bind(until).bind(from)
         .execute(&mut **tx).await?;
     Ok(())
+}
+
+pub(crate) async fn settle_retained_storage_once(pool: &sqlx::PgPool) -> Result<bool, ResourceStoreError> {
+    let mut tx = pool.begin().await?;
+    crate::costing::rate_lock(&mut tx).await?;
+    let row = sqlx::query("SELECT environment_id,started_at FROM resource.retained_storage_intervals WHERE priced_until<LEAST(measured_until,COALESCE(closed_at,measured_until)) ORDER BY priced_until,environment_id LIMIT 1 FOR UPDATE SKIP LOCKED")
+        .fetch_optional(&mut *tx).await?;
+    let Some(row) = row else { tx.commit().await?; return Ok(false); };
+    match price_retained_interval(&mut tx, row.try_get("environment_id")?, row.try_get("started_at")?).await {
+        Ok(()) => { tx.commit().await?; Ok(true) },
+        Err(ResourceStoreError::RateUnconfigured) => { tx.commit().await?; Ok(false) },
+        Err(error) => { tx.rollback().await?; Err(error) },
+    }
 }
