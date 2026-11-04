@@ -4,6 +4,9 @@ use contracts::http::{ManualWorkTemplateRequest, ProjectAgentCapability};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+#[path = "environment_restore_funding.rs"]
+mod restore_funding;
+
 fn manual_runtime_options() -> TestResult<contracts::manual_templates::ManualTemplateRuntimeOptions>
 {
     Ok(serde_json::from_value(serde_json::json!({"providers":[

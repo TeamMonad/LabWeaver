@@ -198,7 +198,7 @@ async fn begin(
     .await?)
 }
 
-async fn verified(
+pub(super) async fn verified(
     pool: &PgPool,
     state: PlatformConfigurationStatus,
     now: UtcTimestamp,

@@ -1,0 +1,51 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "EnvironmentId": {
+      "description": "Strongly typed UUIDv7 identifier for `EnvironmentId`.",
+      "type": "string"
+    },
+    "LeaseId": {
+      "description": "Strongly typed UUIDv7 identifier for `LeaseId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Environment requests fresh funding after restoring a retained disk, before starting compute.\nThe restored generation remains stopped; its next compute generation consumes this funding.",
+  "properties": {
+    "environmentId": {
+      "$ref": "#/$defs/EnvironmentId"
+    },
+    "leaseId": {
+      "$ref": "#/$defs/LeaseId"
+    },
+    "projectId": {
+      "$ref": "#/$defs/ProjectId"
+    },
+    "requesterId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "restoredGeneration": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "leaseId",
+    "environmentId",
+    "projectId",
+    "requesterId",
+    "restoredGeneration"
+  ],
+  "title": "RestoreEnvironmentFundingRequest",
+  "type": "object"
+}

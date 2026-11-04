@@ -135,7 +135,7 @@ identity_service_role_assignments: # noqa: var-naming[no-role-prefix]
     roles: [resource.environment.manage]
   - caller: labweaver-environment
     target: labweaver-resource
-    roles: [resource.usage.record, resource.environment.resolve, resource.environment.release]
+    roles: [resource.usage.record, resource.environment.resolve, resource.environment.release, resource.credits.hold]
   - caller: labweaver-environment
     target: labweaver-environment
     roles: [environment.console.execute]

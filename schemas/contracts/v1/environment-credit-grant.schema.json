@@ -403,7 +403,7 @@
       "$ref": "#/$defs/ResourceApprovalId"
     },
     "canAuthorizeExecution": {
-      "description": "Only a current active lease and known, unexpired original funds authorize new execution.",
+      "description": "Only a current active lease and known, unexpired current-epoch funds authorize execution.",
       "type": "boolean"
     },
     "claimId": {
@@ -411,7 +411,7 @@
     },
     "coveredFrom": {
       "$ref": "#/$defs/UtcTimestamp",
-      "description": "Start of the continuous total coverage, unchanged by renewals."
+      "description": "Start of continuous coverage within the current funding epoch, unchanged by renewals."
     },
     "coveredUntil": {
       "$ref": "#/$defs/UtcTimestamp",

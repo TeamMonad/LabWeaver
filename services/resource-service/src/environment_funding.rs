@@ -13,6 +13,8 @@ use contracts::{LeaseId, Revision, UtcTimestamp};
 use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
 
+mod restore;
+
 async fn original_approval(
     tx: &mut Transaction<'_, Postgres>,
     request: &ResourceRequest,
@@ -228,7 +230,7 @@ async fn cumulative_funding_amount(
 ) -> Result<FixedDecimal, ResourceStoreError> {
     use contracts::resource::{Money, ResourceChargeLine};
     use std::collections::{BTreeMap, btree_map::Entry};
-    let rows=sqlx::query("SELECT line-'quantity'-'amount' AS dimensions,sum((line->>'quantity')::numeric)::text AS quantity FROM resource.environment_credit_windows w CROSS JOIN LATERAL jsonb_array_elements(w.estimate->'lines') line WHERE w.lease_id=$1 GROUP BY line-'quantity'-'amount'")
+    let rows=sqlx::query("SELECT line-'quantity'-'amount' AS dimensions,sum((line->>'quantity')::numeric)::text AS quantity FROM resource.environment_credit_windows w CROSS JOIN LATERAL jsonb_array_elements(w.estimate->'lines') line WHERE w.lease_id=$1 AND w.hold_id=(SELECT hold_id FROM resource.environment_credit_windows WHERE lease_id=$1 ORDER BY lease_revision DESC LIMIT 1) GROUP BY line-'quantity'-'amount'")
         .bind(lease.as_uuid()).fetch_all(&mut **tx).await?;
     let mut snapshots = Vec::with_capacity(rows.len() + latest.lines.len());
     for row in rows {
@@ -316,7 +318,7 @@ impl PgResourceStore {
         lease_id: LeaseId,
     ) -> Result<EnvironmentCreditGrant, ResourceStoreError> {
         let mut tx = self.pool().begin().await?;
-        let row=sqlx::query("SELECT w.*,l.contract AS lease_contract,(SELECT min(covered_from) FROM resource.environment_credit_windows WHERE lease_id=w.lease_id) AS initial_from,NOT EXISTS(SELECT 1 FROM resource.environment_cleanup_fences f WHERE f.lease_id=w.lease_id AND f.compute_released) AS compute_not_released FROM resource.environment_credit_windows w JOIN resource.resource_leases l USING(lease_id) WHERE w.lease_id=$1 ORDER BY w.lease_revision DESC LIMIT 1").bind(lease_id.as_uuid()).fetch_optional(&mut *tx).await?.ok_or(ResourceStoreError::NotFound)?;
+        let row=sqlx::query("SELECT w.*,l.contract AS lease_contract,(SELECT min(covered_from) FROM resource.environment_credit_windows WHERE lease_id=w.lease_id AND hold_id=w.hold_id) AS initial_from,(NOT EXISTS(SELECT 1 FROM resource.environment_cleanup_fences f WHERE f.lease_id=w.lease_id AND f.compute_released) OR EXISTS(SELECT 1 FROM resource.environment_restore_funding rf JOIN resource.environment_cleanup_fences f USING(lease_id) WHERE rf.lease_id=w.lease_id AND rf.hold_id=w.hold_id AND rf.execution_generation>=f.generation AND NOT f.storage_purged)) AS compute_not_released FROM resource.environment_credit_windows w JOIN resource.resource_leases l USING(lease_id) WHERE w.lease_id=$1 ORDER BY w.lease_revision DESC LIMIT 1").bind(lease_id.as_uuid()).fetch_optional(&mut *tx).await?.ok_or(ResourceStoreError::NotFound)?;
         let lease: ResourceLease = serde_json::from_value(row.try_get("lease_contract")?)?;
         lease.validate()?;
         let hold = actual_hold(&mut tx, row.try_get("hold_id")?).await?;
@@ -558,6 +560,21 @@ pub(crate) async fn consume_cleanup_status(
         sqlx::query("UPDATE resource.capacity_claims SET compute_released=compute_released OR $2,storage_released=storage_released OR $3 WHERE claim_id=$1")
             .bind(expected.claim.id.as_uuid()).bind(status.compute_retired).bind(status.storage_purged)
             .execute(&mut *tx).await?;
+        // Reactivation closes the old platform interval above, but only a receipt carrying the
+        // admitted execution generation AND lease revision may lift the compute-release fence.
+        if !status.compute_retired && !status.storage_purged
+            && status.disk_retention.as_ref().is_some_and(|disk| disk.reactivated_at.is_some())
+        {
+            let funded: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource.environment_restore_funding WHERE lease_id=$1 AND execution_generation=$2 AND lease_revision=$3)")
+                .bind(expected.lease.id.as_uuid()).bind(i64::try_from(status.generation)?)
+                .bind(i64::try_from(status.lease_revision.get())?).fetch_one(&mut *tx).await?;
+            if funded {
+                sqlx::query("UPDATE resource.environment_cleanup_fences SET compute_released=false WHERE lease_id=$1")
+                    .bind(expected.lease.id.as_uuid()).execute(&mut *tx).await?;
+                sqlx::query("UPDATE resource.capacity_claims SET compute_released=false WHERE claim_id=$1")
+                    .bind(expected.claim.id.as_uuid()).execute(&mut *tx).await?;
+            }
+        }
         if status.compute_retired {
             sqlx::query("UPDATE resource.gpu_capacity_reservations SET state='released',released_at=COALESCE(released_at,$2) WHERE claim_id=$1 AND state='reserved'")
                 .bind(expected.claim.id.as_uuid()).bind(now).execute(&mut *tx).await?;

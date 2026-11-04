@@ -2602,12 +2602,192 @@ export type CsrfTokenResponseSchemaActorId = string;
 export type CsrfTokenResponseSchemaUtcTimestamp = string;
 
 /**
+ * EnvironmentCreditGrant
+ *
+ * Financial facts for the configured Environment owner; this is not a second runtime grant.
+ */
+export type EnvironmentCreditGrantSchema = {
+    approvalId: ResourceApprovalId;
+    /**
+     * Only a current active lease and known, unexpired current-epoch funds authorize execution.
+     */
+    canAuthorizeExecution: boolean;
+    claimId: CapacityClaimId;
+    /**
+     * Start of continuous coverage within the current funding epoch, unchanged by renewals.
+     */
+    coveredFrom: EnvironmentCreditGrantSchemaUtcTimestamp;
+    /**
+     * End of the continuous total coverage after the latest funded renewal.
+     */
+    coveredUntil: EnvironmentCreditGrantSchemaUtcTimestamp;
+    /**
+     * The most recently funded initial or additional interval, with original rate versions.
+     */
+    estimate: ResourceCostEstimate;
+    hold: EnvironmentCreditGrantSchemaCreditHold;
+    leaseId: EnvironmentCreditGrantSchemaLeaseId;
+    leaseRevision: EnvironmentCreditGrantSchemaRevision;
+    requestId: EnvironmentCreditGrantSchemaResourceRequestId;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `BuildRequestId`.
+ */
+export type EnvironmentCreditGrantSchemaBuildRequestId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CapacityClaimId`.
+ */
+export type CapacityClaimId = string;
+
+export type EnvironmentCreditGrantSchemaCreditHold = {
+    amount: EnvironmentCreditGrantSchemaFixedDecimal;
+    buildAttempt?: number | null;
+    buildRequestId?: EnvironmentCreditGrantSchemaBuildRequestId | null;
+    businessKey: string;
+    createdAt: EnvironmentCreditGrantSchemaUtcTimestamp;
+    expiredUnknownAt?: EnvironmentCreditGrantSchemaUtcTimestamp | null;
+    id: string;
+    measurementUnknown: boolean;
+    modelCallId?: string | null;
+    modelRateSnapshot?: Array<EnvironmentCreditGrantSchemaModelRateSnapshot> | null;
+    ownerClientId: string;
+    projectId: EnvironmentCreditGrantSchemaProjectId;
+    reason?: string | null;
+    reconciliationDueAt?: EnvironmentCreditGrantSchemaUtcTimestamp | null;
+    remaining: EnvironmentCreditGrantSchemaFixedDecimal;
+    requestId?: EnvironmentCreditGrantSchemaResourceRequestId | null;
+    state: EnvironmentCreditGrantSchemaCreditHoldState;
+    unknownSince?: EnvironmentCreditGrantSchemaUtcTimestamp | null;
+};
+
+export type EnvironmentCreditGrantSchemaCreditHoldState = 'pending' | 'unknown' | 'settled' | 'released';
+
+/**
+ * Canonical signed decimal with exactly six fractional digits.
+ *
+ * Decimal values cross the API as strings so JavaScript clients and SQL
+ * drivers cannot round monetary values through binary floating point. The
+ * internal scaled representation is available to Resource arithmetic without
+ * introducing a database-specific decimal dependency into the contracts crate.
+ */
+export type EnvironmentCreditGrantSchemaFixedDecimal = string;
+
+/**
+ * A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.
+ */
+export type GpuRequest = {
+    class: string;
+    count: number;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `LeaseId`.
+ */
+export type EnvironmentCreditGrantSchemaLeaseId = string;
+
+export type EnvironmentCreditGrantSchemaModelRateSnapshot = {
+    rateId: EnvironmentCreditGrantSchemaRateId;
+    rateRevision: EnvironmentCreditGrantSchemaRevision;
+    unit: EnvironmentCreditGrantSchemaResourceBillingUnit;
+};
+
+/**
+ * A fixed-precision amount with an explicit ISO-4217-like currency code.
+ */
+export type EnvironmentCreditGrantSchemaMoney = {
+    amount: EnvironmentCreditGrantSchemaFixedDecimal;
+    currency: string;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type EnvironmentCreditGrantSchemaProjectId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `RateId`.
+ */
+export type EnvironmentCreditGrantSchemaRateId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ResourceApprovalId`.
+ */
+export type ResourceApprovalId = string;
+
+/**
+ * Resource dimension used by a versioned rate card.
+ */
+export type EnvironmentCreditGrantSchemaResourceBillingUnit = 'cpu_millicore_second' | 'memory_byte_second' | 'storage_byte_second' | 'gpu_unit_second' | 'build_second' | 'llm_input_token' | 'llm_output_token' | 'llm_cache_read_token' | 'llm_cache_write_token';
+
+/**
+ * One immutable line in a calculated charge.
+ */
+export type EnvironmentCreditGrantSchemaResourceChargeLine = {
+    amount: EnvironmentCreditGrantSchemaMoney;
+    quantity: number;
+    quantityDivisor?: 1 | 1000;
+    rateId: EnvironmentCreditGrantSchemaRateId;
+    rateRevision: EnvironmentCreditGrantSchemaRevision;
+    unit: EnvironmentCreditGrantSchemaResourceBillingUnit;
+    unitPrice: EnvironmentCreditGrantSchemaMoney;
+    unitQuantity: number;
+};
+
+/**
+ * Calculated lines retain the exact rate IDs, revisions, prices and quantity divisors.
+ */
+export type ResourceCostEstimate = {
+    input: ResourceCostEstimateRequest;
+    lines: Array<EnvironmentCreditGrantSchemaResourceChargeLine>;
+    projectId: EnvironmentCreditGrantSchemaProjectId;
+    total: EnvironmentCreditGrantSchemaMoney;
+};
+
+/**
+ * Half-open compute and storage intervals are independent, even when they overlap.
+ */
+export type ResourceCostEstimateRequest = {
+    computeFrom: EnvironmentCreditGrantSchemaUtcTimestamp;
+    computeUntil: EnvironmentCreditGrantSchemaUtcTimestamp;
+    resources: WorkloadResources;
+    storageFrom: EnvironmentCreditGrantSchemaUtcTimestamp;
+    storageUntil: EnvironmentCreditGrantSchemaUtcTimestamp;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ResourceRequestId`.
+ */
+export type EnvironmentCreditGrantSchemaResourceRequestId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type EnvironmentCreditGrantSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type EnvironmentCreditGrantSchemaUtcTimestamp = string;
+
+/**
+ * Requested or approved workload resources, independent of Kubernetes quantity syntax.
+ */
+export type WorkloadResources = {
+    cpuMillicores: number;
+    gpu?: GpuRequest | null;
+    memoryBytes: number;
+    storageBytes: number;
+};
+
+/**
  * EnvironmentDetail
  *
  * Public detail response: the persisted instance plus current connection preparation facts.
  */
 export type EnvironmentDetailSchema = {
-    approvedResources: WorkloadResources;
+    approvedResources: EnvironmentDetailSchemaWorkloadResources;
     capacityBinding?: string | null;
     class: EnvironmentDetailSchemaEnvironmentClass;
     cleanupEvidence?: EnvironmentDetailSchemaArtifactRef | null;
@@ -2784,7 +2964,7 @@ export type EnvironmentLeaseAuthorization = {
     /**
      * The exact Resource-approved limits Environment must apply to its workload.
      */
-    approvedResources: WorkloadResources;
+    approvedResources: EnvironmentDetailSchemaWorkloadResources;
     capacityBinding: string;
     courseId?: EnvironmentDetailSchemaCourseId | null;
     environmentId: EnvironmentDetailSchemaEnvironmentId;
@@ -2884,7 +3064,7 @@ export type GpuCatalogEntryId = string;
 /**
  * A policy-catalogued GPU class. It intentionally does not expose Kubernetes resource names.
  */
-export type GpuRequest = {
+export type EnvironmentDetailSchemaGpuRequest = {
     class: string;
     count: number;
 };
@@ -3052,9 +3232,9 @@ export type WorkTemplateUpgradeDataPolicy = 'preserve_workspace';
 /**
  * Requested or approved workload resources, independent of Kubernetes quantity syntax.
  */
-export type WorkloadResources = {
+export type EnvironmentDetailSchemaWorkloadResources = {
     cpuMillicores: number;
-    gpu?: GpuRequest | null;
+    gpu?: EnvironmentDetailSchemaGpuRequest | null;
     memoryBytes: number;
     storageBytes: number;
 };
@@ -13878,7 +14058,7 @@ export type ResourceCostEstimateRequestSchemaWorkloadResources = {
  * Calculated lines retain the exact rate IDs, revisions, prices and quantity divisors.
  */
 export type ResourceCostEstimateSchema = {
-    input: ResourceCostEstimateRequest;
+    input: ResourceCostEstimateSchemaResourceCostEstimateRequest;
     lines: Array<ResourceCostEstimateSchemaResourceChargeLine>;
     projectId: ResourceCostEstimateSchemaProjectId;
     total: ResourceCostEstimateSchemaMoney;
@@ -13942,7 +14122,7 @@ export type ResourceCostEstimateSchemaResourceChargeLine = {
 /**
  * Half-open compute and storage intervals are independent, even when they overlap.
  */
-export type ResourceCostEstimateRequest = {
+export type ResourceCostEstimateSchemaResourceCostEstimateRequest = {
     computeFrom: ResourceCostEstimateSchemaUtcTimestamp;
     computeUntil: ResourceCostEstimateSchemaUtcTimestamp;
     resources: ResourceCostEstimateSchemaWorkloadResources;
@@ -13977,7 +14157,7 @@ export type ResourceCostEstimateSchemaWorkloadResources = {
  */
 export type ResourceLeaseSchema = {
     activeFrom?: ResourceLeaseSchemaUtcTimestamp | null;
-    claimId: CapacityClaimId;
+    claimId: ResourceLeaseSchemaCapacityClaimId;
     createdAt: ResourceLeaseSchemaUtcTimestamp;
     expiresAt?: ResourceLeaseSchemaUtcTimestamp | null;
     id: ResourceLeaseSchemaLeaseId;
@@ -13991,7 +14171,7 @@ export type ResourceLeaseSchema = {
 /**
  * Strongly typed UUIDv7 identifier for `CapacityClaimId`.
  */
-export type CapacityClaimId = string;
+export type ResourceLeaseSchemaCapacityClaimId = string;
 
 /**
  * Strongly typed UUIDv7 identifier for `LeaseId`.
@@ -21493,6 +21673,74 @@ export type AppendProjectEnvironmentCandidateDecisionResponses = {
 };
 
 export type AppendProjectEnvironmentCandidateDecisionResponse = AppendProjectEnvironmentCandidateDecisionResponses[keyof AppendProjectEnvironmentCandidateDecisionResponses];
+
+export type GetProjectEnvironmentCreditGrantData = {
+    body?: never;
+    path: {
+        projectId: string;
+        leaseId: string;
+    };
+    query?: never;
+    url: '/api/v1/projects/{projectId}/environment-credit-grants/{leaseId}';
+};
+
+export type GetProjectEnvironmentCreditGrantErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetProjectEnvironmentCreditGrantError = GetProjectEnvironmentCreditGrantErrors[keyof GetProjectEnvironmentCreditGrantErrors];
+
+export type GetProjectEnvironmentCreditGrantResponses = {
+    /**
+     * Successful response
+     */
+    200: EnvironmentCreditGrantSchema;
+};
+
+export type GetProjectEnvironmentCreditGrantResponse = GetProjectEnvironmentCreditGrantResponses[keyof GetProjectEnvironmentCreditGrantResponses];
 
 export type ListEnvironmentTemplateReleasesData = {
     body?: never;

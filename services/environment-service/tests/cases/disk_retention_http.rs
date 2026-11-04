@@ -161,6 +161,8 @@ pub(super) async fn recovery_http_cases(
             assert_eq!(store.load(before.id).await?.revision, before.revision);
             continue;
         }
+        // This fixture has no Resource lease, so restore has nothing to re-fund here. The
+        // signed HTTP/PG restore-funding journey is covered by Control's production-role tests.
         assert_eq!(response.0, StatusCode::ACCEPTED, "{mode}: {:?}", response.1);
         let after = store.load(before.id).await?;
         assert_eq!(

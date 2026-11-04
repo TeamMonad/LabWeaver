@@ -2423,6 +2423,114 @@
         "x-labweaver-timeout-ms": 30000
       }
     },
+    "/internal/v1/environment-restore-funding": {
+      "post": {
+        "description": "Environment-only fresh funding for a restored stopped generation. Rechecks current membership, runtime policy, original approval window and project Credits, creates exactly one new current-rate hold per lease/restoredGeneration, and binds the next compute generation to a new lease revision. Replays still recheck authorization; different bodies conflict.",
+        "operationId": "restoreEnvironmentFunding",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/restore-environment-funding-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/environment-credit-grant.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "serviceJwt": [
+              "resource.credits.hold"
+            ]
+          }
+        ],
+        "summary": "restoreEnvironmentFunding",
+        "x-labweaver-allowed-roles": [
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_RESOURCE_APPROVAL_INVALID",
+          "LW_RUNTIME_SCOPE_DENIED",
+          "LW_CREDITS_SCOPE_DENIED",
+          "LW_CREDITS_INSUFFICIENT",
+          "LW_CREDITS_CONFLICT",
+          "LW_RESOURCE_SCOPE_CONFLICT",
+          "LW_RESOURCE_USAGE_CONFLICT",
+          "LW_RESOURCE_RATE_UNCONFIGURED",
+          "LW_RESOURCE_GPU_CAPACITY_EXHAUSTED"
+        ],
+        "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-permission": "resource.credits.hold",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": false,
+        "x-labweaver-scope": "service",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
     "/internal/v1/environment-runtime-authorization": {
       "post": {
         "description": "Permission: resource.environment.resolve. Timeout: 30000 ms. Cancellable: false. Retryable: false. v1 permits additive endpoints and optional response fields only.",

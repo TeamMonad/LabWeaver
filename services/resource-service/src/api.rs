@@ -136,6 +136,10 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
         .merge(credits::public_routes())
         .merge(costing::public_routes())
         .merge(build_costing::public_routes())
+        .route(
+            "/api/v1/projects/{project_id}/environment-credit-grants/{lease_id}",
+            get(environment_funding::project_record),
+        )
         .route("/api/v1/resource-requests", post(create_request))
         .route("/api/v1/resource-requests", get(list_requests))
         .route(
@@ -208,6 +212,10 @@ pub fn resource_api_router(state: ResourceApiState) -> Router {
         .route(
             "/internal/v1/environment-credit-grants/{lease_id}",
             get(environment_funding::record),
+        )
+        .route(
+            "/internal/v1/environment-restore-funding",
+            post(environment_funding::restore),
         )
         .route(
             "/internal/v1/environment-runtime-authorization",
@@ -1402,6 +1410,9 @@ fn internal_route_permission(path: &str) -> Option<&'static str> {
     }
     if path.starts_with("/internal/v1/credits/model/") && path.ends_with("/settle") {
         return Some("resource.usage.record");
+    }
+    if path == "/internal/v1/environment-restore-funding" {
+        return Some("resource.credits.hold");
     }
     if path.starts_with("/internal/v1/environment-credit-grants/") {
         return Some("resource.environment.resolve");

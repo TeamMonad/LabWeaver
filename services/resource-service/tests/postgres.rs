@@ -123,6 +123,7 @@ async fn resource_migrations_preserve_pending_terminal_lease_and_claim_quota_inv
         include_str!("../../../migrations/resource/0024_resource_list_ordinals.sql"),
         include_str!("../../../migrations/resource/0025_gpu_observation_generations.sql"),
         include_str!("../../../migrations/resource/0026_retained_storage_consumer.sql"),
+        include_str!("../../../migrations/resource/0027_environment_restore_funding.sql"),
     ] {
         sqlx::raw_sql(migration).execute(&pool).await?;
     }
@@ -2299,6 +2300,11 @@ async fn resource_migration_backfills_cpu_only_experiment_and_canonicalizes_usag
     .await?;
     sqlx::raw_sql(include_str!(
         "../../../migrations/resource/0026_retained_storage_consumer.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0027_environment_restore_funding.sql"
     ))
     .execute(&pool)
     .await?;
@@ -4869,6 +4875,11 @@ async fn migrated_pool()
     .await?;
     sqlx::raw_sql(include_str!(
         "../../../migrations/resource/0026_retained_storage_consumer.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/resource/0027_environment_restore_funding.sql"
     ))
     .execute(&pool)
     .await?;

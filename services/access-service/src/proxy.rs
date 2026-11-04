@@ -1181,6 +1181,30 @@ async fn authorize_resource_request(
             .await?;
             return Ok("getProjectBuildCost");
         }
+        [
+            "",
+            "api",
+            "v1",
+            "projects",
+            project_id,
+            "environment-credit-grants",
+            lease_id,
+        ] if *method == Method::GET => {
+            let project_id = project_id
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            lease_id
+                .parse::<contracts::LeaseId>()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            authorize_resource_scope(
+                state,
+                session,
+                contracts::AuthorizationScope::Project { project_id },
+                "getProjectEnvironmentCreditGrant",
+            )
+            .await?;
+            return Ok("getProjectEnvironmentCreditGrant");
+        }
         ["", "api", "v1", "projects", project_id, "credits"] if *method == Method::GET => {
             let project_id = project_id
                 .parse()
@@ -2937,6 +2961,15 @@ fn valid_resource_path(path: &str) -> bool {
                 "v1",
                 "projects",
                 _,
+                "environment-credit-grants",
+                _
+            ]
+            | [
+                "",
+                "api",
+                "v1",
+                "projects",
+                _,
                 "credits",
                 "ledger" | "holds"
             ]
@@ -3328,6 +3361,12 @@ mod tests {
         ));
         assert!(valid_resource_path(
             "/api/v1/projects/01900000-0000-7000-8000-000000000001/resource-leases"
+        ));
+        assert!(valid_resource_path(
+            "/api/v1/projects/01900000-0000-7000-8000-000000000001/environment-credit-grants/01900000-0000-7000-8000-000000000002"
+        ));
+        assert!(!valid_resource_path(
+            "/internal/v1/environment-restore-funding"
         ));
         assert!(valid_resource_path("/api/v1/resource/gpu-catalog"));
         assert!(valid_resource_path("/api/v1/resource/rates"));

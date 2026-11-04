@@ -4259,6 +4259,20 @@ pub const OPERATIONS: &[OperationContract] = &[
         Project
     ),
     op!(
+        Public,
+        Get,
+        "/api/v1/projects/{projectId}/environment-credit-grants/{leaseId}",
+        "getProjectEnvironmentCreditGrant",
+        "credits:read",
+        BffSession,
+        None,
+        200,
+        false,
+        false,
+        ALL_ROLES,
+        Project
+    ),
+    op!(
         GatewayInternal,
         Get,
         "/internal/v1/environment-credit-grants/{leaseId}",
@@ -4266,6 +4280,20 @@ pub const OPERATIONS: &[OperationContract] = &[
         "resource.environment.resolve",
         ServiceJwt,
         None,
+        200,
+        false,
+        false,
+        PLATFORM_ADMIN,
+        Service
+    ),
+    op!(
+        GatewayInternal,
+        Post,
+        "/internal/v1/environment-restore-funding",
+        "restoreEnvironmentFunding",
+        "resource.credits.hold",
+        ServiceJwt,
+        IdempotentCreate,
         200,
         false,
         false,

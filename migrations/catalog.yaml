@@ -323,3 +323,6 @@ domains:
       - id: 26
         file: resource/0026_retained_storage_consumer.sql
         sha256: c4821324fb032102176aa06f65afea06bca4df1f94f47e92a8dd3ce0133ba7a6
+      - id: 27
+        file: resource/0027_environment_restore_funding.sql
+        sha256: b28a319677b5a195d17a2d9a48d4fac837865aea2772355bfad995ad2d4e6da3

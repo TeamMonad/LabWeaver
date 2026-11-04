@@ -719,7 +719,7 @@ pub(crate) async fn settle_metered_charge(
     let Some(request_id) = usage.target.request_id() else {
         return Ok(());
     };
-    let row=sqlx::query("SELECT hold_id,owner_client_id FROM resource.credit_holds WHERE request_id=$1 AND business_key='metered-usage'").bind(request_id.as_uuid()).fetch_optional(&mut **tx).await?;
+    let row = usage_hold(tx, request_id, usage).await?;
     let Some(row) = row else {
         return Ok(());
     };
@@ -793,7 +793,7 @@ pub(crate) async fn observe_unknown_usage(
     let Some(request_id) = usage.target.request_id() else {
         return Ok(());
     };
-    let row=sqlx::query("SELECT hold_id,owner_client_id FROM resource.credit_holds WHERE request_id=$1 AND business_key='metered-usage'").bind(request_id.as_uuid()).fetch_optional(&mut **tx).await?;
+    let row = usage_hold(tx, request_id, usage).await?;
     let Some(row) = row else {
         return Ok(());
     };
@@ -812,6 +812,17 @@ pub(crate) async fn observe_unknown_usage(
     )
     .await?;
     Ok(())
+}
+
+/// Late observations retain their original hold; restored compute never spends the retired hold.
+async fn usage_hold(
+    tx: &mut Tx<'_>,
+    request_id: contracts::ResourceRequestId,
+    usage: &contracts::resource::ResourceUsageRecord,
+) -> Result<Option<sqlx::postgres::PgRow>, CreditError> {
+    Ok(sqlx::query("SELECT hold_id,owner_client_id FROM resource.credit_holds WHERE request_id=$1 AND hold_id=COALESCE((SELECT hold_id FROM resource.environment_credit_windows WHERE lease_id=$2 AND covered_from<=$3 ORDER BY lease_revision DESC LIMIT 1),(SELECT hold_id FROM resource.credit_holds WHERE request_id=$1 AND business_key='metered-usage'))")
+        .bind(request_id.as_uuid()).bind(usage.target.lease_id().map(contracts::LeaseId::as_uuid))
+        .bind(usage.measured_from.get()).fetch_optional(&mut **tx).await?)
 }
 
 /// Shared atomic entry used by Resource-priced holds.
