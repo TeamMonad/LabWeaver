@@ -4,7 +4,7 @@ use contracts::http::IdempotencyKey;
 use contracts::{ActorId, AuthenticatedActor, CourseId, PlatformRole, ProjectId, ReleaseId, UtcTimestamp};
 use control_service::ControlService;
 use persistence_sqlx::Sha256Digest;
-
+use uuid::Uuid;
 #[allow(dead_code)]
 #[path = "../support/production_roles.rs"]
 mod production_roles;
@@ -52,9 +52,9 @@ async fn experiment_create_permissions_and_group_policy_are_enforced() -> TestRe
     assert_eq!(service.experiment_groups(&other_student, course, experiment.id).await?.len(), 1);
     let replay = service.create_experiment_group(&teacher, course, experiment.id, &group_request, &IdempotencyKey::parse("group-create")?).await?;
     assert_eq!(replay.group.id, group.group.id);
-    let conflict = CreateExperimentGroupRequest { payer_project_id: ProjectId::new(), ..group_request };
+    let conflict = CreateExperimentGroupRequest { payer_project_id: ProjectId::new(), ..group_request.clone() };
     assert!(matches!(service.create_experiment_group(&teacher, course, experiment.id, &conflict, &IdempotencyKey::parse("group-create")?).await, Err(control_service::ControlError::IdempotencyConflict)));
-    let missing_consent = CreateExperimentGroupRequest { payer_consent: false, ..group_request };
+    let missing_consent = CreateExperimentGroupRequest { payer_consent: false, ..group_request.clone() };
     assert!(matches!(service.create_experiment_group(&teacher, course, experiment.id, &missing_consent, &IdempotencyKey::parse("missing-consent")?).await, Err(control_service::ControlError::ContractInvalid)));
     let payer_not_member = CreateExperimentGroupRequest { payer_actor_id: ta.actor_id, member_actor_ids: vec![student.actor_id], ..group_request };
     assert!(matches!(service.create_experiment_group(&teacher, course, experiment.id, &payer_not_member, &IdempotencyKey::parse("payer-not-member")?).await, Err(control_service::ControlError::ContractInvalid)));
@@ -77,12 +77,17 @@ async fn payer_binding_is_immutable_while_membership_changes() -> TestResult {
     let roles = production_roles::ProductionRoles::start().await?;
     let pool = roles.control.clone();
     let course_id = Uuid::now_v7(); let experiment_id = Uuid::now_v7(); let group_id = Uuid::now_v7();
-    let payer_project = Uuid::now_v7(); let replacement_project = Uuid::now_v7(); let payer_actor = Uuid::now_v7(); let member_actor = Uuid::now_v7();
+    let payer_project = Uuid::now_v7(); let replacement_project = Uuid::now_v7(); let payer_actor = Uuid::now_v7();
     sqlx::query("INSERT INTO control.course_experiments(experiment_id,course_id,release_id,policy,revision,contract) VALUES($1,$2,$3,'group',1,'{}')").bind(experiment_id).bind(course_id).bind(Uuid::now_v7()).execute(&pool).await?;
     sqlx::query("INSERT INTO control.experiment_groups(group_id,experiment_id,payer_project_id,payer_actor_id,payer_consent,revision,contract) VALUES($1,$2,$3,$4,true,1,'{}')").bind(group_id).bind(experiment_id).bind(payer_project).bind(payer_actor).execute(&pool).await?;
-    sqlx::query("INSERT INTO control.experiment_group_members(group_id,actor_id,revision,state) VALUES($1,$2,1,'active')").bind(group_id).bind(member_actor).execute(&pool).await?;
-    sqlx::query("UPDATE control.experiment_group_members SET state='revoked',revision=2 WHERE group_id=$1 AND actor_id=$2").bind(group_id).bind(member_actor).execute(&pool).await?;
-    let error = sqlx::query("UPDATE control.experiment_groups SET payer_project_id=$2,payer_actor_id=$3 WHERE group_id=$1").bind(group_id).bind(replacement_project).bind(member_actor).execute(&pool).await.expect_err("payer replacement must be rejected");
+    sqlx::query("INSERT INTO control.experiment_group_members(group_id,actor_id,revision,state) VALUES($1,$2,1,'active')").bind(group_id).bind(payer_actor).execute(&pool).await?;
+    sqlx::query("UPDATE control.experiment_group_members SET state='revoked',revision=2 WHERE group_id=$1 AND actor_id=$2").bind(group_id).bind(payer_actor).execute(&pool).await?;
+    let error = sqlx::query("UPDATE control.experiment_groups SET payer_project_id=$2,payer_actor_id=$3 WHERE group_id=$1").bind(group_id).bind(replacement_project).bind(Uuid::now_v7()).execute(&pool).await.expect_err("payer replacement must be rejected");
     assert!(error.to_string().contains("LW_COURSE_EXPERIMENT_PAYER_IMMUTABLE"));
+    let (project, actor, consent, contract): (Uuid, Uuid, bool, serde_json::Value) = sqlx::query_as("SELECT payer_project_id,payer_actor_id,payer_consent,contract FROM control.experiment_groups WHERE group_id=$1").bind(group_id).fetch_one(&pool).await?;
+    assert_eq!((project, actor, consent), (payer_project, payer_actor, true));
+    assert_eq!(contract, serde_json::json!({}));
+    let membership_state: String = sqlx::query_scalar("SELECT state FROM control.experiment_group_members WHERE group_id=$1 AND actor_id=$2").bind(group_id).bind(payer_actor).fetch_one(&pool).await?;
+    assert_eq!(membership_state, "revoked");
     Ok(())
 }
