@@ -14,7 +14,7 @@ async fn actor(pool: &sqlx::PgPool, roles: Vec<PlatformRole>, name: &str) -> Tes
     let id = ActorId::new();
     sqlx::query("INSERT INTO access.actors(actor_id,issuer,subject_sha256,username,display_name) VALUES($1,'https://synthetic.invalid',$2,$3,$3)")
         .bind(id.as_uuid()).bind(Sha256Digest::of_bytes(id.as_uuid().as_bytes()).to_string()).bind(name).execute(pool).await?;
-    let now = UtcTimestamp::from_utc(sqlx::query_scalar("SELECT clock_timestamp()").fetch_one(pool).await?)?;
+    let now = UtcTimestamp::from_utc(sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())").fetch_one(pool).await?)?;
     Ok(AuthenticatedActor { actor_id: id, roles, expires_at: UtcTimestamp::from_utc(now.get() + time::Duration::hours(1))? })
 }
 
