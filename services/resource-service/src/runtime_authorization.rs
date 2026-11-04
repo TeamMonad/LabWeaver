@@ -390,6 +390,13 @@ async fn check_course_calendar(
     tx: &mut Transaction<'_, Postgres>,
     request: &ResourceRequest,
 ) -> Result<(), RuntimeBindingError> {
+    let role: String = sqlx::query_scalar("SELECT current_user")
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|_| RuntimeBindingError::Unavailable)?;
+    if role != "lw_resource_runtime" {
+        return Ok(());
+    }
     let Some(course_id) = request.course_id else {
         return Ok(());
     };
