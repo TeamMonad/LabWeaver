@@ -899,6 +899,20 @@ async fn retired_compute_rejects_old_grant_and_usage_without_billing() -> Result
             .can_authorize_execution
     );
     let before = credits.account(request.project_id).await?;
+    let renewal = store.renew_lease("retired-renewal", lease_id, item.lease.revision, at(until, 5)?, "retired-renewal").await;
+    assert!(matches!(renewal, Err(resource_service::store::ResourceStoreError::UsageConflict)));
+    let mut restored = status.clone();
+    restored.revision = Revision::new(4)?;
+    restored.generation = 2;
+    restored.compute_retired = false;
+    restored.observed_state = contracts::environment::ObservedEnvironmentState::Stopped;
+    let disk = restored.disk_retention.as_mut().ok_or("disk retention")?;
+    disk.state = contracts::environment::EnvironmentDiskState::Restored;
+    disk.restored_generation = Some(2);
+    store.consume_environment_cleanup_status(&item, &restored).await?;
+    store.consume_environment_cleanup_status(&item, &restored).await?;
+    assert!(!store.environment_credit_grant(OWNER, lease_id).await?.can_authorize_execution);
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource.credit_holds WHERE request_id=$1").bind(request.id.as_uuid()).fetch_one(&pool).await?, 1);
     let rejected = store
         .record_usage(
             &RecordResourceUsageRequest {

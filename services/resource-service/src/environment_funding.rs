@@ -467,6 +467,18 @@ pub(crate) async fn consume_cleanup_status(
     {
         return Err(ResourceStoreError::CapacityReadbackInvalid);
     }
+    if let Some(usage) = &status.retained_storage_usage {
+        let disk = status.disk_retention.as_ref().ok_or(ResourceStoreError::CapacityReadbackInvalid)?;
+        let close_at = disk.purged_at.or(disk.reactivated_at);
+        if usage.started_at != disk.started_at
+            || disk.compute_retired_at.is_none()
+            || disk.retired_generation > status.generation
+            || usage.closed != close_at.is_some()
+            || close_at.is_some_and(|closed| usage.measured_until != closed)
+        {
+            return Err(ResourceStoreError::CapacityReadbackInvalid);
+        }
+    }
     let mut normalized = status.clone();
     normalized.retained_storage_usage = None;
     let receipt = serde_json::to_value(normalized)?;
@@ -573,14 +585,14 @@ async fn price_retained_interval(
     }
     let storage_bytes = u64::try_from(row.try_get::<i64, _>("storage_bytes")?)?;
     let quantity = storage_bytes
-        .checked_mul(u64::try_from((until - from).whole_milliseconds())?)
+        .checked_mul(u64::try_from((until - started_at).whole_milliseconds())?)
         .ok_or(ResourceStoreError::NumericOverflow)?;
     crate::costing::rate_lock(tx).await?;
     let mut lines = Vec::new();
     let mut currency = None;
     crate::pricing::append_rate_segments(
         tx,
-        UtcTimestamp::from_utc(from)?,
+        UtcTimestamp::from_utc(started_at)?,
         UtcTimestamp::from_utc(until)?,
         1000,
         contracts::resource::ResourceBillingUnit::StorageByteSecond,
@@ -596,6 +608,12 @@ async fn price_retained_interval(
         sum.checked_add(line.amount.amount.scaled())
             .ok_or(ResourceStoreError::NumericOverflow)
     })?;
+    // The provider reports a cumulative meter. Round cumulative rate quantities once,
+    // then append only the unpaid delta; frequent sub-microcredit polls cannot lose cost.
+    let previous: String = sqlx::query_scalar("SELECT COALESCE(sum(amount),0)::text FROM resource.retained_storage_platform_costs WHERE environment_id=$1 AND started_at=$2")
+        .bind(environment_id).bind(started_at).fetch_one(&mut **tx).await?;
+    let amount = amount.checked_sub(previous.parse::<i128>().map_err(|_| ResourceStoreError::NumericOverflow)?)
+        .filter(|value| *value >= 0).ok_or(ResourceStoreError::NumericOverflow)?;
     let snapshots = serde_json::to_value(&lines)?;
     sqlx::query("INSERT INTO resource.retained_storage_platform_costs(cost_id,environment_id,started_at,measured_from,measured_until,storage_bytes,rate_snapshots,amount,currency) VALUES($1,$2,$3,$4,$5,$6,$7,$8::text::numeric,$9) ON CONFLICT(environment_id,started_at,measured_until) DO NOTHING")
         .bind(Uuid::now_v7()).bind(environment_id).bind(started_at).bind(from).bind(until)

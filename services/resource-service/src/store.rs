@@ -1014,9 +1014,8 @@ impl PgResourceStore {
                     .await?
                     .ok_or(ResourceStoreError::LeaseNotFound)?;
                     if lease_row.try_get::<bool, _>("compute_released")?
-                        && input.kind == ResourceUsageKind::Compute
                         && lease_row.try_get::<Option<time::OffsetDateTime>, _>("compute_retired_at")?
-                            .is_none_or(|retired| input.measured_until.get() > retired)
+                            .is_some_and(|retired| input.measured_until.get() > retired)
                     {
                         return Err(ResourceStoreError::UsageConflict);
                     }
@@ -1533,7 +1532,7 @@ impl PgResourceStore {
                                    FROM jsonb_array_elements(c.lines) line
                                    WHERE line->>'rateId'=$2
                                )
-                         )",
+                         ) OR EXISTS (SELECT 1 FROM resource.retained_storage_platform_costs p WHERE p.measured_until>$1 AND EXISTS (SELECT 1 FROM jsonb_array_elements(p.rate_snapshots) line WHERE line->>'rateId'=$2))",
                     )
                     .bind(input.effective_from.get())
                     .bind(previous.id.to_string())
@@ -1703,7 +1702,7 @@ impl PgResourceStore {
                                FROM jsonb_array_elements(c.lines) line
                                WHERE line->>'rateId'=$2
                            )
-                     )",
+                     ) OR EXISTS (SELECT 1 FROM resource.retained_storage_platform_costs p WHERE p.measured_until>$1 AND EXISTS (SELECT 1 FROM jsonb_array_elements(p.rate_snapshots) line WHERE line->>'rateId'=$2))",
                 )
                 .bind(input.effective_until.get())
                 .bind(rate.id.to_string())
