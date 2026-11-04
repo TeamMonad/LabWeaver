@@ -34,7 +34,14 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    IF NEW.payer_project_id <> OLD.payer_project_id
+    -- A group's payer binding is fixed for its lifetime. Deleting and recreating the group
+    -- (or moving it to another identity/experiment) would swap the payer, so both are refused.
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'LW_COURSE_EXPERIMENT_PAYER_IMMUTABLE';
+    END IF;
+    IF NEW.group_id <> OLD.group_id
+       OR NEW.experiment_id <> OLD.experiment_id
+       OR NEW.payer_project_id <> OLD.payer_project_id
        OR NEW.payer_actor_id <> OLD.payer_actor_id
        OR NEW.payer_consent <> OLD.payer_consent THEN
         RAISE EXCEPTION 'LW_COURSE_EXPERIMENT_PAYER_IMMUTABLE';
@@ -43,7 +50,7 @@ BEGIN
 END;
 $$;
 CREATE TRIGGER experiment_group_payer_immutable
-BEFORE UPDATE ON control.experiment_groups
+BEFORE UPDATE OR DELETE ON control.experiment_groups
 FOR EACH ROW EXECUTE FUNCTION control.prevent_experiment_payer_change();
 
 CREATE VIEW control.course_experiment_windows AS

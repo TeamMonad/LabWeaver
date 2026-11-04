@@ -60,6 +60,17 @@ impl ControlService {
         {
             return Err(ControlError::CourseGovernanceDenied);
         }
+        // The release must be a current (not withdrawn) release of this course; a release from
+        // another course is reported as not found so its existence is not disclosed.
+        let release_in_course: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM control.environment_template_releases r WHERE r.release_id=$1 AND r.course_id=$2 AND NOT EXISTS(SELECT 1 FROM control.release_withdrawals w WHERE w.release_id=r.release_id))")
+            .bind(request.release_id.as_uuid())
+            .bind(course_id.as_uuid())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db)?;
+        if !release_in_course {
+            return Err(ControlError::NotFound);
+        }
         let now: time::OffsetDateTime =
             sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
                 .fetch_one(&mut *tx)
@@ -141,16 +152,23 @@ impl ControlService {
             IdempotencyDecision::InProgress => return Err(ControlError::OperationInProgress),
             IdempotencyDecision::Reserved => {}
         }
-        let instructor: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM control.course_memberships WHERE course_id=$1 AND actor_id=$2 AND object_role='instructor' AND role='teacher' AND state='active' AND (expires_at IS NULL OR expires_at>clock_timestamp()))").bind(course_id.as_uuid()).bind(actor.actor_id.as_uuid()).fetch_one(&mut *tx).await.map_err(db)?;
-        if !instructor
-            && !actor
-                .roles
-                .contains(&contracts::PlatformRole::PlatformAdmin)
-        {
+        // Consent to fund the group is the payer's own act: nobody, including staff or
+        // administrators, can bind another person's project Credits.
+        if actor.actor_id != request.payer_actor_id {
+            return Err(ControlError::CourseGovernanceDenied);
+        }
+        // Same project spending rule as Resource runtime admission.
+        let payer_may_spend: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM control.project_memberships WHERE project_id=$1 AND actor_id=$2 AND state='active' AND object_role IN ('editor','manager','owner') AND (expires_at IS NULL OR expires_at>clock_timestamp()))")
+            .bind(request.payer_project_id.as_uuid())
+            .bind(request.payer_actor_id.as_uuid())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db)?;
+        if !payer_may_spend {
             return Err(ControlError::CourseGovernanceDenied);
         }
         for member in &request.member_actor_ids {
-            let ok: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM control.course_memberships WHERE course_id=$1 AND actor_id=$2 AND state='active')").bind(course_id.as_uuid()).bind(member.as_uuid()).fetch_one(&mut *tx).await.map_err(db)?;
+            let ok: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM control.course_memberships WHERE course_id=$1 AND actor_id=$2 AND state='active' AND (expires_at IS NULL OR expires_at>clock_timestamp()))").bind(course_id.as_uuid()).bind(member.as_uuid()).fetch_one(&mut *tx).await.map_err(db)?;
             if !ok {
                 return Err(ControlError::CourseGovernanceDenied);
             }
@@ -175,7 +193,7 @@ impl ControlService {
             created_at: now,
         };
         let contract = serde_json::to_value(&group).map_err(|_| ControlError::ContractInvalid)?;
-        sqlx::query("INSERT INTO control.experiment_groups(group_id,experiment_id,payer_project_id,payer_actor_id,payer_consent,revision,contract) VALUES($1,$2,$3,$4,$5,$6,$7)").bind(id.as_uuid()).bind(experiment_id.as_uuid()).bind(request.payer_project_id.as_uuid()).bind(request.payer_actor_id.as_uuid()).bind(true).bind(i64_revision(revision)?).bind(contract).execute(&mut *tx).await.map_err(db)?;
+        sqlx::query("INSERT INTO control.experiment_groups(group_id,experiment_id,payer_project_id,payer_actor_id,payer_consent,revision,contract) VALUES($1,$2,$3,$4,$5,$6,$7)").bind(id.as_uuid()).bind(experiment_id.as_uuid()).bind(request.payer_project_id.as_uuid()).bind(request.payer_actor_id.as_uuid()).bind(request.payer_consent).bind(i64_revision(revision)?).bind(contract).execute(&mut *tx).await.map_err(db)?;
         for member in &request.member_actor_ids {
             sqlx::query("INSERT INTO control.experiment_group_members(group_id,actor_id,revision,state) VALUES($1,$2,$3,'active')").bind(id.as_uuid()).bind(member.as_uuid()).bind(i64_revision(revision)?).execute(&mut *tx).await.map_err(db)?;
         }

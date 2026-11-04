@@ -73,12 +73,32 @@ async fn service() -> TestResult<(
     Ok((roles, service, course, teacher, ta, student))
 }
 
+async fn course_release(pool: &sqlx::PgPool, course: CourseId) -> TestResult<ReleaseId> {
+    let release = ReleaseId::new();
+    sqlx::query("INSERT INTO control.environment_template_releases(release_id,project_id,course_id,version,environment_candidate_id,candidate_revision,spec_sha256,contract,published_at) VALUES($1,$2,$3,1,$4,1,$5,'{}'::jsonb,date_trunc('milliseconds',clock_timestamp()))")
+        .bind(release.as_uuid()).bind(Uuid::now_v7()).bind(course.as_uuid()).bind(Uuid::now_v7())
+        .bind(Sha256Digest::of_bytes(release.as_uuid().as_bytes()).to_string())
+        .execute(pool).await?;
+    Ok(release)
+}
+
+async fn project_role(
+    pool: &sqlx::PgPool,
+    project: ProjectId,
+    actor: &AuthenticatedActor,
+    object_role: &str,
+) -> TestResult {
+    sqlx::query("INSERT INTO control.project_memberships(project_id,actor_id,role,object_role,state,revision) VALUES($1,$2,'student',$3,'active',1) ON CONFLICT (project_id,actor_id) DO UPDATE SET object_role=EXCLUDED.object_role,revision=control.project_memberships.revision+1")
+        .bind(project.as_uuid()).bind(actor.actor_id.as_uuid()).bind(object_role).execute(pool).await?;
+    Ok(())
+}
+
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn experiment_create_permissions_and_group_policy_are_enforced() -> TestResult {
     let (roles, service, course, teacher, ta, student) = service().await?;
     let request = CreateCourseExperimentRequest {
-        release_id: ReleaseId::new(),
+        release_id: course_release(&roles.provisioner, course).await?,
         policy: ExperimentPolicy::Group,
     };
     let denied_student = service
@@ -100,6 +120,24 @@ async fn experiment_create_permissions_and_group_policy_are_enforced() -> TestRe
         denied_ta,
         Err(control_service::ControlError::CourseGovernanceDenied)
     ));
+    let foreign_release = CreateCourseExperimentRequest {
+        release_id: course_release(&roles.provisioner, CourseId::new()).await?,
+        policy: ExperimentPolicy::Group,
+    };
+    assert!(
+        matches!(
+            service
+                .create_course_experiment(
+                    &teacher,
+                    course,
+                    &foreign_release,
+                    &IdempotencyKey::parse("foreign-release")?,
+                )
+                .await,
+            Err(control_service::ControlError::NotFound)
+        ),
+        "another course's release cannot back this course's experiment"
+    );
     let experiment = service
         .create_course_experiment(
             &teacher,
@@ -115,9 +153,56 @@ async fn experiment_create_permissions_and_group_policy_are_enforced() -> TestRe
         member_actor_ids: vec![student.actor_id],
         payer_consent: true,
     };
+    assert!(
+        matches!(
+            service
+                .create_experiment_group(
+                    &teacher,
+                    course,
+                    experiment.id,
+                    &group_request,
+                    &IdempotencyKey::parse("teacher-binds-student")?,
+                )
+                .await,
+            Err(control_service::ControlError::CourseGovernanceDenied)
+        ),
+        "staff cannot consent to spend a student's project Credits"
+    );
+    assert!(
+        matches!(
+            service
+                .create_experiment_group(
+                    &student,
+                    course,
+                    experiment.id,
+                    &group_request,
+                    &IdempotencyKey::parse("unrelated-project")?,
+                )
+                .await,
+            Err(control_service::ControlError::CourseGovernanceDenied)
+        ),
+        "a payer cannot bind a project they do not belong to"
+    );
+    project_role(&roles.provisioner, member_project, &student, "viewer").await?;
+    assert!(
+        matches!(
+            service
+                .create_experiment_group(
+                    &student,
+                    course,
+                    experiment.id,
+                    &group_request,
+                    &IdempotencyKey::parse("viewer-project")?,
+                )
+                .await,
+            Err(control_service::ControlError::CourseGovernanceDenied)
+        ),
+        "a project viewer cannot spend its Credits"
+    );
+    project_role(&roles.provisioner, member_project, &student, "editor").await?;
     let group = service
         .create_experiment_group(
-            &teacher,
+            &student,
             course,
             experiment.id,
             &group_request,
@@ -126,6 +211,7 @@ async fn experiment_create_permissions_and_group_policy_are_enforced() -> TestRe
         .await?;
     assert_eq!(group.group.payer_project_id, member_project);
     assert_eq!(group.group.payer_actor_id, student.actor_id);
+    assert!(group.group.payer_consent);
     let other_student = actor(
         &roles.provisioner,
         vec![PlatformRole::Student],
@@ -133,15 +219,17 @@ async fn experiment_create_permissions_and_group_policy_are_enforced() -> TestRe
     )
     .await?;
     sqlx::query("INSERT INTO control.course_memberships(course_id,actor_id,role,object_role,state,revision) VALUES($1,$2,'student','participant','active',1)").bind(course.as_uuid()).bind(other_student.actor_id.as_uuid()).execute(&roles.provisioner).await?;
+    let other_project = ProjectId::new();
+    project_role(&roles.provisioner, other_project, &other_student, "owner").await?;
     let second_request = CreateExperimentGroupRequest {
-        payer_project_id: ProjectId::new(),
+        payer_project_id: other_project,
         payer_actor_id: other_student.actor_id,
         member_actor_ids: vec![other_student.actor_id],
         payer_consent: true,
     };
     service
         .create_experiment_group(
-            &teacher,
+            &other_student,
             course,
             experiment.id,
             &second_request,
@@ -162,9 +250,16 @@ async fn experiment_create_permissions_and_group_policy_are_enforced() -> TestRe
             .len(),
         1
     );
+    assert_eq!(
+        service
+            .experiment_groups(&teacher, course, experiment.id)
+            .await?
+            .len(),
+        2
+    );
     let replay = service
         .create_experiment_group(
-            &teacher,
+            &student,
             course,
             experiment.id,
             &group_request,
@@ -179,7 +274,7 @@ async fn experiment_create_permissions_and_group_policy_are_enforced() -> TestRe
     assert!(matches!(
         service
             .create_experiment_group(
-                &teacher,
+                &student,
                 course,
                 experiment.id,
                 &conflict,
@@ -195,7 +290,7 @@ async fn experiment_create_permissions_and_group_policy_are_enforced() -> TestRe
     assert!(matches!(
         service
             .create_experiment_group(
-                &teacher,
+                &student,
                 course,
                 experiment.id,
                 &missing_consent,
@@ -205,14 +300,13 @@ async fn experiment_create_permissions_and_group_policy_are_enforced() -> TestRe
         Err(control_service::ControlError::ContractInvalid)
     ));
     let payer_not_member = CreateExperimentGroupRequest {
-        payer_actor_id: ta.actor_id,
-        member_actor_ids: vec![student.actor_id],
+        member_actor_ids: vec![other_student.actor_id],
         ..group_request
     };
     assert!(matches!(
         service
             .create_experiment_group(
-                &teacher,
+                &student,
                 course,
                 experiment.id,
                 &payer_not_member,
@@ -226,9 +320,9 @@ async fn experiment_create_permissions_and_group_policy_are_enforced() -> TestRe
 
 #[tokio::test]
 async fn individual_experiment_rejects_groups_and_personal_scope_isolated() -> TestResult {
-    let (_roles, service, course, teacher, _ta, student) = service().await?;
+    let (roles, service, course, teacher, _ta, student) = service().await?;
     let request = CreateCourseExperimentRequest {
-        release_id: ReleaseId::new(),
+        release_id: course_release(&roles.provisioner, course).await?,
         policy: ExperimentPolicy::Individual,
     };
     let experiment = service
@@ -239,8 +333,10 @@ async fn individual_experiment_rejects_groups_and_personal_scope_isolated() -> T
             &IdempotencyKey::parse("individual-create")?,
         )
         .await?;
+    let payer_project = ProjectId::new();
+    project_role(&roles.provisioner, payer_project, &student, "owner").await?;
     let group_request = CreateExperimentGroupRequest {
-        payer_project_id: ProjectId::new(),
+        payer_project_id: payer_project,
         payer_actor_id: student.actor_id,
         member_actor_ids: vec![student.actor_id],
         payer_consent: true,
@@ -248,7 +344,7 @@ async fn individual_experiment_rejects_groups_and_personal_scope_isolated() -> T
     assert!(matches!(
         service
             .create_experiment_group(
-                &teacher,
+                &student,
                 course,
                 experiment.id,
                 &group_request,
@@ -283,6 +379,18 @@ async fn payer_binding_is_immutable_while_membership_changes() -> TestResult {
     sqlx::query("UPDATE control.experiment_group_members SET state='revoked',revision=2 WHERE group_id=$1 AND actor_id=$2").bind(group_id).bind(payer_actor).execute(&pool).await?;
     let Err(error) = sqlx::query("UPDATE control.experiment_groups SET payer_project_id=$2,payer_actor_id=$3 WHERE group_id=$1").bind(group_id).bind(replacement_project).bind(Uuid::now_v7()).execute(&pool).await else {
         return Err("payer replacement was accepted".into());
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("LW_COURSE_EXPERIMENT_PAYER_IMMUTABLE")
+    );
+    let Err(error) = sqlx::query("DELETE FROM control.experiment_groups WHERE group_id=$1")
+        .bind(group_id)
+        .execute(&pool)
+        .await
+    else {
+        return Err("group deletion (delete-and-recreate payer swap) was accepted".into());
     };
     assert!(
         error

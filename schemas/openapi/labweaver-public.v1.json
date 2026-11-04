@@ -3555,8 +3555,25 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/create-course-experiment-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/course-experiment.schema.json"
+                }
+              }
+            },
             "description": "Successful response",
             "headers": {
               "ETag": {
@@ -3670,6 +3687,13 @@
         ],
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/course-experiment.schema.json"
+                }
+              }
+            },
             "description": "Successful response",
             "headers": {
               "ETag": {
@@ -3783,6 +3807,16 @@
         ],
         "responses": {
           "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "../contracts/v1/course-experiment-group-view.schema.json"
+                  },
+                  "type": "array"
+                }
+              }
+            },
             "description": "Successful response",
             "headers": {
               "ETag": {
@@ -3900,8 +3934,25 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/create-experiment-group-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/course-experiment-group-view.schema.json"
+                }
+              }
+            },
             "description": "Successful response",
             "headers": {
               "ETag": {

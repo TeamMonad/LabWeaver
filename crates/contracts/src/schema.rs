@@ -2502,6 +2502,8 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "reportPlatformConfigurationApply" => "http/report-platform-configuration-apply-request",
         "updateCourseCalendar" => "http/update-course-calendar",
         "importCourseRoster" => "http/course-roster-import-request",
+        "createCourseExperiment" => "http/create-course-experiment-request",
+        "createExperimentGroup" => "http/create-experiment-group-request",
         "createProjectMembershipInvitation" => "http/create-project-membership-invitation",
         "createCourseMembershipInvitation" => "http/create-course-membership-invitation",
         "acceptMembershipInvitation" => "http/accept-membership-invitation",
@@ -2619,6 +2621,11 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         }
         "getCourseCalendar" | "updateCourseCalendar" => contract_ref("course-calendar"),
         "importCourseRoster" => contract_ref("http/course-roster-import-result"),
+        "createCourseExperiment" | "getCourseExperiment" => contract_ref("course-experiment"),
+        "createExperimentGroup" => contract_ref("course-experiment-group-view"),
+        "listExperimentGroups" => {
+            json!({"type":"array","items":contract_ref("course-experiment-group-view")})
+        }
         "getCourseStudentView" => contract_ref("http/course-student-view"),
         "getPlatformConfigurationApply" => contract_ref("platform-configuration-apply"),
         "listIncomingMembershipInvitations"

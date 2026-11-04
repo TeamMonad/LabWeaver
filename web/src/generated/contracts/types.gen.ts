@@ -1976,6 +1976,115 @@ export type CourseCalendarSchemaRevision = number;
 export type CourseCalendarSchemaUtcTimestamp = string;
 
 /**
+ * CourseExperimentGroupView
+ */
+export type CourseExperimentGroupViewSchema = {
+    experiment: CourseExperiment;
+    group: ExperimentGroup;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type CourseExperimentGroupViewSchemaActorId = string;
+
+export type CourseExperiment = {
+    courseId: CourseExperimentGroupViewSchemaCourseId;
+    createdAt: CourseExperimentGroupViewSchemaUtcTimestamp;
+    id: CourseExperimentId;
+    policy: ExperimentPolicy;
+    releaseId: CourseExperimentGroupViewSchemaReleaseId;
+    revision: CourseExperimentGroupViewSchemaRevision;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseExperimentId`.
+ */
+export type CourseExperimentId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type CourseExperimentGroupViewSchemaCourseId = string;
+
+export type ExperimentGroup = {
+    createdAt: CourseExperimentGroupViewSchemaUtcTimestamp;
+    experimentId: CourseExperimentId;
+    id: ExperimentGroupId;
+    memberActorIds: Array<CourseExperimentGroupViewSchemaActorId>;
+    payerActorId: CourseExperimentGroupViewSchemaActorId;
+    payerConsent: boolean;
+    payerProjectId: CourseExperimentGroupViewSchemaProjectId;
+    revision: CourseExperimentGroupViewSchemaRevision;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ExperimentGroupId`.
+ */
+export type ExperimentGroupId = string;
+
+export type ExperimentPolicy = 'individual' | 'group';
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type CourseExperimentGroupViewSchemaProjectId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ReleaseId`.
+ */
+export type CourseExperimentGroupViewSchemaReleaseId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CourseExperimentGroupViewSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type CourseExperimentGroupViewSchemaUtcTimestamp = string;
+
+/**
+ * CourseExperiment
+ */
+export type CourseExperimentSchema = {
+    courseId: CourseExperimentSchemaCourseId;
+    createdAt: CourseExperimentSchemaUtcTimestamp;
+    id: CourseExperimentSchemaCourseExperimentId;
+    policy: CourseExperimentSchemaExperimentPolicy;
+    releaseId: CourseExperimentSchemaReleaseId;
+    revision: CourseExperimentSchemaRevision;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseExperimentId`.
+ */
+export type CourseExperimentSchemaCourseExperimentId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `CourseId`.
+ */
+export type CourseExperimentSchemaCourseId = string;
+
+export type CourseExperimentSchemaExperimentPolicy = 'individual' | 'group';
+
+/**
+ * Strongly typed UUIDv7 identifier for `ReleaseId`.
+ */
+export type CourseExperimentSchemaReleaseId = string;
+
+/**
+ * Monotonic aggregate revision. Zero is never a persisted revision.
+ */
+export type CourseExperimentSchemaRevision = number;
+
+/**
+ * UTC timestamp serialized with a literal `Z` and millisecond precision.
+ */
+export type CourseExperimentSchemaUtcTimestamp = string;
+
+/**
  * CursorPage
  */
 export type CourseMembershipPageSchema = {
@@ -5462,6 +5571,21 @@ export type CreateAgentRunRequestSchemaProjectId = string;
 export type CreateAgentRunRequestSchemaRevision = number;
 
 /**
+ * CreateCourseExperimentRequest
+ */
+export type CreateCourseExperimentRequestSchema = {
+    policy: CreateCourseExperimentRequestSchemaExperimentPolicy;
+    releaseId: CreateCourseExperimentRequestSchemaReleaseId;
+};
+
+export type CreateCourseExperimentRequestSchemaExperimentPolicy = 'individual' | 'group';
+
+/**
+ * Strongly typed UUIDv7 identifier for `ReleaseId`.
+ */
+export type CreateCourseExperimentRequestSchemaReleaseId = string;
+
+/**
  * CreateCourseMembershipInvitation
  */
 export type CreateCourseMembershipInvitationSchema = {
@@ -5823,6 +5947,26 @@ export type CreateEvaluationReleaseRequestSchemaProjectId = string;
  * Monotonic aggregate revision. Zero is never a persisted revision.
  */
 export type CreateEvaluationReleaseRequestSchemaRevision = number;
+
+/**
+ * CreateExperimentGroupRequest
+ */
+export type CreateExperimentGroupRequestSchema = {
+    memberActorIds: Array<CreateExperimentGroupRequestSchemaActorId>;
+    payerActorId: CreateExperimentGroupRequestSchemaActorId;
+    payerConsent: boolean;
+    payerProjectId: CreateExperimentGroupRequestSchemaProjectId;
+};
+
+/**
+ * Strongly typed UUIDv7 identifier for `ActorId`.
+ */
+export type CreateExperimentGroupRequestSchemaActorId = string;
+
+/**
+ * Strongly typed UUIDv7 identifier for `ProjectId`.
+ */
+export type CreateExperimentGroupRequestSchemaProjectId = string;
 
 /**
  * CreatePlatformImageUploadRequest
@@ -16505,7 +16649,7 @@ export type WithdrawEvaluationReleaseResponses = {
 export type WithdrawEvaluationReleaseResponse = WithdrawEvaluationReleaseResponses[keyof WithdrawEvaluationReleaseResponses];
 
 export type CreateCourseExperimentData = {
-    body?: never;
+    body: CreateCourseExperimentRequestSchema;
     headers: {
         'Idempotency-Key': string;
     };
@@ -16569,8 +16713,10 @@ export type CreateCourseExperimentResponses = {
     /**
      * Successful response
      */
-    201: unknown;
+    201: CourseExperimentSchema;
 };
+
+export type CreateCourseExperimentResponse = CreateCourseExperimentResponses[keyof CreateCourseExperimentResponses];
 
 export type GetCourseExperimentData = {
     body?: never;
@@ -16635,8 +16781,10 @@ export type GetCourseExperimentResponses = {
     /**
      * Successful response
      */
-    200: unknown;
+    200: CourseExperimentSchema;
 };
+
+export type GetCourseExperimentResponse = GetCourseExperimentResponses[keyof GetCourseExperimentResponses];
 
 export type ListExperimentGroupsData = {
     body?: never;
@@ -16701,11 +16849,13 @@ export type ListExperimentGroupsResponses = {
     /**
      * Successful response
      */
-    200: unknown;
+    200: Array<CourseExperimentGroupViewSchema>;
 };
 
+export type ListExperimentGroupsResponse = ListExperimentGroupsResponses[keyof ListExperimentGroupsResponses];
+
 export type CreateExperimentGroupData = {
-    body?: never;
+    body: CreateExperimentGroupRequestSchema;
     headers: {
         'Idempotency-Key': string;
     };
@@ -16770,8 +16920,10 @@ export type CreateExperimentGroupResponses = {
     /**
      * Successful response
      */
-    201: unknown;
+    201: CourseExperimentGroupViewSchema;
 };
+
+export type CreateExperimentGroupResponse = CreateExperimentGroupResponses[keyof CreateExperimentGroupResponses];
 
 export type CreateCourseLlmPolicyData = {
     body: ProjectLlmEgressPolicySchema;

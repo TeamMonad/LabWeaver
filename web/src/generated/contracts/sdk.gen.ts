@@ -533,13 +533,18 @@ export const withdrawEvaluationRelease = <ThrowOnError extends boolean = false>(
  * Permission: course_experiment:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
  */
 export const createCourseExperiment = <ThrowOnError extends boolean = false>(options: Options<CreateCourseExperimentData, ThrowOnError>): RequestResult<CreateCourseExperimentResponses, CreateCourseExperimentErrors, ThrowOnError> => (options.client ?? client).post<CreateCourseExperimentResponses, CreateCourseExperimentErrors, ThrowOnError>({
+    responseType: 'json',
     security: [{
             key: 'oidc',
             scheme: 'bearer',
             type: 'http'
         }],
     url: '/api/v1/courses/{courseId}/experiments',
-    ...options
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**
@@ -548,6 +553,7 @@ export const createCourseExperiment = <ThrowOnError extends boolean = false>(opt
  * Permission: course_experiment:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
  */
 export const getCourseExperiment = <ThrowOnError extends boolean = false>(options: Options<GetCourseExperimentData, ThrowOnError>): RequestResult<GetCourseExperimentResponses, GetCourseExperimentErrors, ThrowOnError> => (options.client ?? client).get<GetCourseExperimentResponses, GetCourseExperimentErrors, ThrowOnError>({
+    responseType: 'json',
     security: [{
             key: 'oidc',
             scheme: 'bearer',
@@ -563,6 +569,7 @@ export const getCourseExperiment = <ThrowOnError extends boolean = false>(option
  * Permission: course_experiment:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
  */
 export const listExperimentGroups = <ThrowOnError extends boolean = false>(options: Options<ListExperimentGroupsData, ThrowOnError>): RequestResult<ListExperimentGroupsResponses, ListExperimentGroupsErrors, ThrowOnError> => (options.client ?? client).get<ListExperimentGroupsResponses, ListExperimentGroupsErrors, ThrowOnError>({
+    responseType: 'json',
     security: [{
             key: 'oidc',
             scheme: 'bearer',
@@ -578,13 +585,18 @@ export const listExperimentGroups = <ThrowOnError extends boolean = false>(optio
  * Permission: course_experiment_group:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.
  */
 export const createExperimentGroup = <ThrowOnError extends boolean = false>(options: Options<CreateExperimentGroupData, ThrowOnError>): RequestResult<CreateExperimentGroupResponses, CreateExperimentGroupErrors, ThrowOnError> => (options.client ?? client).post<CreateExperimentGroupResponses, CreateExperimentGroupErrors, ThrowOnError>({
+    responseType: 'json',
     security: [{
             key: 'oidc',
             scheme: 'bearer',
             type: 'http'
         }],
     url: '/api/v1/courses/{courseId}/experiments/{experimentId}/groups',
-    ...options
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**
