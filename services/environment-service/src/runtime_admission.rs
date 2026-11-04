@@ -198,10 +198,15 @@ impl EnvironmentRuntimeAdmission {
         }) else {
             return Ok(());
         };
+        // Only Resource-leased environments carry funding. A lease-less instance has nothing to
+        // re-fund; its later Start is refused by `for_instance` as AllocationPathUnsupported.
+        let Some(lease_id) = instance.lease_id else {
+            return Ok(());
+        };
         self.authority
             .restore_funding(
                 &contracts::resource::environment_funding::RestoreEnvironmentFundingRequest {
-                    lease_id: instance.lease_id.ok_or(RuntimeAdmissionError::Binding)?,
+                    lease_id,
                     environment_id: instance.id,
                     project_id: instance.project_id,
                     requester_id: instance.owner_id,
