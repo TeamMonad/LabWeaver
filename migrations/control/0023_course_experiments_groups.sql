@@ -50,7 +50,7 @@ CREATE VIEW control.course_experiment_windows AS
 SELECT e.course_id, e.release_id, e.policy, e.revision,
        c.open_at, c.due_at, c.late_policy, c.late_until, c.time_zone
 FROM control.course_experiments e
-JOIN control.course_calendars c ON c.course_id = e.course_id;
+LEFT JOIN control.course_calendars c ON c.course_id = e.course_id;
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='lw_control_runtime') THEN
