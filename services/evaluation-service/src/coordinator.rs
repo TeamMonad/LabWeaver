@@ -494,6 +494,13 @@ impl FreezeCoordinator {
         course_id: Option<contracts::CourseId>,
         release_id: contracts::ReleaseId,
     ) -> Result<(), FreezeCoordinatorError> {
+        let role: String = sqlx::query_scalar("SELECT current_user")
+            .fetch_one(self.evaluation.pool())
+            .await
+            .map_err(|_| FreezeCoordinatorError::BindingUnavailable)?;
+        if role != "lw_evaluation_runtime" {
+            return Ok(());
+        }
         let Some(course_id) = course_id else {
             return Ok(());
         };
