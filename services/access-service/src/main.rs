@@ -342,6 +342,10 @@ fn resource_browser_router() -> Router<Arc<AppState>> {
             get(proxy::forward_resource),
         )
         .route(
+            "/api/v1/projects/{project_id}/environment-credit-grants/{lease_id}",
+            get(proxy::forward_resource),
+        )
+        .route(
             "/api/v1/projects/{project_id}/credits/holds",
             get(proxy::forward_resource),
         )

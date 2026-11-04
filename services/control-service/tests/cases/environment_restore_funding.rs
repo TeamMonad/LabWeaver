@@ -3,6 +3,10 @@
     clippy::too_many_lines,
     reason = "keep each restore transaction invariant together"
 )]
+#[allow(
+    clippy::duplicate_mod,
+    reason = "shared production role harness is also compiled by other integration cases"
+)]
 #[path = "../support/production_roles.rs"]
 mod production_roles;
 use super::*;
@@ -79,14 +83,12 @@ impl Fixture {
             "restore-policy",
         )
         .await?;
-        let resources = publication
-            .request
-            .manual
-            .as_ref()
-            .ok_or("manual spec")?
-            .spec
-            .resources
-            .clone();
+        let resources = contracts::resource::WorkloadResources {
+            cpu_millicores: 1000,
+            memory_bytes: 1_073_741_824,
+            storage_bytes: 10_737_418_240,
+            gpu: None,
+        };
         let request = ResourceRequest {
             id: contracts::ResourceRequestId::new(),
             generation: 1,
@@ -595,6 +597,10 @@ async fn restore_funding_uses_current_rate_not_original_rate_snapshot() -> TestR
             },
         )
         .await?;
+    let delay = boundary.get() - f.store.current_time().await?.get();
+    if delay.is_positive() {
+        tokio::time::sleep(std::time::Duration::try_from(delay)?).await;
+    }
     let restored = f.admit("restore-repriced").await?;
     assert_eq!(
         restored.estimate.total.amount,

@@ -91,14 +91,18 @@ impl ProductionRoles {
         assert_read_only_cross_schema(&access, Domain::Access, Domain::Control).await?;
         let resource = role_pool(&url, Domain::Resource.runtime_role()).await?;
         let environment = role_pool(&url, Domain::Environment.runtime_role()).await?;
-        Ok(Self {
+        let result = Self {
             provisioner,
             control,
             access,
             resource,
             environment,
             container,
-        })
+        };
+        assert_read_only_cross_schema(&result.resource, Domain::Resource, Domain::Control).await?;
+        assert_read_only_cross_schema(&result.environment, Domain::Environment, Domain::Control)
+            .await?;
+        Ok(result)
     }
 }
 

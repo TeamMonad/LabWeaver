@@ -2961,6 +2961,15 @@ fn valid_resource_path(path: &str) -> bool {
                 "v1",
                 "projects",
                 _,
+                "environment-credit-grants",
+                _
+            ]
+            | [
+                "",
+                "api",
+                "v1",
+                "projects",
+                _,
                 "credits",
                 "ledger" | "holds"
             ]
