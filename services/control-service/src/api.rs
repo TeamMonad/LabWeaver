@@ -3534,7 +3534,7 @@ async fn create_course_experiment(
     headers: HeaderMap,
     Json(request): Json<CreateCourseExperimentRequest>,
 ) -> Result<Response, ApiError> {
-    let _idempotency_key = idempotency(&headers)?;
+    let idempotency_key = idempotency(&headers)?;
     let decision = authorize_decision(
         &state,
         &principal,
@@ -3545,7 +3545,7 @@ async fn create_course_experiment(
     .await?;
     let experiment = state
         .control
-        .create_course_experiment(&decision.actor, course_id, &request, &_idempotency_key)
+        .create_course_experiment(&decision.actor, course_id, &request, &idempotency_key)
         .await?;
     Ok(with_etag(
         StatusCode::CREATED,
@@ -3582,7 +3582,7 @@ async fn create_experiment_group(
     headers: HeaderMap,
     Json(request): Json<CreateExperimentGroupRequest>,
 ) -> Result<Response, ApiError> {
-    let _idempotency_key = idempotency(&headers)?;
+    let idempotency_key = idempotency(&headers)?;
     let decision = authorize_decision(
         &state,
         &principal,
@@ -3598,7 +3598,7 @@ async fn create_experiment_group(
             course_id,
             experiment_id,
             &request,
-            &_idempotency_key,
+            &idempotency_key,
         )
         .await?;
     Ok(with_etag(StatusCode::CREATED, &view, view.group.revision))
