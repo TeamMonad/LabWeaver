@@ -498,23 +498,19 @@ impl FreezeCoordinator {
         course_id: Option<contracts::CourseId>,
         release_id: contracts::ReleaseId,
     ) -> Result<(), FreezeCoordinatorError> {
-        let role: String = sqlx::query_scalar("SELECT current_user")
-            .fetch_one(self.evaluation.pool())
-            .await
-            .map_err(|_| FreezeCoordinatorError::BindingUnavailable)?;
-        if role != "lw_evaluation_runtime" {
-            return Ok(());
-        }
         let Some(course_id) = course_id else {
             return Ok(());
         };
-        let row = sqlx::query("SELECT revision,open_at,due_at,time_zone,late_policy,late_until FROM control.course_experiment_windows WHERE course_id=$1 AND release_id=$2").bind(course_id.as_uuid()).bind(release_id.as_uuid()).fetch_optional(self.evaluation.pool()).await.map_err(|_| FreezeCoordinatorError::BindingUnavailable)?;
+        let row = sqlx::query("SELECT calendar_revision,open_at,due_at,time_zone,late_policy,late_until FROM control.course_experiment_windows WHERE course_id=$1 AND release_id=$2").bind(course_id.as_uuid()).bind(release_id.as_uuid()).fetch_optional(self.evaluation.pool()).await.map_err(|error| {
+            tracing::warn!(%error, "course calendar read failed");
+            FreezeCoordinatorError::BindingUnavailable
+        })?;
         let Some(row) = row else {
             return Ok(());
         };
         let revision = Revision::new(
             u64::try_from(
-                row.try_get::<i64, _>("revision")
+                row.try_get::<i64, _>("calendar_revision")
                     .map_err(|_| FreezeCoordinatorError::BindingInvalid)?,
             )
             .map_err(|_| FreezeCoordinatorError::BindingInvalid)?,

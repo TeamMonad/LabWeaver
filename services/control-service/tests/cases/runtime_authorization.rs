@@ -228,6 +228,7 @@ pub(super) async fn assert_bindings_after_publication(
     release: &EnvironmentTemplateRelease,
     now: UtcTimestamp,
     executor_failure: Option<ExecutorFailure>,
+    assert_calendar: bool,
 ) -> TestResult {
     let work = candidate.spec.class == contracts::authoring::EnvironmentClass::Work;
     if !work {
@@ -441,7 +442,7 @@ pub(super) async fn assert_bindings_after_publication(
         },
         lease_id: LeaseId::new(),
     };
-    if !work {
+    if assert_calendar {
         Box::pin(calendar_cases::assert_calendar_boundaries(
             pool,
             &request,

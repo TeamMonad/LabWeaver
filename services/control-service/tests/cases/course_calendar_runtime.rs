@@ -9,12 +9,12 @@ use resource_service::{
     runtime_authorization::{RuntimeBindingError, resolve_binding},
     store::{PendingAllocation, PgResourceStore, ResourceStoreError},
 };
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 
 #[tokio::test]
 async fn course_calendar_runtime_start_boundaries_preserve_lease_usage_and_charges() -> TestResult {
     Box::pin(authoring_publication_fixture(
-        PublicationCase::Publication,
+        PublicationCase::ResourceCalendar,
         None,
     ))
     .await
@@ -32,20 +32,7 @@ pub(super) async fn assert_calendar_boundaries(
         .target
         .release()
         .ok_or("environment release required")?;
-    sqlx::raw_sql("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='lw_resource_runtime') THEN CREATE ROLE lw_resource_runtime; END IF; END $$; GRANT USAGE ON SCHEMA control,access,resource TO lw_resource_runtime; GRANT SELECT ON ALL TABLES IN SCHEMA control,access,resource TO lw_resource_runtime; GRANT INSERT,UPDATE ON ALL TABLES IN SCHEMA resource TO lw_resource_runtime;")
-        .execute(pool).await?;
-    let runtime = PgPoolOptions::new()
-        .max_connections(2)
-        .after_connect(|connection, _| {
-            Box::pin(async move {
-                sqlx::query("SET ROLE lw_resource_runtime")
-                    .execute(connection)
-                    .await?;
-                Ok(())
-            })
-        })
-        .connect_with((*pool.connect_options()).clone())
-        .await?;
+    let runtime = pool.clone();
     sqlx::query("INSERT INTO control.course_experiments(experiment_id,course_id,release_id,policy,revision,contract) VALUES($1,$2,$3,'individual',1,'{}')")
         .bind(uuid::Uuid::now_v7()).bind(course.as_uuid()).bind(release.as_uuid()).execute(pool).await?;
     sqlx::query("INSERT INTO control.course_calendars(course_id,revision,open_at,due_at,time_zone,late_policy,late_until,contract) VALUES($1,1,clock_timestamp()-interval '1 hour',clock_timestamp()+interval '1 hour','Asia/Shanghai','hard_close',NULL,'{}')")

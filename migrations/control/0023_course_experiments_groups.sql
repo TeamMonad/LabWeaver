@@ -47,7 +47,7 @@ BEFORE UPDATE ON control.experiment_groups
 FOR EACH ROW EXECUTE FUNCTION control.prevent_experiment_payer_change();
 
 CREATE VIEW control.course_experiment_windows AS
-SELECT e.course_id, e.release_id, e.policy, e.revision,
+SELECT e.course_id, e.release_id, e.policy, c.revision AS calendar_revision,
        c.open_at, c.due_at, c.late_policy, c.late_until, c.time_zone
 FROM control.course_experiments e
 LEFT JOIN control.course_calendars c ON c.course_id = e.course_id;

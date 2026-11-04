@@ -395,18 +395,40 @@ async fn check_course_calendar(
     if spec.class != EnvironmentClass::Experiment || request.course_id.is_none() {
         return Ok(());
     }
-    let role: String = sqlx::query_scalar("SELECT current_user")
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|_| RuntimeBindingError::Unavailable)?;
-    if role != "lw_resource_runtime" {
-        return Ok(());
-    }
-    let Some(course_id) = request.course_id else {
+    let course_id = request.course_id.ok_or(RuntimeBindingError::Unavailable)?;
+    // Course experiments are keyed by release; other targets carry no course calendar.
+    let Some(release_id) = request.target.release().map(|(id, _)| id.as_uuid()) else {
         return Ok(());
     };
-    let Some((revision, open_at, due_at, time_zone, late_policy, late_until)) = sqlx::query_as::<_, (i64, Option<time::OffsetDateTime>, Option<time::OffsetDateTime>, Option<String>, Option<String>, Option<time::OffsetDateTime>)>("SELECT revision,open_at,due_at,time_zone,late_policy,late_until FROM control.course_experiment_windows WHERE course_id=$1 AND release_id=$2").bind(course_id.as_uuid()).bind(request.target.release().map(|(id, _)| id.as_uuid())).fetch_optional(&mut **tx).await.map_err(|_| RuntimeBindingError::Unavailable)? else { return Ok(()); };
-    let (Some(due_at), Some(time_zone), Some(late_policy)) = (due_at, time_zone, late_policy)
+    // No course experiment for this release: the course has no calendar policy for it.
+    // An experiment whose calendar is missing yields NULL calendar facts and fails closed.
+    let Some((revision, open_at, due_at, time_zone, late_policy, late_until)) = sqlx::query_as::<
+        _,
+        (
+            Option<i64>,
+            Option<time::OffsetDateTime>,
+            Option<time::OffsetDateTime>,
+            Option<String>,
+            Option<String>,
+            Option<time::OffsetDateTime>,
+        ),
+    >(
+        "SELECT calendar_revision,open_at,due_at,time_zone,late_policy,late_until \
+             FROM control.course_experiment_windows WHERE course_id=$1 AND release_id=$2",
+    )
+    .bind(course_id.as_uuid())
+    .bind(release_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| {
+        tracing::warn!(%error, "course calendar read failed");
+        RuntimeBindingError::Unavailable
+    })?
+    else {
+        return Ok(());
+    };
+    let (Some(revision), Some(due_at), Some(time_zone), Some(late_policy)) =
+        (revision, due_at, time_zone, late_policy)
     else {
         return Err(RuntimeBindingError::Unavailable);
     };

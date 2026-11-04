@@ -936,6 +936,7 @@ async fn candidate_publication_fixture(
             &release,
             UtcTimestamp::from_utc(time::OffsetDateTime::now_utc().replace_microsecond(0)?)?,
             executor_failure,
+            false,
         ),
     )
     .await?;
@@ -1443,6 +1444,7 @@ async fn exported_sandbox_image_is_enqueued_as_an_import_source()
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum PublicationCase {
     Publication,
+    ResourceCalendar,
     RubricRules,
     FrozenSharedInputs,
 }
@@ -1758,7 +1760,10 @@ async fn authoring_publication_fixture(
         ready.submission_manifest.is_none(),
         "system-facts evaluations must not project a workspace submission manifest"
     );
-    if case != PublicationCase::Publication {
+    if !matches!(
+        case,
+        PublicationCase::Publication | PublicationCase::ResourceCalendar
+    ) {
         rubric_model_input_cases::assert_rubric_authority(
             &pool,
             &package,
@@ -1779,6 +1784,7 @@ async fn authoring_publication_fixture(
             &environment_release,
             now,
             executor_failure,
+            case == PublicationCase::ResourceCalendar,
         ),
     )
     .await?;
