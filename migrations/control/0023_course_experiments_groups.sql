@@ -36,6 +36,9 @@ FROM control.course_experiments e
 JOIN control.course_calendars c ON c.course_id = e.course_id;
 DO $$
 BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='lw_control_runtime') THEN
+        GRANT SELECT ON control.course_experiment_windows TO lw_control_runtime;
+    END IF;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='lw_resource_runtime') THEN
         GRANT SELECT ON control.course_experiment_windows TO lw_resource_runtime;
     END IF;
