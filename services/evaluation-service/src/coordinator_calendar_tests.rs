@@ -6,7 +6,7 @@ use sqlx::postgres::PgPoolOptions;
 
 #[allow(clippy::too_many_lines)]
 pub(super) async fn assert_boundaries(
-    coordinator: &FreezeCoordinator,
+    coordinator: &mut FreezeCoordinator,
     provisioner: &sqlx::PgPool,
     course: CourseId,
     release: ReleaseId,
