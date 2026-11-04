@@ -590,23 +590,40 @@ async fn price_retained_interval(
     crate::costing::rate_lock(tx).await?;
     let unit = contracts::resource::ResourceBillingUnit::StorageByteSecond;
     let segments = crate::pricing::select_rate_segments(
-        tx, unit, None, None, None,
-        UtcTimestamp::from_utc(started_at)?, UtcTimestamp::from_utc(until)?,
-    ).await?;
+        tx,
+        unit,
+        None,
+        None,
+        None,
+        UtcTimestamp::from_utc(started_at)?,
+        UtcTimestamp::from_utc(until)?,
+    )
+    .await?;
     let mut snapshots = Vec::with_capacity(segments.len());
     let mut currency = None;
     let mut amount = 0_i128;
     for (rate, millis) in segments {
-        let quantity = u128::from(storage_bytes).checked_mul(millis)
+        let quantity = u128::from(storage_bytes)
+            .checked_mul(millis)
             .ok_or(ResourceStoreError::NumericOverflow)?;
-        if currency.as_ref().is_some_and(|value| value != &rate.unit_price.currency) {
+        if currency
+            .as_ref()
+            .is_some_and(|value| value != &rate.unit_price.currency)
+        {
             return Err(ResourceStoreError::RateCurrencyConflict);
         }
         if currency.is_none() {
             currency = Some(rate.unit_price.currency.clone());
         }
-        let charge = crate::pricing::multiply_money_wide(&rate.unit_price, quantity, rate.unit_quantity, 1000)?;
-        amount = amount.checked_add(charge.amount.scaled()).ok_or(ResourceStoreError::NumericOverflow)?;
+        let charge = crate::pricing::multiply_money_wide(
+            &rate.unit_price,
+            quantity,
+            rate.unit_quantity,
+            1000,
+        )?;
+        amount = amount
+            .checked_add(charge.amount.scaled())
+            .ok_or(ResourceStoreError::NumericOverflow)?;
         snapshots.push(serde_json::json!({
             "rateId": rate.id, "rateRevision": rate.revision, "unit": unit,
             "quantity": quantity.to_string(), "quantityDivisor": 1000,
@@ -654,8 +671,11 @@ pub(crate) async fn settle_retained_storage_once(
                 // Same saturating attempts and bounded exponential delay as pending usage.
                 sqlx::query("UPDATE resource.retained_storage_intervals SET settlement_attempts=LEAST(settlement_attempts,2147483646)+1,settlement_next_attempt_at=clock_timestamp()+make_interval(secs=>LEAST(60,power(2,LEAST(settlement_attempts,6)))::integer) WHERE environment_id=$1 AND started_at=$2")
                     .bind(environment_id).bind(started_at).execute(&mut *tx).await?;
-            },
-            Err(error) => { tx.rollback().await?; return Err(error); },
+            }
+            Err(error) => {
+                tx.rollback().await?;
+                return Err(error);
+            }
         }
     }
     tx.commit().await?;

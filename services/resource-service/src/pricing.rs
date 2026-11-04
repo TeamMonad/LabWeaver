@@ -303,15 +303,19 @@ pub(crate) fn multiply_money_wide(
         return Err(ResourceStoreError::NumericOverflow);
     }
     let scaled = unit_price.amount.scaled();
-    let product = scaled.unsigned_abs().checked_mul(quantity)
+    let product = scaled
+        .unsigned_abs()
+        .checked_mul(quantity)
         .ok_or(ResourceStoreError::NumericOverflow)?;
     let denominator = u128::from(unit_quantity) * u128::from(quantity_divisor);
     let quotient = product / denominator;
     let remainder = product % denominator;
     let twice_remainder = remainder * 2;
-    let rounded = quotient.checked_add(u128::from(
-        twice_remainder > denominator || (twice_remainder == denominator && quotient % 2 == 1),
-    )).ok_or(ResourceStoreError::NumericOverflow)?;
+    let rounded = quotient
+        .checked_add(u128::from(
+            twice_remainder > denominator || (twice_remainder == denominator && quotient % 2 == 1),
+        ))
+        .ok_or(ResourceStoreError::NumericOverflow)?;
     let amount = i128::try_from(rounded).map_err(|_| ResourceStoreError::NumericOverflow)?;
     Ok(Money {
         currency: unit_price.currency.clone(),

@@ -4042,7 +4042,16 @@ async fn work_handoff_fixture(
 async fn work_handoff_fixture_with_storage(
     pool: &sqlx::PgPool,
     storage_bytes: u64,
-) -> Result<(PgResourceStore, ResourceRequest, CapacityClaim, contracts::resource::ResourceLease, ActorId), Box<dyn std::error::Error>> {
+) -> Result<
+    (
+        PgResourceStore,
+        ResourceRequest,
+        CapacityClaim,
+        contracts::resource::ResourceLease,
+        ActorId,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let store = PgResourceStore::new(pool.clone())
         .with_environment_credit_owner(RESOURCE_ENVIRONMENT_CLIENT_ID.into());
     let now = store.current_time().await?;
@@ -7276,23 +7285,43 @@ fn retained_status(
     item: &resource_service::store::ProvisioningCapacityClaim,
     started_at: UtcTimestamp,
 ) -> Result<contracts::environment::ResourceWorkCleanupStatus, Box<dyn std::error::Error>> {
-    use contracts::environment::{EnvironmentDiskRetention, EnvironmentDiskState, EnvironmentRetainedStorageUsage, ObservedEnvironmentState, ResourceWorkCleanupStatus};
-    let ResourceTarget::Environment { environment_id, .. } = item.request.target else { return Err("environment target".into()); };
+    use contracts::environment::{
+        EnvironmentDiskRetention, EnvironmentDiskState, EnvironmentRetainedStorageUsage,
+        ObservedEnvironmentState, ResourceWorkCleanupStatus,
+    };
+    let ResourceTarget::Environment { environment_id, .. } = item.request.target else {
+        return Err("environment target".into());
+    };
     Ok(ResourceWorkCleanupStatus {
-        version: 1, environment_id, project_id: item.request.project_id, course_id: item.request.course_id,
-        owner_actor_id: item.request.requester_id, lease_id: item.lease.id,
-        lease_revision: item.lease_synced_revision.ok_or("lease fence")?, capacity_binding: item.claim.id.to_string(),
-        revision: Revision::new(3)?, observed_state: ObservedEnvironmentState::Deleted,
-        cleanup_complete: false, generation: 1, compute_retired: true, storage_purged: false,
+        version: 1,
+        environment_id,
+        project_id: item.request.project_id,
+        course_id: item.request.course_id,
+        owner_actor_id: item.request.requester_id,
+        lease_id: item.lease.id,
+        lease_revision: item.lease_synced_revision.ok_or("lease fence")?,
+        capacity_binding: item.claim.id.to_string(),
+        revision: Revision::new(3)?,
+        observed_state: ObservedEnvironmentState::Deleted,
+        cleanup_complete: false,
+        generation: 1,
+        compute_retired: true,
+        storage_purged: false,
         disk_retention: Some(EnvironmentDiskRetention {
-            state: EnvironmentDiskState::Retained, started_at,
+            state: EnvironmentDiskState::Retained,
+            started_at,
             expires_at: UtcTimestamp::from_utc(started_at.get() + time::Duration::days(7))?,
-            retired_generation: 1, compute_retired_at: Some(started_at), restored_generation: None,
-            reactivated_at: None, purged_at: None,
+            retired_generation: 1,
+            compute_retired_at: Some(started_at),
+            restored_generation: None,
+            reactivated_at: None,
+            purged_at: None,
         }),
         retained_storage_usage: Some(EnvironmentRetainedStorageUsage {
-            started_at, measured_until: started_at,
-            storage_bytes: item.claim.workload_resources.storage_bytes, closed: false,
+            started_at,
+            measured_until: started_at,
+            storage_bytes: item.claim.workload_resources.storage_bytes,
+            closed: false,
         }),
         diagnostic_code: None,
     })
@@ -7303,25 +7332,68 @@ async fn retained_disk_32_gib_full_week_and_late_purge_use_exact_wide_cost()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
     let bytes = 32_u64 << 30;
-    let (store, request, claim, lease, _actor) = work_handoff_fixture_with_storage(&pool, bytes).await?;
-    store.mark_capacity_handed_off(claim.id, claim.revision, lease.id, lease.revision).await?;
-    let item = store.next_active_environment_cleanup(None).await?.ok_or("cleanup")?;
+    let (store, request, claim, lease, _actor) =
+        work_handoff_fixture_with_storage(&pool, bytes).await?;
+    store
+        .mark_capacity_handed_off(claim.id, claim.revision, lease.id, lease.revision)
+        .await?;
+    let item = store
+        .next_active_environment_cleanup(None)
+        .await?
+        .ok_or("cleanup")?;
     let started = store.current_time().await?;
-    store.create_rate("large-disk-rate", &CreateResourceRateRequest {
-        unit: ResourceBillingUnit::StorageByteSecond, unit_quantity: 1_u64 << 30,
-        gpu_class: None, gpu_mode: None, builder_binding: None, model_binding: None, max_preauthorization: None,
-        unit_price: Money { currency: "CREDITS".into(), amount: FixedDecimal::parse("1.000000")? },
-        effective_from: started, effective_until: None,
-    }).await?;
+    store
+        .create_rate(
+            "large-disk-rate",
+            &CreateResourceRateRequest {
+                unit: ResourceBillingUnit::StorageByteSecond,
+                unit_quantity: 1_u64 << 30,
+                gpu_class: None,
+                gpu_mode: None,
+                builder_binding: None,
+                model_binding: None,
+                max_preauthorization: None,
+                unit_price: Money {
+                    currency: "CREDITS".into(),
+                    amount: FixedDecimal::parse("1.000000")?,
+                },
+                effective_from: started,
+                effective_until: None,
+            },
+        )
+        .await?;
     let mut status = retained_status(&item, started)?;
-    let expires = status.disk_retention.as_ref().ok_or("retention")?.expires_at;
-    status.retained_storage_usage.as_mut().ok_or("usage")?.measured_until = expires;
+    let expires = status
+        .disk_retention
+        .as_ref()
+        .ok_or("retention")?
+        .expires_at;
+    status
+        .retained_storage_usage
+        .as_mut()
+        .ok_or("usage")?
+        .measured_until = expires;
     let credits = resource_service::credits::PgCreditStore::new(pool.clone());
     let before = credits.account(request.project_id).await?;
-    store.consume_environment_cleanup_status(&item, &status).await?;
-    assert_eq!(sqlx::query_scalar::<_, String>("SELECT sum(amount)::text FROM resource.retained_storage_platform_costs").fetch_one(&pool).await?, "19353600000000");
-    let snapshot: Value = sqlx::query_scalar("SELECT rate_snapshots FROM resource.retained_storage_platform_costs").fetch_one(&pool).await?;
-    assert_eq!(snapshot[0]["quantity"].as_str(), Some("20781941650636800000"));
+    store
+        .consume_environment_cleanup_status(&item, &status)
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT sum(amount)::text FROM resource.retained_storage_platform_costs"
+        )
+        .fetch_one(&pool)
+        .await?,
+        "19353600000000"
+    );
+    let snapshot: Value =
+        sqlx::query_scalar("SELECT rate_snapshots FROM resource.retained_storage_platform_costs")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        snapshot[0]["quantity"].as_str(),
+        Some("20781941650636800000")
+    );
     assert_eq!(sqlx::query_as::<_, (bool,bool)>("SELECT compute_released,storage_released FROM resource.capacity_claims WHERE claim_id=$1").bind(claim.id.as_uuid()).fetch_one(&pool).await?, (true,false));
     let purged = UtcTimestamp::from_utc(expires.get() + time::Duration::days(2))?;
     status.revision = Revision::new(4)?;
@@ -7333,15 +7405,59 @@ async fn retained_disk_32_gib_full_week_and_late_purge_use_exact_wide_cost()
     let usage = status.retained_storage_usage.as_mut().ok_or("usage")?;
     usage.closed = true;
     usage.measured_until = purged;
-    store.consume_environment_cleanup_status(&item, &status).await?;
-    store.consume_environment_cleanup_status(&item, &status).await?;
-    assert_eq!(sqlx::query_scalar::<_, String>("SELECT sum(amount)::text FROM resource.retained_storage_platform_costs").fetch_one(&pool).await?, "24883200000000");
-    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource.retained_storage_platform_costs").fetch_one(&pool).await?, 2);
-    assert_eq!(sqlx::query_as::<_, (bool,time::OffsetDateTime)>("SELECT closed,closed_at FROM resource.retained_storage_intervals").fetch_one(&pool).await?, (true,purged.get()));
+    store
+        .consume_environment_cleanup_status(&item, &status)
+        .await?;
+    store
+        .consume_environment_cleanup_status(&item, &status)
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT sum(amount)::text FROM resource.retained_storage_platform_costs"
+        )
+        .fetch_one(&pool)
+        .await?,
+        "24883200000000"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource.retained_storage_platform_costs"
+        )
+        .fetch_one(&pool)
+        .await?,
+        2
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (bool, time::OffsetDateTime)>(
+            "SELECT closed,closed_at FROM resource.retained_storage_intervals"
+        )
+        .fetch_one(&pool)
+        .await?,
+        (true, purged.get())
+    );
     assert_eq!(sqlx::query_as::<_, (bool,bool)>("SELECT compute_released,storage_released FROM resource.capacity_claims WHERE claim_id=$1").bind(claim.id.as_uuid()).fetch_one(&pool).await?, (true,true));
-    let releasing = store.begin_deleted_environment_release(&item, &status, request.requester_id).await?;
-    store.complete_capacity_release(releasing.claim.id, releasing.claim.revision, releasing.lease.id, releasing.lease.revision, request.requester_id, "large-disk-final-release").await?;
-    assert_eq!(sqlx::query_scalar::<_, String>("SELECT state FROM resource.capacity_claims WHERE claim_id=$1").bind(claim.id.as_uuid()).fetch_one(&pool).await?, "released");
+    let releasing = store
+        .begin_deleted_environment_release(&item, &status, request.requester_id)
+        .await?;
+    store
+        .complete_capacity_release(
+            releasing.claim.id,
+            releasing.claim.revision,
+            releasing.lease.id,
+            releasing.lease.revision,
+            request.requester_id,
+            "large-disk-final-release",
+        )
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM resource.capacity_claims WHERE claim_id=$1"
+        )
+        .bind(claim.id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        "released"
+    );
     let account = credits.account(request.project_id).await?;
     assert_eq!(account.balance, before.balance);
     assert_eq!(account.spent, before.spent);
@@ -7354,45 +7470,90 @@ async fn retained_cleanup_commit_refreshes_waiting_metering_snapshot()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
     let (store, request, claim, lease, _actor) = work_handoff_fixture(&pool).await?;
-    store.mark_capacity_handed_off(claim.id, claim.revision, lease.id, lease.revision).await?;
-    let item = store.next_active_environment_cleanup(None).await?.ok_or("cleanup")?;
+    store
+        .mark_capacity_handed_off(claim.id, claim.revision, lease.id, lease.revision)
+        .await?;
+    let item = store
+        .next_active_environment_cleanup(None)
+        .await?
+        .ok_or("cleanup")?;
     let started = store.current_time().await?;
     let mut status = retained_status(&item, started)?;
     status.retained_storage_usage = None;
-    let budget = store.upsert_budget("snapshot-budget", &UpsertResourceBudgetRequest {
-        project_id: request.project_id, course_id: request.course_id,
-        limit: Money { currency: "CREDITS".into(), amount: FixedDecimal::parse("10.000000")? },
-        warning_at: Money { currency: "CREDITS".into(), amount: FixedDecimal::zero() },
-    }, started).await?;
+    let budget = store
+        .upsert_budget(
+            "snapshot-budget",
+            &UpsertResourceBudgetRequest {
+                project_id: request.project_id,
+                course_id: request.course_id,
+                limit: Money {
+                    currency: "CREDITS".into(),
+                    amount: FixedDecimal::parse("10.000000")?,
+                },
+                warning_at: Money {
+                    currency: "CREDITS".into(),
+                    amount: FixedDecimal::zero(),
+                },
+            },
+            started,
+        )
+        .await?;
     let credits = resource_service::credits::PgCreditStore::new(pool.clone());
     let account = credits.account(request.project_id).await?;
-    let ledger_count: i64 = sqlx::query_scalar("SELECT count(*) FROM resource.credit_ledger_entries").fetch_one(&pool).await?;
+    let ledger_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resource.credit_ledger_entries")
+            .fetch_one(&pool)
+            .await?;
 
     // Hold Request so the real cleanup consumer owns Lease while waiting here. The meter
     // then waits on that Lease with a statement snapshot older than cleanup's commit.
     let mut guard = pool.begin().await?;
-    let guard_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut *guard).await?;
+    let guard_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *guard)
+        .await?;
     sqlx::query("SELECT request_id FROM resource.resource_requests WHERE request_id=$1 FOR UPDATE")
-        .bind(request.id.as_uuid()).fetch_one(&mut *guard).await?;
+        .bind(request.id.as_uuid())
+        .fetch_one(&mut *guard)
+        .await?;
     let cleanup_store = store.clone();
     let cleanup = tokio::spawn(async move {
-        cleanup_store.consume_environment_cleanup_status(&item, &status).await
+        cleanup_store
+            .consume_environment_cleanup_status(&item, &status)
+            .await
     });
     wait_for_database_waiter(&pool, guard_pid).await?;
-    let cleanup_pid: i32 = sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))")
-        .bind(guard_pid).fetch_one(&pool).await?;
+    let cleanup_pid: i32 =
+        sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))")
+            .bind(guard_pid)
+            .fetch_one(&pool)
+            .await?;
     let meter_store = store.clone();
     let measured_until = UtcTimestamp::from_utc(started.get() + time::Duration::seconds(1))?;
     let metering = tokio::spawn(async move {
-        meter_store.record_usage(&RecordResourceUsageRequest {
-            kind: ResourceUsageKind::Compute,
-            target: contracts::resource::ResourceUsageTarget::ResourceRequest { request_id: request.id, lease_id: Some(lease.id) },
-            source_event_id: EventId::new(), measured_from: started, measured_until,
-            measurement: UsageMeasurement::Known { quantities: ResourceUsageQuantities {
-                quantity_divisor: 1000, cpu_millicore_seconds: 1000, memory_byte_seconds: 0,
-                storage_byte_seconds: 0, gpu_unit_seconds: 0,
-            }},
-        }, measured_until).await
+        meter_store
+            .record_usage(
+                &RecordResourceUsageRequest {
+                    kind: ResourceUsageKind::Compute,
+                    target: contracts::resource::ResourceUsageTarget::ResourceRequest {
+                        request_id: request.id,
+                        lease_id: Some(lease.id),
+                    },
+                    source_event_id: EventId::new(),
+                    measured_from: started,
+                    measured_until,
+                    measurement: UsageMeasurement::Known {
+                        quantities: ResourceUsageQuantities {
+                            quantity_divisor: 1000,
+                            cpu_millicore_seconds: 1000,
+                            memory_byte_seconds: 0,
+                            storage_byte_seconds: 0,
+                            gpu_unit_seconds: 0,
+                        },
+                    },
+                },
+                measured_until,
+            )
+            .await
     });
     wait_for_database_waiter(&pool, cleanup_pid).await?;
     guard.commit().await?;
@@ -7401,9 +7562,24 @@ async fn retained_cleanup_commit_refreshes_waiting_metering_snapshot()
     assert!(matches!(rejected, Err(ResourceStoreError::UsageConflict)));
     assert_eq!(credits.account(request.project_id).await?, account);
     assert_eq!(store.get_budget(request.project_id).await?, budget);
-    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource.resource_usage_records").fetch_one(&pool).await?, 0);
-    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource.resource_charges").fetch_one(&pool).await?, 0);
-    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource.credit_ledger_entries").fetch_one(&pool).await?, ledger_count);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource.resource_usage_records")
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource.resource_charges")
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource.credit_ledger_entries")
+            .fetch_one(&pool)
+            .await?,
+        ledger_count
+    );
     Ok(())
 }
 
@@ -7412,31 +7588,98 @@ async fn retained_storage_rate_gap_does_not_block_later_closed_interval()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_container, pool) = migrated_pool().await?;
     let (store, _request, claim, lease, actor) = work_handoff_fixture(&pool).await?;
-    store.mark_capacity_handed_off(claim.id, claim.revision, lease.id, lease.revision).await?;
-    let item_a = store.next_active_environment_cleanup(None).await?.ok_or("first cleanup")?;
+    store
+        .mark_capacity_handed_off(claim.id, claim.revision, lease.id, lease.revision)
+        .await?;
+    let item_a = store
+        .next_active_environment_cleanup(None)
+        .await?
+        .ok_or("first cleanup")?;
     // A separate real approved CPU environment shares the same settlement queue.
     let now = store.current_time().await?;
-    let (mut request_b, mut approval_b, mut allocation_b) = gpu_bundle(now, ProjectId::new(), "retained-retry-b", "handoff-gpu", 1);
+    let (mut request_b, mut approval_b, mut allocation_b) =
+        gpu_bundle(now, ProjectId::new(), "retained-retry-b", "handoff-gpu", 1);
     request_b.requested_resources.gpu = None;
     approval_b.approved_resources.gpu = None;
     allocation_b.claim.workload_resources.gpu = None;
     allocation_b.claim.quota_resources.gpu = None;
-    store.create("retry-b-create", &request_b, "retry-b-create").await?;
-    store.approve("retry-b-approve", request_b.id, &approval_b, &allocation_b,
-        ApprovalPolicy { min_duration_seconds: 1, max_duration_seconds: 3600 }, "retry-b-approve").await?;
-    let shell = store.claim_next_capacity_shell().await?.ok_or("second shell")?;
-    let ready = store.mark_capacity_shell_ready(shell.claim.id, shell.claim.revision, "retry-b", "retry-b-namespace", "retry-b-quota").await?;
-    let lease_b = activate_synthetic_environment(&pool, &store, allocation_b.lease_id, actor, request_b.project_id, now, 60, false).await?;
-    let handed_off = store.mark_capacity_handed_off(ready.id, ready.revision, lease_b.id, lease_b.revision).await?;
+    store
+        .create("retry-b-create", &request_b, "retry-b-create")
+        .await?;
+    store
+        .approve(
+            "retry-b-approve",
+            request_b.id,
+            &approval_b,
+            &allocation_b,
+            ApprovalPolicy {
+                min_duration_seconds: 1,
+                max_duration_seconds: 3600,
+            },
+            "retry-b-approve",
+        )
+        .await?;
+    let shell = store
+        .claim_next_capacity_shell()
+        .await?
+        .ok_or("second shell")?;
+    let ready = store
+        .mark_capacity_shell_ready(
+            shell.claim.id,
+            shell.claim.revision,
+            "retry-b",
+            "retry-b-namespace",
+            "retry-b-quota",
+        )
+        .await?;
+    let lease_b = activate_synthetic_environment(
+        &pool,
+        &store,
+        allocation_b.lease_id,
+        actor,
+        request_b.project_id,
+        now,
+        60,
+        false,
+    )
+    .await?;
+    let handed_off = store
+        .mark_capacity_handed_off(ready.id, ready.revision, lease_b.id, lease_b.revision)
+        .await?;
     let item_b = resource_service::store::ProvisioningCapacityClaim {
-        claim: handed_off, request: store.load(request_b.id).await?, lease_synced_revision: Some(lease_b.revision), lease: lease_b,
+        claim: handed_off,
+        request: store.load(request_b.id).await?,
+        lease_synced_revision: Some(lease_b.revision),
+        lease: lease_b,
     };
-    let boundary = UtcTimestamp::from_utc(store.current_time().await?.get() + time::Duration::minutes(2))?;
-    let storage_rate = store.list_rates(&contracts::http::ResourceListQuery::default()).await?.items.into_iter()
-        .find(|rate| rate.unit == ResourceBillingUnit::StorageByteSecond && rate.effective_until.is_none()).ok_or("storage rate")?;
-    store.end_rate(storage_rate.id, "gap-start", &EndResourceRateRequest { effective_until: boundary }).await?;
-    let mut status_a = retained_status(&item_a, UtcTimestamp::from_utc(boundary.get() + time::Duration::minutes(1))?)?;
-    let mut status_b = retained_status(&item_b, UtcTimestamp::from_utc(boundary.get() + time::Duration::minutes(2))?)?;
+    let boundary =
+        UtcTimestamp::from_utc(store.current_time().await?.get() + time::Duration::minutes(2))?;
+    let storage_rate = store
+        .list_rates(&contracts::http::ResourceListQuery::default())
+        .await?
+        .items
+        .into_iter()
+        .find(|rate| {
+            rate.unit == ResourceBillingUnit::StorageByteSecond && rate.effective_until.is_none()
+        })
+        .ok_or("storage rate")?;
+    store
+        .end_rate(
+            storage_rate.id,
+            "gap-start",
+            &EndResourceRateRequest {
+                effective_until: boundary,
+            },
+        )
+        .await?;
+    let mut status_a = retained_status(
+        &item_a,
+        UtcTimestamp::from_utc(boundary.get() + time::Duration::minutes(1))?,
+    )?;
+    let mut status_b = retained_status(
+        &item_b,
+        UtcTimestamp::from_utc(boundary.get() + time::Duration::minutes(2))?,
+    )?;
     for (item, status) in [(&item_a, &mut status_a), (&item_b, &mut status_b)] {
         status.storage_purged = true;
         status.cleanup_complete = true;
@@ -7446,30 +7689,85 @@ async fn retained_storage_rate_gap_does_not_block_later_closed_interval()
         let usage = status.retained_storage_usage.as_mut().ok_or("usage")?;
         usage.closed = true;
         usage.measured_until = disk.expires_at;
-        store.consume_environment_cleanup_status(item, status).await?;
-        let releasing = store.begin_deleted_environment_release(item, status, actor).await?;
-        store.complete_capacity_release(releasing.claim.id, releasing.claim.revision, releasing.lease.id, releasing.lease.revision, actor, "retry-closed-disk").await?;
+        store
+            .consume_environment_cleanup_status(item, status)
+            .await?;
+        let releasing = store
+            .begin_deleted_environment_release(item, status, actor)
+            .await?;
+        store
+            .complete_capacity_release(
+                releasing.claim.id,
+                releasing.claim.revision,
+                releasing.lease.id,
+                releasing.lease.revision,
+                actor,
+                "retry-closed-disk",
+            )
+            .await?;
     }
-    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource.retained_storage_platform_costs").fetch_one(&pool).await?, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource.retained_storage_platform_costs"
+        )
+        .fetch_one(&pool)
+        .await?,
+        0
+    );
     let disk_b = status_b.disk_retention.as_ref().ok_or("second disk")?;
-    store.create_rate("gap-fixed-for-b", &CreateResourceRateRequest {
-        unit: ResourceBillingUnit::StorageByteSecond, unit_quantity: 1,
-        gpu_class: None, gpu_mode: None, builder_binding: None, model_binding: None, max_preauthorization: None,
-        unit_price: Money { currency: "CREDITS".into(), amount: FixedDecimal::parse("0.000001")? },
-        effective_from: disk_b.started_at, effective_until: None,
-    }).await?;
+    store
+        .create_rate(
+            "gap-fixed-for-b",
+            &CreateResourceRateRequest {
+                unit: ResourceBillingUnit::StorageByteSecond,
+                unit_quantity: 1,
+                gpu_class: None,
+                gpu_mode: None,
+                builder_binding: None,
+                model_binding: None,
+                max_preauthorization: None,
+                unit_price: Money {
+                    currency: "CREDITS".into(),
+                    amount: FixedDecimal::parse("0.000001")?,
+                },
+                effective_from: disk_b.started_at,
+                effective_until: None,
+            },
+        )
+        .await?;
     let attempt_started = store.current_time().await?;
     assert!(store.settle_pending_usage_once().await?);
-    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource.retained_storage_platform_costs WHERE environment_id=$1")
-        .bind(status_b.environment_id.as_uuid()).fetch_one(&pool).await?, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource.retained_storage_platform_costs WHERE environment_id=$1"
+        )
+        .bind(status_b.environment_id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        1
+    );
     assert_eq!(sqlx::query_scalar::<_, String>("SELECT sum(amount)::text FROM resource.retained_storage_platform_costs WHERE environment_id=$1")
         .bind(status_b.environment_id.as_uuid()).fetch_one(&pool).await?, "604800");
     assert_eq!(sqlx::query_as::<_, (bool,i32,bool)>("SELECT priced_until=started_at,settlement_attempts,settlement_next_attempt_at>$2 FROM resource.retained_storage_intervals WHERE environment_id=$1")
         .bind(status_a.environment_id.as_uuid()).bind(attempt_started.get()).fetch_one(&pool).await?, (true,1,true));
     store.settle_pending_usage_once().await?;
-    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource.retained_storage_platform_costs WHERE environment_id=$1")
-        .bind(status_b.environment_id.as_uuid()).fetch_one(&pool).await?, 1);
-    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource.retained_storage_platform_costs WHERE environment_id=$1")
-        .bind(status_a.environment_id.as_uuid()).fetch_one(&pool).await?, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource.retained_storage_platform_costs WHERE environment_id=$1"
+        )
+        .bind(status_b.environment_id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource.retained_storage_platform_costs WHERE environment_id=$1"
+        )
+        .bind(status_a.environment_id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        0
+    );
     Ok(())
 }
