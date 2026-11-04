@@ -37,6 +37,10 @@ use crate::{
     EvaluationControlStoreError, FreezeCommandDurableOutcome, FreezeRequest, FreezeWorkerDispatch,
     FreezeWorkerProfile, PgEvaluationControlStore, PgFreezeCommandStore, SubmissionFreezeCommand,
 };
+#[cfg(test)]
+#[path = "../../control-service/tests/support/production_roles.rs"]
+#[allow(dead_code)]
+mod calendar_production_roles;
 
 const WORKER_IMAGE_PULL_SECRET_NAME: &str = "harbor-labweaver-system-pull";
 
@@ -1689,6 +1693,10 @@ mod tests {
     use testcontainers_modules::postgres::Postgres;
     use tokio::net::TcpListener;
     use tokio_rustls::TlsAcceptor;
+    use super::calendar_production_roles;
+    mod calendar_tests {
+        include!("coordinator_calendar_tests.rs");
+    }
 
     #[test]
     fn existing_profile_example_requires_no_worker_credential_files()
@@ -1840,23 +1848,36 @@ mod tests {
         Ok(())
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "the integration fixture keeps the complete admission and Kubernetes boundary in one scenario"
-    )]
     #[tokio::test]
     async fn coordinator_profiles_preserve_admission_and_recover_dispatch_without_binding()
     -> Result<(), Box<dyn std::error::Error>> {
+        coordinator_scenario(false).await
+    }
+
+    #[tokio::test]
+    async fn freeze_course_calendar_boundaries_reject_without_frozen_submission_and_accept_late()
+    -> Result<(), Box<dyn std::error::Error>> {
+        coordinator_scenario(true).await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn coordinator_scenario(calendar_boundaries: bool) -> Result<(), Box<dyn Error>> {
+        let roles = if calendar_boundaries {
+            Some(calendar_production_roles::ProductionRoles::start().await?)
+        } else {
+            None
+        };
         let database = Postgres::default().with_tag("17.5-alpine").start().await?;
-        let database_url = format!(
-            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
-            database.get_host_port_ipv4(5432).await?
-        );
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&database_url)
-            .await?;
-        apply_evaluation_migrations(&pool).await?;
+        let pool = if let Some(roles) = &roles {
+            roles.provisioner.clone()
+        } else {
+            let pool = PgPoolOptions::new().max_connections(4).connect(&format!(
+                "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+                database.get_host_port_ipv4(5432).await?
+            )).await?;
+            apply_evaluation_migrations(&pool).await?;
+            pool
+        };
 
         let project_id = ProjectId::new();
         let course_id = CourseId::new();
@@ -2080,6 +2101,14 @@ spec:
             trace_id: "coordinator-manifest-mismatch".to_owned(),
             requested_at: now,
         };
+        if calendar_boundaries {
+            command.manifest = expected_manifest;
+            calendar_tests::assert_boundaries(&mut coordinator, &pool, &command, &kubernetes_server).await?;
+            kubernetes_server.stop().await;
+            environment_server.stop().await;
+            admission_server.stop().await;
+            return Ok(());
+        }
 
         let result = coordinator
             .create_resources(&command, "student", "lw-freeze-test")
