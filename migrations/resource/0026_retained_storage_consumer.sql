@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS resource.environment_cleanup_fences (
     environment_id uuid NOT NULL,
     revision bigint NOT NULL CHECK (revision > 0),
     generation bigint NOT NULL CHECK (generation > 0),
+    receipt jsonb NOT NULL,
     compute_released boolean NOT NULL DEFAULT false,
     compute_retired_at timestamptz,
     storage_purged boolean NOT NULL DEFAULT false,

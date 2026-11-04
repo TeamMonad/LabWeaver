@@ -7021,10 +7021,22 @@ async fn assert_retained_disk_consumer(
     };
     let credits = resource_service::credits::PgCreditStore::new(pool.clone());
     let before = credits.account(request.project_id).await?;
+    let budget = store.upsert_budget("retained-budget", &UpsertResourceBudgetRequest {
+        project_id: request.project_id,
+        course_id: request.course_id,
+        limit: Money { currency: "CREDITS".into(), amount: FixedDecimal::parse("1.000000")? },
+        warning_at: Money { currency: "CREDITS".into(), amount: FixedDecimal::zero() },
+    }, started).await?;
     let ledger_before: i64 =
         sqlx::query_scalar("SELECT count(*) FROM resource.credit_ledger_entries")
             .fetch_one(&pool)
             .await?;
+    let known_usage = status.retained_storage_usage.take();
+    store.consume_environment_cleanup_status(&item, &status).await?;
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource.retained_storage_intervals").fetch_one(&pool).await?, 0);
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource.retained_storage_platform_costs").fetch_one(&pool).await?, 0);
+    assert!(sqlx::query_scalar::<_, Value>("SELECT receipt FROM resource.environment_cleanup_fences WHERE lease_id=$1").bind(lease.id.as_uuid()).fetch_one(&pool).await?["retainedStorageUsage"].is_null());
+    status.retained_storage_usage = known_usage;
     store
         .consume_environment_cleanup_status(&item, &status)
         .await?;
@@ -7110,6 +7122,7 @@ async fn assert_retained_disk_consumer(
         2
     );
     assert_eq!(credits.account(request.project_id).await?, before);
+    assert_eq!(store.get_budget(request.project_id).await?, budget);
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource.credit_ledger_entries")
             .fetch_one(&pool)

@@ -467,6 +467,9 @@ pub(crate) async fn consume_cleanup_status(
     {
         return Err(ResourceStoreError::CapacityReadbackInvalid);
     }
+    let mut normalized = status.clone();
+    normalized.retained_storage_usage = None;
+    let receipt = serde_json::to_value(normalized)?;
     let mut tx = pool.begin().await?;
     let result = async {
         let row = sqlx::query("SELECT l.request_id,l.claim_id,l.state AS lease_state,r.project_id,r.course_id,r.requester_id,r.state AS request_state,c.state AS claim_state,c.lease_synced_revision FROM resource.resource_leases l JOIN resource.resource_requests r USING(request_id) JOIN resource.capacity_claims c ON c.claim_id=l.claim_id WHERE l.lease_id=$1 FOR UPDATE OF l,r,c")
@@ -483,7 +486,7 @@ pub(crate) async fn consume_cleanup_status(
         {
             return Err(ResourceStoreError::CapacityReadbackInvalid);
         }
-        let prior = sqlx::query("SELECT revision,generation,storage_purged FROM resource.environment_cleanup_fences WHERE lease_id=$1 FOR UPDATE")
+        let prior = sqlx::query("SELECT revision,generation,storage_purged,receipt FROM resource.environment_cleanup_fences WHERE lease_id=$1 FOR UPDATE")
             .bind(expected.lease.id.as_uuid()).fetch_optional(&mut *tx).await?;
         if let Some(row) = prior {
             let revision: i64 = row.try_get("revision")?;
@@ -491,6 +494,7 @@ pub(crate) async fn consume_cleanup_status(
             let purged: bool = row.try_get("storage_purged")?;
             if status.revision.get() < u64::try_from(revision)?
                 || status.generation < u64::try_from(generation)?
+                || (status.revision.get() == u64::try_from(revision)? && row.try_get::<serde_json::Value, _>("receipt")? != receipt)
                 || (purged && !status.storage_purged)
             {
                 return Err(ResourceStoreError::CapacityReadbackInvalid);
@@ -527,13 +531,14 @@ pub(crate) async fn consume_cleanup_status(
             }
         }
         let disk = status.disk_retention.as_ref();
-        sqlx::query("INSERT INTO resource.environment_cleanup_fences(lease_id,environment_id,revision,generation,compute_released,compute_retired_at,storage_purged,reactivated_generation,reactivated_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(lease_id) DO UPDATE SET revision=EXCLUDED.revision,generation=EXCLUDED.generation,compute_released=resource.environment_cleanup_fences.compute_released OR EXCLUDED.compute_released,compute_retired_at=COALESCE(resource.environment_cleanup_fences.compute_retired_at,EXCLUDED.compute_retired_at),storage_purged=resource.environment_cleanup_fences.storage_purged OR EXCLUDED.storage_purged,reactivated_generation=COALESCE(EXCLUDED.reactivated_generation,resource.environment_cleanup_fences.reactivated_generation),reactivated_at=COALESCE(EXCLUDED.reactivated_at,resource.environment_cleanup_fences.reactivated_at),updated_at=EXCLUDED.updated_at")
+        sqlx::query("INSERT INTO resource.environment_cleanup_fences(lease_id,environment_id,revision,generation,compute_released,compute_retired_at,storage_purged,reactivated_generation,reactivated_at,updated_at,receipt) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(lease_id) DO UPDATE SET revision=EXCLUDED.revision,generation=EXCLUDED.generation,compute_released=resource.environment_cleanup_fences.compute_released OR EXCLUDED.compute_released,compute_retired_at=COALESCE(resource.environment_cleanup_fences.compute_retired_at,EXCLUDED.compute_retired_at),storage_purged=resource.environment_cleanup_fences.storage_purged OR EXCLUDED.storage_purged,reactivated_generation=COALESCE(EXCLUDED.reactivated_generation,resource.environment_cleanup_fences.reactivated_generation),reactivated_at=COALESCE(EXCLUDED.reactivated_at,resource.environment_cleanup_fences.reactivated_at),updated_at=EXCLUDED.updated_at,receipt=EXCLUDED.receipt")
             .bind(expected.lease.id.as_uuid()).bind(environment_id.as_uuid())
             .bind(i64::try_from(status.revision.get())?).bind(i64::try_from(status.generation)?)
             .bind(status.compute_retired).bind(disk.and_then(|d| d.compute_retired_at.map(UtcTimestamp::get)))
             .bind(status.storage_purged)
             .bind(disk.and_then(|d| d.reactivated_at.and(d.restored_generation)).map(i64::try_from).transpose()?)
             .bind(disk.and_then(|d| d.reactivated_at.map(UtcTimestamp::get))).bind(now)
+            .bind(&receipt)
             .execute(&mut *tx).await?;
         sqlx::query("UPDATE resource.capacity_claims SET compute_released=compute_released OR $2,storage_released=storage_released OR $3 WHERE claim_id=$1")
             .bind(expected.claim.id.as_uuid()).bind(status.compute_retired).bind(status.storage_purged)
