@@ -32,13 +32,12 @@ pub(super) async fn assert_calendar_boundaries(
         .target
         .release()
         .ok_or("environment release required")?;
-    let runtime = pool.clone();
     sqlx::query("INSERT INTO control.course_experiments(experiment_id,course_id,release_id,policy,revision,contract) VALUES($1,$2,$3,'individual',1,'{}')")
         .bind(uuid::Uuid::now_v7()).bind(course.as_uuid()).bind(release.as_uuid()).execute(pool).await?;
     // Control persists calendars through UtcTimestamp, which carries millisecond precision.
     sqlx::query("INSERT INTO control.course_calendars(course_id,revision,open_at,due_at,time_zone,late_policy,late_until,contract) VALUES($1,1,date_trunc('milliseconds',clock_timestamp()-interval '1 hour'),date_trunc('milliseconds',clock_timestamp()+interval '1 hour'),'Asia/Shanghai','hard_close',NULL,'{}')")
         .bind(course.as_uuid()).execute(pool).await?;
-    let store = PgResourceStore::new(runtime.clone());
+    let store = PgResourceStore::new(pool.clone());
     for (label, open_hours, due_hours, policy, late_hours, expected) in [
         (
             "before_open",
@@ -70,7 +69,7 @@ pub(super) async fn assert_calendar_boundaries(
         sqlx::query("UPDATE control.course_calendars SET open_at=date_trunc('milliseconds',clock_timestamp()+make_interval(hours=>$2)),due_at=date_trunc('milliseconds',clock_timestamp()+make_interval(hours=>$3)),late_policy=$4,late_until=CASE WHEN $5::integer IS NULL THEN NULL ELSE date_trunc('milliseconds',clock_timestamp()+make_interval(hours=>$5)) END WHERE course_id=$1")
             .bind(course.as_uuid()).bind(open_hours).bind(due_hours).bind(policy).bind(late_hours).execute(pool).await?;
         let before = side_effects(pool).await?;
-        let resolved = resolve_binding(&runtime, request).await;
+        let resolved = resolve_binding(pool, request).await;
         if let Some(diagnostic) = expected {
             assert_eq!(
                 resolved.err().map(|error| error.to_string()).as_deref(),
@@ -121,7 +120,6 @@ pub(super) async fn assert_calendar_boundaries(
         .bind(course.as_uuid())
         .execute(pool)
         .await?;
-    runtime.close().await;
     Ok(())
 }
 
