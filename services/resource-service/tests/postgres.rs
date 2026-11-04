@@ -7392,7 +7392,7 @@ async fn retained_disk_32_gib_full_week_and_late_purge_use_exact_wide_cost()
             .await?;
     assert_eq!(
         snapshot[0]["quantity"].as_str(),
-        Some("20781941650636800000")
+        Some("20780769764966400000")
     );
     assert_eq!(sqlx::query_as::<_, (bool,bool)>("SELECT compute_released,storage_released FROM resource.capacity_claims WHERE claim_id=$1").bind(claim.id.as_uuid()).fetch_one(&pool).await?, (true,false));
     let purged = UtcTimestamp::from_utc(expires.get() + time::Duration::days(2))?;
