@@ -29,6 +29,9 @@ use resource_service::{
     store::{PendingAllocation, PgResourceStore, ProvisioningCapacityClaim},
 };
 
+#[path = "environment_restore_http.rs"]
+mod http_cases;
+
 const OWNER: &str = "synthetic-environment";
 struct Fixture {
     roles: ProductionRoles,
@@ -39,6 +42,7 @@ struct Fixture {
     status: ResourceWorkCleanupStatus,
     original: EnvironmentCreditGrant,
     input: RestoreEnvironmentFundingRequest,
+    projection: contracts::events::ReleasePublished,
 }
 impl Fixture {
     async fn new() -> TestResult<Self> {
@@ -294,6 +298,16 @@ impl Fixture {
             status,
             original,
             input,
+            projection: contracts::events::ReleasePublished {
+                release,
+                environment_spec: publication
+                    .request
+                    .manual
+                    .as_ref()
+                    .ok_or("manual spec")?
+                    .spec
+                    .clone(),
+            },
         })
     }
     async fn admit(&self, key: &str) -> TestResult<EnvironmentCreditGrant> {

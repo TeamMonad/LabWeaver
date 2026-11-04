@@ -88,7 +88,7 @@ impl PgResourceStore {
             .ok_or(ResourceStoreError::UsageConflict)?;
         if !retired.try_get::<bool, _>("compute_released")?
             || retired.try_get::<bool, _>("storage_released")?
-            || retired.try_get::<i64, _>("generation")? >= generation
+            || retired.try_get::<i64, _>("generation")? > generation
         {
             return Err(ResourceStoreError::UsageConflict);
         }
