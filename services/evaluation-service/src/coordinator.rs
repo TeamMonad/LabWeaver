@@ -1851,13 +1851,13 @@ mod tests {
     #[tokio::test]
     async fn coordinator_profiles_preserve_admission_and_recover_dispatch_without_binding()
     -> Result<(), Box<dyn std::error::Error>> {
-        coordinator_scenario(false).await
+        Box::pin(coordinator_scenario(false)).await
     }
 
     #[tokio::test]
     async fn freeze_course_calendar_boundaries_reject_without_frozen_submission_and_accept_late()
     -> Result<(), Box<dyn std::error::Error>> {
-        coordinator_scenario(true).await
+        Box::pin(coordinator_scenario(true)).await
     }
 
     #[allow(clippy::too_many_lines)]

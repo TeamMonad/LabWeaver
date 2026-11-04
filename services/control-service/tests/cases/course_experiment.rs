@@ -10,6 +10,7 @@ use persistence_sqlx::Sha256Digest;
 use std::sync::Arc;
 use uuid::Uuid;
 #[allow(dead_code)]
+#[allow(clippy::duplicate_mod)]
 #[path = "../support/production_roles.rs"]
 mod production_roles;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -73,6 +74,7 @@ async fn service() -> TestResult<(
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn experiment_create_permissions_and_group_policy_are_enforced() -> TestResult {
     let (roles, service, course, teacher, ta, student) = service().await?;
     let request = CreateCourseExperimentRequest {
@@ -279,7 +281,10 @@ async fn payer_binding_is_immutable_while_membership_changes() -> TestResult {
     sqlx::query("INSERT INTO control.experiment_groups(group_id,experiment_id,payer_project_id,payer_actor_id,payer_consent,revision,contract) VALUES($1,$2,$3,$4,true,1,'{}')").bind(group_id).bind(experiment_id).bind(payer_project).bind(payer_actor).execute(&pool).await?;
     sqlx::query("INSERT INTO control.experiment_group_members(group_id,actor_id,revision,state) VALUES($1,$2,1,'active')").bind(group_id).bind(payer_actor).execute(&pool).await?;
     sqlx::query("UPDATE control.experiment_group_members SET state='revoked',revision=2 WHERE group_id=$1 AND actor_id=$2").bind(group_id).bind(payer_actor).execute(&pool).await?;
-    let error = sqlx::query("UPDATE control.experiment_groups SET payer_project_id=$2,payer_actor_id=$3 WHERE group_id=$1").bind(group_id).bind(replacement_project).bind(Uuid::now_v7()).execute(&pool).await.expect_err("payer replacement must be rejected");
+    let error = match sqlx::query("UPDATE control.experiment_groups SET payer_project_id=$2,payer_actor_id=$3 WHERE group_id=$1").bind(group_id).bind(replacement_project).bind(Uuid::now_v7()).execute(&pool).await {
+        Ok(_) => return Err("payer replacement was accepted".into()),
+        Err(error) => error,
+    };
     assert!(
         error
             .to_string()

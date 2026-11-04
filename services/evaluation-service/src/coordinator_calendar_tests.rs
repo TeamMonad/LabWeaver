@@ -1,7 +1,6 @@
 use super::{FreezeCoordinator, KubernetesServer, SubmissionFreezeCommand};
 use crate::{PgEvaluationControlStore, FreezeWorkerDispatch, FreezeWorkerProfile};
 use contracts::{FrozenSubmissionId, submission::SubmissionManifest};
-use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use std::{error::Error, sync::atomic::Ordering};
 
