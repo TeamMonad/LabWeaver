@@ -1,4 +1,4 @@
-//! Real production PostgreSQL roles, Control publication, Resource pricing/ledger and Environment caller.
+//! Real production `PostgreSQL` roles, Control publication, Resource pricing/ledger and Environment caller.
 #![allow(
     clippy::too_many_lines,
     reason = "keep each restore transaction invariant together"
@@ -68,7 +68,8 @@ impl Fixture {
             actor,
             &contracts::platform_configuration::UpdatePlatformConfigurationRequest {
                 expected_revision: 0,
-                configuration: Default::default(),
+                configuration:
+                    contracts::platform_configuration::PlatformConfigurationDesired::default(),
             },
             &IdempotencyKey::parse("restore-policy")?,
             now,
