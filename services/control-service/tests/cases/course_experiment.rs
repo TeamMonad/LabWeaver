@@ -157,21 +157,6 @@ async fn experiment_create_permissions_and_group_policy_are_enforced() -> TestRe
         matches!(
             service
                 .create_experiment_group(
-                    &teacher,
-                    course,
-                    experiment.id,
-                    &group_request,
-                    &IdempotencyKey::parse("teacher-binds-student")?,
-                )
-                .await,
-            Err(control_service::ControlError::CourseGovernanceDenied)
-        ),
-        "staff cannot consent to spend a student's project Credits"
-    );
-    assert!(
-        matches!(
-            service
-                .create_experiment_group(
                     &student,
                     course,
                     experiment.id,
@@ -200,6 +185,21 @@ async fn experiment_create_permissions_and_group_policy_are_enforced() -> TestRe
         "a project viewer cannot spend its Credits"
     );
     project_role(&roles.provisioner, member_project, &student, "editor").await?;
+    assert!(
+        matches!(
+            service
+                .create_experiment_group(
+                    &teacher,
+                    course,
+                    experiment.id,
+                    &group_request,
+                    &IdempotencyKey::parse("teacher-binds-student")?,
+                )
+                .await,
+            Err(control_service::ControlError::CourseGovernanceDenied)
+        ),
+        "staff cannot consent to spend a student's project Credits"
+    );
     let group = service
         .create_experiment_group(
             &student,
