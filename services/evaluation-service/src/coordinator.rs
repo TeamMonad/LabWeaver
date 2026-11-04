@@ -2103,7 +2103,7 @@ spec:
         };
         if calendar_boundaries {
             command.manifest = expected_manifest;
-            calendar_tests::assert_boundaries(&mut coordinator, &pool, &command, &kubernetes_server).await?;
+            calendar_tests::assert_boundaries(&mut coordinator, &pool, course_id, environment_release_id).await?;
             kubernetes_server.stop().await;
             environment_server.stop().await;
             admission_server.stop().await;
