@@ -1665,7 +1665,7 @@ mod tests {
         server::conn::auto::Builder,
         service::TowerToHyperService,
     };
-    use persistence_sqlx::{Domain, MigrationCatalog, Sha256Digest};
+    use persistence_sqlx::Sha256Digest;
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
         KeyPair, KeyUsagePurpose,
@@ -1673,7 +1673,6 @@ mod tests {
     use reqwest::{Certificate, Client, Url};
     use rustls::{ServerConfig, pki_types::PrivateKeyDer};
     use serde_json::{Value, json};
-    use sqlx::postgres::PgPoolOptions;
     use std::{
         collections::{BTreeMap, BTreeSet},
         error::Error,
@@ -1686,8 +1685,6 @@ mod tests {
         },
     };
     use tempfile::TempDir;
-    use testcontainers::{ImageExt, runners::AsyncRunner};
-    use testcontainers_modules::postgres::Postgres;
     use tokio::net::TcpListener;
     use tokio_rustls::TlsAcceptor;
     mod calendar_tests {
@@ -1858,25 +1855,9 @@ mod tests {
 
     #[allow(clippy::too_many_lines)]
     async fn coordinator_scenario(calendar_boundaries: bool) -> Result<(), Box<dyn Error>> {
-        let roles = if calendar_boundaries {
-            Some(calendar_production_roles::ProductionRoles::start().await?)
-        } else {
-            None
-        };
-        let database = Postgres::default().with_tag("17.5-alpine").start().await?;
-        let pool = if let Some(roles) = &roles {
-            roles.provisioner.clone()
-        } else {
-            let pool = PgPoolOptions::new()
-                .max_connections(4)
-                .connect(&format!(
-                    "postgres://postgres:postgres@127.0.0.1:{}/postgres",
-                    database.get_host_port_ipv4(5432).await?
-                ))
-                .await?;
-            apply_evaluation_migrations(&pool).await?;
-            pool
-        };
+        // Production schema and roles: the freeze path reads Control's course windows.
+        let roles = calendar_production_roles::ProductionRoles::start().await?;
+        let pool = roles.provisioner.clone();
 
         let project_id = ProjectId::new();
         let course_id = CourseId::new();
@@ -2435,31 +2416,6 @@ spec:
 
         kubernetes_server.stop().await;
         admission_server.stop().await;
-        drop(database);
-        Ok(())
-    }
-
-    async fn apply_evaluation_migrations(pool: &sqlx::PgPool) -> Result<(), Box<dyn Error>> {
-        sqlx::query("CREATE SCHEMA evaluation")
-            .execute(pool)
-            .await?;
-        let mut connection = pool.acquire().await?;
-        sqlx::query("SET search_path = evaluation, pg_catalog")
-            .execute(&mut *connection)
-            .await?;
-        let migration_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
-        let catalog = MigrationCatalog::load(&migration_root.join("catalog.yaml"))?;
-        let domain = catalog
-            .domains
-            .iter()
-            .find(|domain| domain.name == Domain::Evaluation)
-            .ok_or("evaluation migration domain missing")?;
-        for migration in &domain.migrations {
-            let sql = MigrationCatalog::read_verified_sql(&migration_root, migration)?;
-            sqlx::raw_sql(sqlx::AssertSqlSafe(&*sql))
-                .execute(&mut *connection)
-                .await?;
-        }
         Ok(())
     }
 
