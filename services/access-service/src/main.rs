@@ -641,6 +641,10 @@ fn project_browser_router() -> Router<Arc<AppState>> {
         )
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the explicit course route table keeps each forwarded authorization path auditable"
+)]
 fn course_browser_router() -> Router<Arc<AppState>> {
     Router::new()
         .route(
