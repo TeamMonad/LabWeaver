@@ -270,7 +270,7 @@ pub async fn resolve_binding(
         .map_err(|_| RuntimeBindingError::Unavailable)?;
     let (identity, spec, status) = current_inputs(&mut tx, request).await?;
     check_policy_use(&status, RuntimePolicyUse::Admission)?;
-    check_course_calendar(&mut tx, request).await?;
+    check_course_calendar(&mut tx, request, &identity, &spec).await?;
     let applied = status
         .applied
         .as_ref()
@@ -317,6 +317,7 @@ async fn validated_policy(
     binding: &RuntimeAuthorizationBinding,
 ) -> Result<contracts::platform_configuration::PlatformConfigurationVersion, RuntimeBindingError> {
     let (identity, spec, status) = current_inputs(tx, request).await?;
+    check_course_calendar(tx, request, &identity, &spec).await?;
     binding.validate_current(request, &identity, &status)?;
     let declared = declared_runtime_permissions(&spec, request.project_id)?;
     if declared.capabilities != binding.permissions.capabilities
@@ -389,7 +390,12 @@ pub async fn current_authorization(
 async fn check_course_calendar(
     tx: &mut Transaction<'_, Postgres>,
     request: &ResourceRequest,
+    identity: &RuntimeConfigurationIdentity,
+    spec: &EnvironmentSpec,
 ) -> Result<(), RuntimeBindingError> {
+    if spec.class != EnvironmentClass::Experiment || identity.teacher_scope.is_none() {
+        return Ok();
+    }
     let role: String = sqlx::query_scalar("SELECT current_user")
         .fetch_one(&mut **tx)
         .await
@@ -400,7 +406,7 @@ async fn check_course_calendar(
     let Some(course_id) = request.course_id else {
         return Ok(());
     };
-    let Some((revision, open_at, due_at, time_zone, late_policy, late_until)) = sqlx::query_as::<_, (i64, Option<time::OffsetDateTime>, time::OffsetDateTime, String, String, Option<time::OffsetDateTime>)>("SELECT revision,open_at,due_at,time_zone,late_policy,late_until FROM control.course_experiment_windows WHERE course_id=$1 AND release_id=$2").bind(course_id.as_uuid()).bind(request.target.release().map(|(id, _)| id.as_uuid())).fetch_optional(&mut **tx).await.map_err(|_| RuntimeBindingError::Unavailable)? else { return Ok(()); };
+    let Some((revision, open_at, due_at, time_zone, late_policy, late_until)) = sqlx::query_as::<_, (i64, Option<time::OffsetDateTime>, time::OffsetDateTime, String, String, Option<time::OffsetDateTime>)>("SELECT revision,open_at,due_at,time_zone,late_policy,late_until FROM control.course_experiment_windows WHERE course_id=$1 AND release_id=$2").bind(course_id.as_uuid()).bind(request.target.release().map(|(id, _)| id.as_uuid())).fetch_optional(&mut **tx).await.map_err(|_| RuntimeBindingError::Unavailable)? else { return Err(RuntimeBindingError::Unavailable); };
     let revision = contracts::Revision::new(
         u64::try_from(revision).map_err(|_| RuntimeBindingError::Unavailable)?,
     )
@@ -428,7 +434,7 @@ async fn check_course_calendar(
             .map_err(|_| RuntimeBindingError::Unavailable)?,
     };
     let now = contracts::UtcTimestamp::from_utc(
-        sqlx::query_scalar("SELECT clock_timestamp()")
+        sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
             .fetch_one(&mut **tx)
             .await
             .map_err(|_| RuntimeBindingError::Unavailable)?,
