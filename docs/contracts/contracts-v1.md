@@ -52,6 +52,15 @@ Control 是课程开放/截止、时区和迟交规则的唯一事实来源。�
 `PATCH /api/v1/courses/{courseId}/calendar` 使用 `If-Match` 更新既有修订；首次创建不传 If-Match，教师身份本身不够，仍须当前课程 instructor 成员。不存在的日历读返回 404，旧修订更新返回 409。TA 可浏览但不能更改日历或名单。学生视图通过 `GET /api/v1/courses/{courseId}/student-view` 只返回调用者自己的成员事实与课程日历。
 
 名单 CSV 必须含 `campusUsername` 列，可含 `role` 列；角色允许 `participant` 或 `teaching_assistant`，不提供 role 时按 participant 处理。未知列、无效角色或 malformed row 拒绝，不允许 CSV 授予 instructor。`POST /api/v1/courses/{courseId}/roster/import` 要求幂等键；Access 先以精确校园用户名查询身份，再将解析后的 actor ID 交由 Control。逐行结果标记新建、已是成员或本文件重复行；同请求重试返回原结果，不能新增第二条 membership。已撤权或已过期的旧成员重新导入时修订递增并重新激活，新增/重新激活都在成员事务中发出 `member_authorization.changed.v1`；已有有效成员不重复发事件。
+
+### 课程实验个人与小组策略
+
+`POST /api/v1/courses/{courseId}/experiments` 通过 `policy=individual|group` 绑定模板 release。当前课程 instructor 可创建，TA 和学生不能发布；平台管理员保留管理权限。创建要求 `Idempotency-Key`。
+
+`POST /api/v1/courses/{courseId}/experiments/{experimentId}/groups` 只接受小组策略。创建前提交成员列表、成员付款人 `payerActorId`、付款项目 `payerProjectId` 与 `payerConsent=true`；不自动分账。相同幂等键与相同正文返回原小组，换正文返回 `LW_IDEMPOTENCY_CONFLICT`。既有小组的付款人与付款项目不能被成员变更替换。
+
+Resource 启动准入与审批事务、Evaluation 冻结协调器都读取该课程和 release 对应的 Control 日历：开放前返回 `LW_COURSE_EXPERIMENT_NOT_OPEN`，截止且不允许迟交或到达 `lateUntil` 后返回 `LW_COURSE_EXPERIMENT_CLOSED`。开放窗口与允许迟交窗口均可继续；拒绝不创建新的租约、用量、费用或冻结提交。审批前取得的运行绑定不能绕过审批时的日历检查。FrozenSubmission 当前没有迟交标记字段（`CONTRACT_GAP`），不要从冻结对象推断迟交状态。
+
 ## 组织账号搜索
 
 `GET /api/v1/directory/users` 仅用于按关键词选取项目成员，不是组织账号的全量浏览接口。必须提供至少 2 个字符的 `query`，可选 `limit` 范围为 1–50（默认 25）。Keycloak Admin 用户接口没有稳定的续页键，因此响应只返回有限的 `items` 和 `truncated`；`truncated=true` 时应缩小关键词，不能使用 `page`、`pageSize`、`offset` 或续页游标。传入未知或已删除的分页参数返回 400。精确用户名添加流程仍使用独立的 exact lookup。
