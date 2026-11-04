@@ -1082,7 +1082,7 @@ async fn recover_environment(
         )
         .await?
     {
-        fund_recovered_environment(&state, environment_id).await?;
+        fund_recovered_environment(&state, environment_id, receipt.operation_id).await?;
         return Ok((StatusCode::ACCEPTED, Json(receipt)));
     }
     let restoring = instance.desired_state
@@ -1110,7 +1110,7 @@ async fn recover_environment(
     )
     .await?;
     if restoring {
-        fund_recovered_environment(&state, environment_id).await?;
+        fund_recovered_environment(&state, environment_id, accepted.1.operation_id).await?;
     }
     Ok(accepted)
 }
@@ -1118,8 +1118,12 @@ async fn recover_environment(
 async fn fund_recovered_environment(
     state: &EnvironmentApiState,
     environment_id: EnvironmentId,
+    operation_id: contracts::OperationId,
 ) -> Result<(), EnvironmentApiError> {
     let instance = state.store.load(environment_id).await?;
+    if instance.operation.id != operation_id {
+        return Ok(());
+    }
     if instance.desired_state != contracts::environment::DesiredEnvironmentState::Stopped {
         return Ok(());
     }

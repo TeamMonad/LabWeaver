@@ -392,8 +392,12 @@ async fn retained_environment(f: &Fixture) -> TestResult<EnvironmentInstance> {
         media_type: "application/json".into(),
     });
     retained.validate()?;
-    sqlx::query("UPDATE environment.environment_instances SET revision=$2,desired_state='deleted',observed_state='deleted',contract=$3 WHERE environment_id=$1")
-        .bind(retained.id.as_uuid()).bind(i64::try_from(retained.revision.get())?).bind(serde_json::to_value(&retained)?).execute(&f.roles.environment).await?;
+    sqlx::query("UPDATE environment.environment_instances SET revision=$2,desired_state='deleted',observed_state='deleted',contract=$3,generation=$4,observed_generation=$4 WHERE environment_id=$1")
+        .bind(retained.id.as_uuid()).bind(i64::try_from(retained.revision.get())?).bind(serde_json::to_value(&retained)?)
+        .bind(i64::try_from(retained.generation)?).execute(&f.roles.environment).await?;
+    sqlx::query("UPDATE environment.environment_operations SET state='succeeded',contract=$2 WHERE operation_id=$1")
+        .bind(retained.operation.id.as_uuid()).bind(serde_json::to_value(&retained.operation)?)
+        .execute(&f.roles.environment).await?;
     Ok(retained)
 }
 
@@ -521,7 +525,7 @@ async fn restore_funding_environment_recover_rejection_stays_retained_and_retry_
                 .header("x-labweaver-actor-id", actor.to_string())
                 .header("x-labweaver-session-id", Uuid::now_v7().to_string())
                 .header("idempotency-key", "restore-http-recover")
-                .header("if-match", format!("\"{}\"", revision.get()))
+                .header("if-match", format!("\"rev-{}\"", revision.get()))
                 .body(Body::empty())?;
             request
                 .extensions_mut()
