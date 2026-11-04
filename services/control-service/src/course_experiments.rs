@@ -94,14 +94,14 @@ impl ControlService {
     }
     pub async fn course_experiment(
         &self,
-        _actor: &contracts::AuthenticatedActor,
+        actor: &contracts::AuthenticatedActor,
         course_id: CourseId,
         experiment_id: CourseExperimentId,
     ) -> Result<CourseExperiment, ControlError> {
         let member: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM control.course_memberships WHERE course_id=$1 AND actor_id=$2 AND state='active' AND (expires_at IS NULL OR expires_at>clock_timestamp()))")
-            .bind(course_id.as_uuid()).bind(_actor.actor_id.as_uuid()).fetch_one(&self.pool).await.map_err(db)?;
+            .bind(course_id.as_uuid()).bind(actor.actor_id.as_uuid()).fetch_one(&self.pool).await.map_err(db)?;
         if !member
-            && !_actor
+            && !actor
                 .roles
                 .contains(&contracts::PlatformRole::PlatformAdmin)
         {
