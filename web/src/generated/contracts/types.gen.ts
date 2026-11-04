@@ -16504,6 +16504,275 @@ export type WithdrawEvaluationReleaseResponses = {
 
 export type WithdrawEvaluationReleaseResponse = WithdrawEvaluationReleaseResponses[keyof WithdrawEvaluationReleaseResponses];
 
+export type CreateCourseExperimentData = {
+    body?: never;
+    headers: {
+        'Idempotency-Key': string;
+    };
+    path: {
+        courseId: string;
+    };
+    query?: never;
+    url: '/api/v1/courses/{courseId}/experiments';
+};
+
+export type CreateCourseExperimentErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CreateCourseExperimentError = CreateCourseExperimentErrors[keyof CreateCourseExperimentErrors];
+
+export type CreateCourseExperimentResponses = {
+    /**
+     * Successful response
+     */
+    201: unknown;
+};
+
+export type GetCourseExperimentData = {
+    body?: never;
+    path: {
+        courseId: string;
+        experimentId: string;
+    };
+    query?: never;
+    url: '/api/v1/courses/{courseId}/experiments/{experimentId}';
+};
+
+export type GetCourseExperimentErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type GetCourseExperimentError = GetCourseExperimentErrors[keyof GetCourseExperimentErrors];
+
+export type GetCourseExperimentResponses = {
+    /**
+     * Successful response
+     */
+    200: unknown;
+};
+
+export type ListExperimentGroupsData = {
+    body?: never;
+    path: {
+        courseId: string;
+        experimentId: string;
+    };
+    query?: never;
+    url: '/api/v1/courses/{courseId}/experiments/{experimentId}/groups';
+};
+
+export type ListExperimentGroupsErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type ListExperimentGroupsError = ListExperimentGroupsErrors[keyof ListExperimentGroupsErrors];
+
+export type ListExperimentGroupsResponses = {
+    /**
+     * Successful response
+     */
+    200: unknown;
+};
+
+export type CreateExperimentGroupData = {
+    body?: never;
+    headers: {
+        'Idempotency-Key': string;
+    };
+    path: {
+        courseId: string;
+        experimentId: string;
+    };
+    query?: never;
+    url: '/api/v1/courses/{courseId}/experiments/{experimentId}/groups';
+};
+
+export type CreateExperimentGroupErrors = {
+    /**
+     * RFC 9457 problem detail
+     */
+    400: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    401: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    403: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    404: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    409: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    410: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    412: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    422: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    429: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    500: ProblemDetails;
+    /**
+     * RFC 9457 problem detail
+     */
+    503: ProblemDetails;
+};
+
+export type CreateExperimentGroupError = CreateExperimentGroupErrors[keyof CreateExperimentGroupErrors];
+
+export type CreateExperimentGroupResponses = {
+    /**
+     * Successful response
+     */
+    201: unknown;
+};
+
 export type CreateCourseLlmPolicyData = {
     body: ProjectLlmEgressPolicySchema;
     headers: {
