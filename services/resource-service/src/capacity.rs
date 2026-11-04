@@ -1462,6 +1462,9 @@ impl CapacityReconcileWorker {
                 return Ok(false);
             }
         };
+        self.store
+            .consume_environment_cleanup_status(&item, &status)
+            .await?;
         if !status.cleanup_complete || status.observed_state != ObservedEnvironmentState::Deleted {
             return Ok(false);
         }
@@ -1866,6 +1869,9 @@ impl CapacityReconcileWorker {
                 .await?;
             return Ok(());
         }
+        self.store
+            .consume_environment_cleanup_status(item, &status)
+            .await?;
         if !status.cleanup_complete || status.observed_state != ObservedEnvironmentState::Deleted {
             if status.observed_state == ObservedEnvironmentState::Failed {
                 let diagnostic = status

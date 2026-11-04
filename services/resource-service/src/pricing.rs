@@ -212,7 +212,7 @@ fn append_charge_line(
     Ok(())
 }
 
-async fn select_rate_segments(
+pub(crate) async fn select_rate_segments(
     transaction: &mut Transaction<'_, Postgres>,
     unit: ResourceBillingUnit,
     gpu_class: Option<&str>,
@@ -288,5 +288,37 @@ pub(crate) fn multiply_money(
             unit_quantity,
             quantity_divisor,
         )?)?,
+    })
+}
+
+/// Same midpoint-to-even price formula as ordinary settlement, with a wide cumulative
+/// quantity for retained disks. This does not narrow the quantity to the public u64 DTO.
+pub(crate) fn multiply_money_wide(
+    unit_price: &Money,
+    quantity: u128,
+    unit_quantity: u64,
+    quantity_divisor: u64,
+) -> Result<Money, ResourceStoreError> {
+    if unit_quantity == 0 || !matches!(quantity_divisor, 1 | 1000) {
+        return Err(ResourceStoreError::NumericOverflow);
+    }
+    let scaled = unit_price.amount.scaled();
+    let product = scaled
+        .unsigned_abs()
+        .checked_mul(quantity)
+        .ok_or(ResourceStoreError::NumericOverflow)?;
+    let denominator = u128::from(unit_quantity) * u128::from(quantity_divisor);
+    let quotient = product / denominator;
+    let remainder = product % denominator;
+    let twice_remainder = remainder * 2;
+    let rounded = quotient
+        .checked_add(u128::from(
+            twice_remainder > denominator || (twice_remainder == denominator && quotient % 2 == 1),
+        ))
+        .ok_or(ResourceStoreError::NumericOverflow)?;
+    let amount = i128::try_from(rounded).map_err(|_| ResourceStoreError::NumericOverflow)?;
+    Ok(Money {
+        currency: unit_price.currency.clone(),
+        amount: FixedDecimal::from_scaled(if scaled < 0 { -amount } else { amount })?,
     })
 }

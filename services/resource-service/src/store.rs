@@ -1008,15 +1008,21 @@ impl PgResourceStore {
                 // insert takes KEY SHARE locks for both foreign keys, so acquire the optional
                 // Lease lock first and keep every request/lease transaction in the same order.
                 let locked_lease = if let Some(lease_id) = lease_id {
-                    let lease_row = sqlx::query(
-                        "SELECT request_id, state
-                         FROM resource.resource_leases
-                         WHERE lease_id=$1 FOR UPDATE",
-                    )
+                    let lease_row = sqlx::query("SELECT request_id,state FROM resource.resource_leases WHERE lease_id=$1 FOR UPDATE")
                     .bind(lease_id.as_uuid())
                     .fetch_optional(&mut *transaction)
                     .await?
                     .ok_or(ResourceStoreError::LeaseNotFound)?;
+                    // READ COMMITTED takes a new snapshot for this statement after any lease
+                    // lock wait. Cleanup updates the claim/fence while holding that same lease.
+                    let retirement = sqlx::query("SELECT c.compute_released,f.compute_retired_at FROM resource.resource_leases l JOIN resource.capacity_claims c ON c.claim_id=l.claim_id LEFT JOIN resource.environment_cleanup_fences f ON f.lease_id=l.lease_id WHERE l.lease_id=$1")
+                        .bind(lease_id.as_uuid()).fetch_one(&mut *transaction).await?;
+                    if retirement.try_get::<bool, _>("compute_released")?
+                        && retirement.try_get::<Option<time::OffsetDateTime>, _>("compute_retired_at")?
+                            .is_some_and(|retired| input.measured_until.get() > retired)
+                    {
+                        return Err(ResourceStoreError::UsageConflict);
+                    }
                     Some((
                         lease_row.try_get::<uuid::Uuid, _>("request_id")?,
                         lease_row.try_get::<String, _>("state")?,
@@ -1265,6 +1271,8 @@ impl PgResourceStore {
     /// Attempts one durable pending settlement. Missing rate configuration leaves the usage row
     /// pending so a later rate publication can settle it; no zero-value charge is synthesized.
     pub async fn settle_pending_usage_once(&self) -> Result<bool, ResourceStoreError> {
+        let retained_work =
+            crate::environment_funding::settle_retained_storage_once(&self.pool).await?;
         let rows = sqlx::query(
             "SELECT usage_record_id, contract
              FROM resource.resource_usage_records
@@ -1275,9 +1283,9 @@ impl PgResourceStore {
         .fetch_all(&self.pool)
         .await?;
         if rows.is_empty() {
-            return Ok(false);
+            return Ok(retained_work);
         }
-        let mut did_work = false;
+        let mut did_work = retained_work;
         for row in rows {
             let usage_record_id: uuid::Uuid = row.try_get("usage_record_id")?;
             let usage = match decode_usage(row.try_get("contract")?) {
@@ -1528,7 +1536,7 @@ impl PgResourceStore {
                                    FROM jsonb_array_elements(c.lines) line
                                    WHERE line->>'rateId'=$2
                                )
-                         )",
+                         ) OR EXISTS (SELECT 1 FROM resource.retained_storage_platform_costs p WHERE p.measured_until>$1 AND EXISTS (SELECT 1 FROM jsonb_array_elements(p.rate_snapshots) line WHERE line->>'rateId'=$2))",
                     )
                     .bind(input.effective_from.get())
                     .bind(previous.id.to_string())
@@ -1698,7 +1706,7 @@ impl PgResourceStore {
                                FROM jsonb_array_elements(c.lines) line
                                WHERE line->>'rateId'=$2
                            )
-                     )",
+                     ) OR EXISTS (SELECT 1 FROM resource.retained_storage_platform_costs p WHERE p.measured_until>$1 AND EXISTS (SELECT 1 FROM jsonb_array_elements(p.rate_snapshots) line WHERE line->>'rateId'=$2))",
                 )
                 .bind(input.effective_until.get())
                 .bind(rate.id.to_string())
@@ -4188,6 +4196,14 @@ impl PgResourceStore {
             })
         })
         .transpose()
+    }
+    /// Consumes a verified Environment cleanup receipt without conflating disk and compute release.
+    pub async fn consume_environment_cleanup_status(
+        &self,
+        expected: &ProvisioningCapacityClaim,
+        status: &contracts::environment::ResourceWorkCleanupStatus,
+    ) -> Result<(), ResourceStoreError> {
+        crate::environment_funding::consume_cleanup_status(&self.pool, expected, status).await
     }
 
     /// A verified terminal Environment readback begins the existing release saga without waiting for TTL.

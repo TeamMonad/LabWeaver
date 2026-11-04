@@ -317,3 +317,6 @@ domains:
       - id: 25
         file: resource/0025_gpu_observation_generations.sql
         sha256: c9d2d8dcfc7f2bb42fb14b879f69ec1044fbfd9250a3dd6a8a75c7a37b25dcc0
+      - id: 26
+        file: resource/0026_retained_storage_consumer.sql
+        sha256: c4821324fb032102176aa06f65afea06bca4df1f94f47e92a8dd3ce0133ba7a6

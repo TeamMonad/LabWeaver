@@ -4,10 +4,12 @@
     reason = "keep each full transaction invariant visible"
 )]
 use contracts::http::CreateResourceRateRequest;
+use contracts::http::RecordResourceUsageRequest;
 use contracts::resource::credits::{CreditAdminOperation, CreditHoldResolutionRequest};
 use contracts::resource::{
     CapacityClaim, CapacityClaimState, FixedDecimal, Money, ResourceApproval, ResourceBillingUnit,
-    ResourceRequest, ResourceRequestState, ResourceTarget, WorkloadResources,
+    ResourceRequest, ResourceRequestState, ResourceTarget, ResourceUsageKind,
+    ResourceUsageQuantities, ResourceUsageTarget, UsageMeasurement, WorkloadResources,
 };
 use contracts::{
     ActorId, CapacityClaimId, EnvironmentId, LeaseId, PlatformRole, ProjectId, ReleaseId,
@@ -818,5 +820,164 @@ async fn fractional_renewals_reserve_the_combined_known_charge_without_rounding_
     let account = credits.account(request.project_id).await?;
     assert_eq!(account.spent, money("0.000001")?);
     assert_eq!(account.platform_absorbed, FixedDecimal::zero());
+    Ok(())
+}
+
+#[tokio::test]
+async fn retired_compute_rejects_old_grant_and_usage_without_billing() -> Result<()> {
+    let (_container, pool, store, credits, request, lease_id) = fixture().await?;
+    prices(&store, "1.000000").await?;
+    allowance(&credits, request.project_id, "50.000000").await?;
+    let from = store.current_time().await?;
+    let until = at(from, 10)?;
+    activate(&store, lease_id, from, until).await?;
+    assert!(
+        store
+            .environment_credit_grant(OWNER, lease_id)
+            .await?
+            .can_authorize_execution
+    );
+    let claim_id: Uuid =
+        sqlx::query_scalar("SELECT claim_id FROM resource.resource_leases WHERE lease_id=$1")
+            .bind(lease_id.as_uuid())
+            .fetch_one(&pool)
+            .await?;
+    let pending = store
+        .refresh_provisioning_claim(claim_id.to_string().parse()?)
+        .await?
+        .ok_or("provisioning")?;
+    store
+        .mark_capacity_handed_off(
+            pending.claim.id,
+            pending.claim.revision,
+            lease_id,
+            pending.lease.revision,
+        )
+        .await?;
+    let item = store
+        .next_active_environment_cleanup(None)
+        .await?
+        .ok_or("cleanup")?;
+    let ResourceTarget::Environment { environment_id, .. } = request.target else {
+        return Err("environment".into());
+    };
+    let status = contracts::environment::ResourceWorkCleanupStatus {
+        version: 1,
+        environment_id,
+        project_id: request.project_id,
+        course_id: request.course_id,
+        owner_actor_id: request.requester_id,
+        lease_id,
+        lease_revision: item.lease.revision,
+        capacity_binding: item.claim.id.to_string(),
+        revision: Revision::new(3)?,
+        observed_state: contracts::environment::ObservedEnvironmentState::Deleted,
+        cleanup_complete: false,
+        generation: 1,
+        compute_retired: true,
+        storage_purged: false,
+        disk_retention: Some(contracts::environment::EnvironmentDiskRetention {
+            state: contracts::environment::EnvironmentDiskState::Retained,
+            started_at: from,
+            expires_at: at(from, 7 * 24 * 3600)?,
+            retired_generation: 1,
+            compute_retired_at: Some(from),
+            restored_generation: None,
+            reactivated_at: None,
+            purged_at: None,
+        }),
+        retained_storage_usage: None,
+        diagnostic_code: None,
+    };
+    store
+        .consume_environment_cleanup_status(&item, &status)
+        .await?;
+    assert!(
+        !store
+            .environment_credit_grant(OWNER, lease_id)
+            .await?
+            .can_authorize_execution
+    );
+    let before = credits.account(request.project_id).await?;
+    let renewal = store
+        .renew_lease(
+            "retired-renewal",
+            lease_id,
+            item.lease.revision,
+            at(until, 5)?,
+            "retired-renewal",
+        )
+        .await;
+    assert!(matches!(
+        renewal,
+        Err(resource_service::store::ResourceStoreError::UsageConflict)
+    ));
+    let mut restored = status.clone();
+    restored.revision = Revision::new(4)?;
+    restored.generation = 2;
+    restored.compute_retired = false;
+    restored.observed_state = contracts::environment::ObservedEnvironmentState::Stopped;
+    let disk = restored.disk_retention.as_mut().ok_or("disk retention")?;
+    disk.state = contracts::environment::EnvironmentDiskState::Restored;
+    disk.restored_generation = Some(2);
+    store
+        .consume_environment_cleanup_status(&item, &restored)
+        .await?;
+    store
+        .consume_environment_cleanup_status(&item, &restored)
+        .await?;
+    assert!(
+        !store
+            .environment_credit_grant(OWNER, lease_id)
+            .await?
+            .can_authorize_execution
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource.credit_holds WHERE request_id=$1"
+        )
+        .bind(request.id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        1
+    );
+    let rejected = store
+        .record_usage(
+            &RecordResourceUsageRequest {
+                kind: ResourceUsageKind::Compute,
+                target: ResourceUsageTarget::ResourceRequest {
+                    request_id: request.id,
+                    lease_id: Some(lease_id),
+                },
+                source_event_id: contracts::EventId::new(),
+                measured_from: from,
+                measured_until: until,
+                measurement: UsageMeasurement::Known {
+                    quantities: ResourceUsageQuantities {
+                        quantity_divisor: 1000,
+                        cpu_millicore_seconds: 10_000,
+                        memory_byte_seconds: 0,
+                        storage_byte_seconds: 0,
+                        gpu_unit_seconds: 0,
+                    },
+                },
+            },
+            until,
+        )
+        .await;
+    assert!(matches!(
+        rejected,
+        Err(resource_service::store::ResourceStoreError::UsageConflict)
+    ));
+    assert_eq!(credits.account(request.project_id).await?, before);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource.resource_usage_records WHERE request_id=$1"
+        )
+        .bind(request.id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        0
+    );
     Ok(())
 }
