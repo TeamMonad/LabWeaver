@@ -161,7 +161,22 @@ pub(super) async fn recovery_http_cases(
             assert_eq!(store.load(before.id).await?.revision, before.revision);
             continue;
         }
-        assert_eq!(response.0, StatusCode::ACCEPTED, "{mode}: {:?}", response.1);
+        if mode == "retained" {
+            // This lifecycle-only fixture has no Resource admission. The real signed HTTP/PG
+            // restore-funding journey is covered by Control's production-role integration tests.
+            assert_eq!(
+                response.0,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{mode}: {:?}",
+                response.1
+            );
+            assert_eq!(
+                response.1["diagnosticCode"],
+                "LW_ENVIRONMENT_RESOURCE_USAGE_RESPONSE_INVALID"
+            );
+        } else {
+            assert_eq!(response.0, StatusCode::ACCEPTED, "{mode}: {:?}", response.1);
+        }
         let after = store.load(before.id).await?;
         assert_eq!(
             after.operation.cleanup_target, before.operation.cleanup_target,
@@ -177,6 +192,10 @@ pub(super) async fn recovery_http_cases(
         );
         if mode == "retained" {
             assert_eq!(after.observed_state, ObservedEnvironmentState::Stopped);
+            assert_eq!(
+                after.last_diagnostic_code.as_deref(),
+                Some("LW_ENVIRONMENT_RESOURCE_USAGE_RESPONSE_INVALID")
+            );
             assert!(after.generation > before.generation);
             assert_eq!(
                 revocations.load(Ordering::SeqCst),

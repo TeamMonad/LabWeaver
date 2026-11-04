@@ -3362,6 +3362,12 @@ mod tests {
         assert!(valid_resource_path(
             "/api/v1/projects/01900000-0000-7000-8000-000000000001/resource-leases"
         ));
+        assert!(valid_resource_path(
+            "/api/v1/projects/01900000-0000-7000-8000-000000000001/environment-credit-grants/01900000-0000-7000-8000-000000000002"
+        ));
+        assert!(!valid_resource_path(
+            "/internal/v1/environment-restore-funding"
+        ));
         assert!(valid_resource_path("/api/v1/resource/gpu-catalog"));
         assert!(valid_resource_path("/api/v1/resource/rates"));
         assert!(valid_resource_path(

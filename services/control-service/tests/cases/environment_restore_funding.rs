@@ -397,6 +397,16 @@ async fn restore_funding_creates_new_hold_and_only_matching_receipt_clears_compu
     f.item.lease_synced_revision = Some(funded.lease_revision);
     f.status.lease_revision = funded.lease_revision;
     f.status.revision = Revision::new(6)?;
+    let mut wrong_generation = f.status.clone();
+    wrong_generation.generation = 3;
+    assert!(
+        f.store
+            .consume_environment_cleanup_status(&f.item, &wrong_generation)
+            .await
+            .is_err(),
+        "wrong generation receipt cannot clear compute-released"
+    );
+    assert!(f.released().await?);
     f.store
         .consume_environment_cleanup_status(&f.item, &f.status)
         .await?;

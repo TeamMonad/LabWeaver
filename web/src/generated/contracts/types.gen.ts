@@ -2609,12 +2609,12 @@ export type CsrfTokenResponseSchemaUtcTimestamp = string;
 export type EnvironmentCreditGrantSchema = {
     approvalId: ResourceApprovalId;
     /**
-     * Only a current active lease and known, unexpired original funds authorize new execution.
+     * Only a current active lease and known, unexpired current-epoch funds authorize execution.
      */
     canAuthorizeExecution: boolean;
     claimId: CapacityClaimId;
     /**
-     * Start of the continuous total coverage, unchanged by renewals.
+     * Start of continuous coverage within the current funding epoch, unchanged by renewals.
      */
     coveredFrom: EnvironmentCreditGrantSchemaUtcTimestamp;
     /**

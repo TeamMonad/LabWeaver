@@ -176,6 +176,8 @@ Resource0026 用 `capacity_claims.compute_released/storage_released` 保存维�
 
 **恢复资金是新的准入，不是续用旧 hold：** Environment 在 `/recover` 持久化新的 Stopped generation 后调用 `restoreEnvironmentFunding`（POST `/internal/v1/environment-restore-funding`，`resource.credits.hold`，已配置 Environment 服务 JWT）。请求 DTO `RestoreEnvironmentFundingRequest` 包含 `leaseId/environmentId/projectId/requesterId/restoredGeneration`，要求 `Idempotency-Key`；响应为 `EnvironmentCreditGrant`。该内部操作不对浏览器开放，公开的项目 Credits holds/ledger 读取仍可查看新预占。
 
+浏览器通过生成 SDK `getProjectEnvironmentCreditGrant`（GET `/api/v1/projects/{projectId}/environment-credit-grants/{leaseId}`，`credits:read`，当前项目成员范围）读取当前资金 epoch 的 `EnvironmentCreditGrant`；跨项目 lease 拒绝。部署方需为 Environment → Resource 服务账户授予 `resource.credits.hold`，Helm 的 `LABWEAVER_RESOURCE_USAGE_SCOPES` 与身份初始化角色列表保持一致。不向 Access 或浏览器开放内部 restore 写操作。
+
 Resource 锁定原 lease，在同一事务重验当前账号、项目/课程成员、运行策略与 Credits 项目范围，以及原批准有效窗口；复用现有估价与 Credits 事务函数，以当前费率为新 epoch 建立独立 hold，并推进 lease revision。覆盖从本次准入时刻开始，到批准时长和原批准截止的较早者；旧 hold、旧费率窗口与已入账费用不改写。批准过期/撤销返回 `LW_RESOURCE_APPROVAL_INVALID`，撤权返回 `LW_RUNTIME_SCOPE_DENIED`，余额不足返回 `LW_CREDITS_INSUFFICIENT`，同键不同 body 返回 `LW_CREDITS_CONFLICT`。拒绝回滚全部资金/窗口写入，环境保持 Stopped 和可读诊断，不发起 Kubernetes 启动。缺费率或运行策略也明确拒绝。
 
 `(leaseId, restoredGeneration)` 唯一约束和幂等记录保证同键重放、换键重试及并发重复只产生一个新 hold；重放仍重验当前范围和批准。Stopped 的恢复代次不执行计算，其下一个运行代次消费此资金。每次 Start 在任何运行副作用之前重验准入和当前 runtime receipt；资金查询读取当前 epoch 的真实 hold，而不是把历史成功响应当作永久执行许可。只有实际 reactivation readback 同时匹配新 lease revision 与该运行 generation 才清除 `compute_released`；旧回执不能清除。保留存储仍复用原 `reactivatedAt` 关闭/计价逻辑，单纯恢复和预占不关闭平台存储区间。
