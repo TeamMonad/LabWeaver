@@ -307,7 +307,7 @@ impl PgResourceStore {
         lease_id: LeaseId,
     ) -> Result<EnvironmentCreditGrant, ResourceStoreError> {
         let mut tx = self.pool().begin().await?;
-        let row=sqlx::query("SELECT w.*,l.contract AS lease_contract,(SELECT min(covered_from) FROM resource.environment_credit_windows WHERE lease_id=w.lease_id) AS initial_from FROM resource.environment_credit_windows w JOIN resource.resource_leases l USING(lease_id) WHERE w.lease_id=$1 ORDER BY w.lease_revision DESC LIMIT 1").bind(lease_id.as_uuid()).fetch_optional(&mut *tx).await?.ok_or(ResourceStoreError::NotFound)?;
+        let row=sqlx::query("SELECT w.*,l.contract AS lease_contract,(SELECT min(covered_from) FROM resource.environment_credit_windows WHERE lease_id=w.lease_id) AS initial_from,NOT EXISTS(SELECT 1 FROM resource.environment_cleanup_fences f WHERE f.lease_id=w.lease_id AND f.compute_released) AS compute_not_released FROM resource.environment_credit_windows w JOIN resource.resource_leases l USING(lease_id) WHERE w.lease_id=$1 ORDER BY w.lease_revision DESC LIMIT 1").bind(lease_id.as_uuid()).fetch_optional(&mut *tx).await?.ok_or(ResourceStoreError::NotFound)?;
         let lease: ResourceLease = serde_json::from_value(row.try_get("lease_contract")?)?;
         lease.validate()?;
         let hold = actual_hold(&mut tx, row.try_get("hold_id")?).await?;
@@ -353,7 +353,8 @@ impl PgResourceStore {
                 .map_err(|_| ResourceStoreError::Wire)?,
             covered_from: from,
             covered_until: until,
-            can_authorize_execution: lease.state == ResourceLeaseState::Active
+            can_authorize_execution: row.try_get::<bool, _>("compute_not_released")?
+                && lease.state == ResourceLeaseState::Active
                 && request.state == contracts::resource::ResourceRequestState::Active
                 && matches!(
                     claim.state,
@@ -429,4 +430,162 @@ impl PgResourceStore {
         }
         Ok(changed)
     }
+}
+
+pub(crate) async fn consume_cleanup_status(
+    pool: &sqlx::PgPool,
+    expected: &crate::store::ProvisioningCapacityClaim,
+    status: &contracts::environment::ResourceWorkCleanupStatus,
+) -> Result<(), ResourceStoreError> {
+    use contracts::resource::ResourceTarget;
+    status
+        .validate()
+        .map_err(|_| ResourceStoreError::CapacityReadbackInvalid)?;
+    let ResourceTarget::Environment { environment_id, .. } = expected.request.target else {
+        return Err(ResourceStoreError::CapacityReadbackInvalid);
+    };
+    if status.environment_id != environment_id
+        || status.project_id != expected.request.project_id
+        || status.course_id != expected.request.course_id
+        || status.owner_actor_id != expected.request.requester_id
+        || status.lease_id != expected.lease.id
+        || status.capacity_binding != expected.claim.id.to_string()
+        || Some(status.lease_revision) != expected.lease_synced_revision
+    {
+        return Err(ResourceStoreError::CapacityReadbackInvalid);
+    }
+    let mut tx = pool.begin().await?;
+    let result = async {
+        let row = sqlx::query("SELECT l.request_id,l.claim_id,l.state AS lease_state,r.project_id,r.course_id,r.requester_id,r.state AS request_state,c.state AS claim_state,c.lease_synced_revision FROM resource.resource_leases l JOIN resource.resource_requests r USING(request_id) JOIN resource.capacity_claims c ON c.claim_id=l.claim_id WHERE l.lease_id=$1 FOR UPDATE OF l,r,c")
+            .bind(expected.lease.id.as_uuid()).fetch_optional(&mut *tx).await?.ok_or(ResourceStoreError::NotFound)?;
+        if row.try_get::<Uuid, _>("request_id")? != expected.request.id.as_uuid()
+            || row.try_get::<Uuid, _>("claim_id")? != expected.claim.id.as_uuid()
+            || row.try_get::<Uuid, _>("project_id")? != expected.request.project_id.as_uuid()
+            || row.try_get::<Option<Uuid>, _>("course_id")? != expected.request.course_id.map(contracts::CourseId::as_uuid)
+            || row.try_get::<Uuid, _>("requester_id")? != expected.request.requester_id.as_uuid()
+            || !matches!(row.try_get::<String, _>("request_state")?.as_str(), "active" | "expiring")
+            || !matches!(row.try_get::<String, _>("claim_state")?.as_str(), "handed_off" | "releasing")
+            || !matches!(row.try_get::<String, _>("lease_state")?.as_str(), "active" | "expiring")
+            || row.try_get::<Option<i64>, _>("lease_synced_revision")? != Some(i64::try_from(status.lease_revision.get())?)
+        {
+            return Err(ResourceStoreError::CapacityReadbackInvalid);
+        }
+        let prior = sqlx::query("SELECT revision,generation,storage_purged FROM resource.environment_cleanup_fences WHERE lease_id=$1 FOR UPDATE")
+            .bind(expected.lease.id.as_uuid()).fetch_optional(&mut *tx).await?;
+        if let Some(row) = prior {
+            let revision: i64 = row.try_get("revision")?;
+            let generation: i64 = row.try_get("generation")?;
+            let purged: bool = row.try_get("storage_purged")?;
+            if status.revision.get() < u64::try_from(revision)?
+                || status.generation < u64::try_from(generation)?
+                || (purged && !status.storage_purged)
+            {
+                return Err(ResourceStoreError::CapacityReadbackInvalid);
+            }
+        }
+        let now: time::OffsetDateTime = sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())").fetch_one(&mut *tx).await?;
+        if let Some(usage) = status.retained_storage_usage.as_ref() {
+            let prior = sqlx::query("SELECT measured_until,storage_bytes,closed FROM resource.retained_storage_intervals WHERE environment_id=$1 AND started_at=$2 FOR UPDATE")
+                 .bind(environment_id.as_uuid()).bind(usage.started_at.get()).fetch_optional(&mut *tx).await?;
+            if let Some(row) = prior {
+                let watermark: time::OffsetDateTime = row.try_get("measured_until")?;
+                let closed: bool = row.try_get("closed")?;
+                if usage.measured_until.get() < watermark
+                    || (closed && usage.measured_until.get() != watermark)
+                    || (closed && !usage.closed)
+                    || row.try_get::<i64, _>("storage_bytes")? != i64::try_from(usage.storage_bytes)?
+                {
+                    return Err(ResourceStoreError::CapacityReadbackInvalid);
+                }
+            }
+            let disk = status.disk_retention.as_ref();
+            let interval_closed = usage.closed || status.storage_purged || disk.is_some_and(|d| d.reactivated_at.is_some());
+            let closed_at = disk.and_then(|d| d.reactivated_at.or(d.purged_at).map(UtcTimestamp::get))
+                .or_else(|| interval_closed.then_some(usage.measured_until.get()));
+            sqlx::query("INSERT INTO resource.retained_storage_intervals(environment_id,started_at,project_id,request_id,lease_id,generation,measured_until,priced_until,storage_bytes,closed,closed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$2,$8,$9,$10) ON CONFLICT(environment_id,started_at) DO UPDATE SET generation=EXCLUDED.generation,measured_until=EXCLUDED.measured_until,closed=resource.retained_storage_intervals.closed OR EXCLUDED.closed,closed_at=COALESCE(resource.retained_storage_intervals.closed_at,EXCLUDED.closed_at) WHERE NOT resource.retained_storage_intervals.closed OR EXCLUDED.closed")
+                .bind(environment_id.as_uuid()).bind(usage.started_at.get())
+                .bind(expected.request.project_id.as_uuid()).bind(expected.request.id.as_uuid())
+                .bind(expected.lease.id.as_uuid()).bind(i64::try_from(status.generation)?)
+                .bind(usage.measured_until.get()).bind(i64::try_from(usage.storage_bytes)?)
+                .bind(interval_closed).bind(closed_at).execute(&mut *tx).await?;
+            match price_retained_interval(&mut tx, environment_id.as_uuid(), usage.started_at.get()).await {
+                Ok(_) | Err(ResourceStoreError::RateUnconfigured) => {},
+                Err(error) => return Err(error),
+            }
+        }
+        let disk = status.disk_retention.as_ref();
+        sqlx::query("INSERT INTO resource.environment_cleanup_fences(lease_id,environment_id,revision,generation,compute_released,compute_retired_at,storage_purged,reactivated_generation,reactivated_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(lease_id) DO UPDATE SET revision=EXCLUDED.revision,generation=EXCLUDED.generation,compute_released=resource.environment_cleanup_fences.compute_released OR EXCLUDED.compute_released,compute_retired_at=COALESCE(resource.environment_cleanup_fences.compute_retired_at,EXCLUDED.compute_retired_at),storage_purged=resource.environment_cleanup_fences.storage_purged OR EXCLUDED.storage_purged,reactivated_generation=COALESCE(EXCLUDED.reactivated_generation,resource.environment_cleanup_fences.reactivated_generation),reactivated_at=COALESCE(EXCLUDED.reactivated_at,resource.environment_cleanup_fences.reactivated_at),updated_at=EXCLUDED.updated_at")
+            .bind(expected.lease.id.as_uuid()).bind(environment_id.as_uuid())
+            .bind(i64::try_from(status.revision.get())?).bind(i64::try_from(status.generation)?)
+            .bind(status.compute_retired).bind(disk.and_then(|d| d.compute_retired_at.map(UtcTimestamp::get)))
+            .bind(status.storage_purged)
+            .bind(disk.and_then(|d| d.reactivated_at.and(d.restored_generation)).map(i64::try_from).transpose()?)
+            .bind(disk.and_then(|d| d.reactivated_at.map(UtcTimestamp::get))).bind(now)
+            .execute(&mut *tx).await?;
+        sqlx::query("UPDATE resource.capacity_claims SET compute_released=compute_released OR $2,storage_released=storage_released OR $3 WHERE claim_id=$1")
+            .bind(expected.claim.id.as_uuid()).bind(status.compute_retired).bind(status.storage_purged)
+            .execute(&mut *tx).await?;
+        if status.compute_retired {
+            sqlx::query("UPDATE resource.gpu_capacity_reservations SET state='released',released_at=COALESCE(released_at,$2) WHERE claim_id=$1 AND state='reserved'")
+                .bind(expected.claim.id.as_uuid()).bind(now).execute(&mut *tx).await?;
+        }
+        Ok::<(), ResourceStoreError>(())
+    }.await;
+    if result.is_ok() {
+        tx.commit().await?;
+    } else {
+        tx.rollback().await?;
+    }
+    result
+}
+
+async fn price_retained_interval(
+    tx: &mut Transaction<'_, Postgres>,
+    environment_id: Uuid,
+    started_at: time::OffsetDateTime,
+) -> Result<(), ResourceStoreError> {
+    let row = sqlx::query("SELECT measured_until,priced_until,storage_bytes,closed_at FROM resource.retained_storage_intervals WHERE environment_id=$1 AND started_at=$2 FOR UPDATE")
+        .bind(environment_id).bind(started_at).fetch_one(&mut **tx).await?;
+    let measured_until: time::OffsetDateTime = row.try_get("measured_until")?;
+    let closed_at: Option<time::OffsetDateTime> = row.try_get("closed_at")?;
+    let until = closed_at.map_or(measured_until, |closed| closed.min(measured_until));
+    let from: time::OffsetDateTime = row.try_get("priced_until")?;
+    if until <= from {
+        return Ok(());
+    }
+    let storage_bytes = u64::try_from(row.try_get::<i64, _>("storage_bytes")?)?;
+    let quantity = storage_bytes
+        .checked_mul(u64::try_from((until - from).whole_milliseconds())?)
+        .ok_or(ResourceStoreError::NumericOverflow)?;
+    crate::costing::rate_lock(tx).await?;
+    let mut lines = Vec::new();
+    let mut currency = None;
+    crate::pricing::append_rate_segments(
+        tx,
+        UtcTimestamp::from_utc(from)?,
+        UtcTimestamp::from_utc(until)?,
+        1000,
+        contracts::resource::ResourceBillingUnit::StorageByteSecond,
+        quantity,
+        None,
+        None,
+        None,
+        &mut lines,
+        &mut currency,
+    )
+    .await?;
+    let amount = lines.iter().try_fold(0_i128, |sum, line| {
+        sum.checked_add(line.amount.amount.scaled())
+            .ok_or(ResourceStoreError::NumericOverflow)
+    })?;
+    let snapshots = serde_json::to_value(&lines)?;
+    sqlx::query("INSERT INTO resource.retained_storage_platform_costs(cost_id,environment_id,started_at,measured_from,measured_until,storage_bytes,rate_snapshots,amount,currency) VALUES($1,$2,$3,$4,$5,$6,$7,$8::text::numeric,$9) ON CONFLICT(environment_id,started_at,measured_until) DO NOTHING")
+        .bind(Uuid::now_v7()).bind(environment_id).bind(started_at).bind(from).bind(until)
+        .bind(i64::try_from(storage_bytes)?).bind(snapshots).bind(amount.to_string())
+        .bind(currency.ok_or(ResourceStoreError::RateUnconfigured)?)
+        .execute(&mut **tx).await?;
+    sqlx::query("UPDATE resource.retained_storage_intervals SET priced_until=$3 WHERE environment_id=$1 AND started_at=$2 AND priced_until=$4")
+        .bind(environment_id).bind(started_at).bind(until).bind(from)
+        .execute(&mut **tx).await?;
+    Ok(())
 }

@@ -1008,15 +1008,16 @@ impl PgResourceStore {
                 // insert takes KEY SHARE locks for both foreign keys, so acquire the optional
                 // Lease lock first and keep every request/lease transaction in the same order.
                 let locked_lease = if let Some(lease_id) = lease_id {
-                    let lease_row = sqlx::query(
-                        "SELECT request_id, state
-                         FROM resource.resource_leases
-                         WHERE lease_id=$1 FOR UPDATE",
-                    )
+                    let lease_row = sqlx::query("SELECT l.request_id,l.state,COALESCE(c.compute_released,false) AS compute_released FROM resource.resource_leases l LEFT JOIN resource.capacity_claims c ON c.claim_id=l.claim_id WHERE l.lease_id=$1 FOR UPDATE OF l")
                     .bind(lease_id.as_uuid())
                     .fetch_optional(&mut *transaction)
                     .await?
                     .ok_or(ResourceStoreError::LeaseNotFound)?;
+                    if lease_row.try_get::<bool, _>("compute_released")?
+                        && input.kind == ResourceUsageKind::Compute
+                    {
+                        return Err(ResourceStoreError::UsageConflict);
+                    }
                     Some((
                         lease_row.try_get::<uuid::Uuid, _>("request_id")?,
                         lease_row.try_get::<String, _>("state")?,
@@ -4188,6 +4189,14 @@ impl PgResourceStore {
             })
         })
         .transpose()
+    }
+    /// Consumes a verified Environment cleanup receipt without conflating disk and compute release.
+    pub async fn consume_environment_cleanup_status(
+        &self,
+        expected: &ProvisioningCapacityClaim,
+        status: &contracts::environment::ResourceWorkCleanupStatus,
+    ) -> Result<(), ResourceStoreError> {
+        crate::environment_funding::consume_cleanup_status(&self.pool, expected, status).await
     }
 
     /// A verified terminal Environment readback begins the existing release saga without waiting for TTL.

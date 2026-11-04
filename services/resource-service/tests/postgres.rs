@@ -6892,3 +6892,199 @@ async fn http_approval_legacy_request_json_replays_original_approval_version()
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn retained_storage_migration_replays_on_real_postgres()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_container, pool) = migrated_pool().await?;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+    let catalog = persistence_sqlx::MigrationCatalog::load(&root.join("catalog.yaml"))?;
+    let resource = catalog
+        .domains
+        .iter()
+        .find(|domain| domain.name == persistence_sqlx::Domain::Resource)
+        .ok_or("resource catalog")?;
+    let migration = resource
+        .migrations
+        .iter()
+        .find(|migration| migration.id == 26)
+        .ok_or("retained storage migration")?;
+    let sql = persistence_sqlx::MigrationCatalog::read_verified_sql(&root, migration)?;
+    for _ in 0..2 {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(&*sql))
+            .execute(&pool)
+            .await?;
+    }
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM information_schema.columns WHERE table_schema='resource' AND table_name='capacity_claims' AND column_name IN ('compute_released','storage_released')").fetch_one(&pool).await?, 2);
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM information_schema.tables WHERE table_schema='resource' AND table_name IN ('retained_storage_intervals','environment_cleanup_fences','retained_storage_platform_costs')").fetch_one(&pool).await?, 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn retained_disk_consumer_releases_compute_tracks_platform_cost_and_closes_once()
+-> Result<(), Box<dyn std::error::Error>> {
+    use contracts::environment::{
+        EnvironmentDiskRetention, EnvironmentDiskState, EnvironmentRetainedStorageUsage,
+        ObservedEnvironmentState, ResourceWorkCleanupStatus,
+    };
+    let (_container, pool) = migrated_pool().await?;
+    let (store, request, claim, lease, _actor) = work_handoff_fixture(&pool).await?;
+    let claim = store
+        .mark_capacity_handed_off(claim.id, claim.revision, lease.id, lease.revision)
+        .await?;
+    let item = store
+        .next_active_environment_cleanup(None)
+        .await?
+        .ok_or("active cleanup")?;
+    assert_eq!(item.claim.id, claim.id);
+    let ResourceTarget::Environment { environment_id, .. } = request.target else {
+        return Err("environment target".into());
+    };
+    let started = store.current_time().await?;
+    store
+        .create_rate(
+            "retained-storage-rate",
+            &CreateResourceRateRequest {
+                unit: ResourceBillingUnit::StorageByteSecond,
+                unit_quantity: 1,
+                gpu_class: None,
+                gpu_mode: None,
+                builder_binding: None,
+                model_binding: None,
+                max_preauthorization: None,
+                unit_price: Money {
+                    currency: "CREDITS".into(),
+                    amount: FixedDecimal::parse("0.000001")?,
+                },
+                effective_from: UtcTimestamp::from_utc(started.get() - time::Duration::seconds(1))?,
+                effective_until: None,
+            },
+        )
+        .await?;
+    let measured = UtcTimestamp::from_utc(started.get() + time::Duration::seconds(2))?;
+    let expires = UtcTimestamp::from_utc(started.get() + time::Duration::days(7))?;
+    let mut status = ResourceWorkCleanupStatus {
+        version: 1,
+        environment_id,
+        project_id: request.project_id,
+        course_id: request.course_id,
+        owner_actor_id: request.requester_id,
+        lease_id: lease.id,
+        lease_revision: lease.revision,
+        capacity_binding: claim.id.to_string(),
+        revision: Revision::new(3)?,
+        observed_state: ObservedEnvironmentState::Deleted,
+        cleanup_complete: false,
+        generation: request.generation,
+        compute_retired: true,
+        storage_purged: false,
+        disk_retention: Some(EnvironmentDiskRetention {
+            state: EnvironmentDiskState::Retained,
+            started_at: started,
+            expires_at: expires,
+            retired_generation: request.generation,
+            compute_retired_at: Some(started),
+            restored_generation: None,
+            reactivated_at: None,
+            purged_at: None,
+        }),
+        retained_storage_usage: Some(EnvironmentRetainedStorageUsage {
+            started_at: started,
+            measured_until: measured,
+            storage_bytes: 1,
+            closed: false,
+        }),
+        diagnostic_code: None,
+    };
+    let credits = resource_service::credits::PgCreditStore::new(pool.clone());
+    let before = credits.account(request.project_id).await?;
+    let ledger_before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resource.credit_ledger_entries")
+            .fetch_one(&pool)
+            .await?;
+    store
+        .consume_environment_cleanup_status(&item, &status)
+        .await?;
+    assert_eq!(sqlx::query_as::<_, (bool,bool)>("SELECT compute_released,storage_released FROM resource.capacity_claims WHERE claim_id=$1").bind(claim.id.as_uuid()).fetch_one(&pool).await?, (true,false));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM resource.gpu_capacity_reservations WHERE claim_id=$1"
+        )
+        .bind(claim.id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        "released"
+    );
+    store
+        .consume_environment_cleanup_status(&item, &status)
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource.retained_storage_intervals")
+            .fetch_one(&pool)
+            .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource.retained_storage_platform_costs"
+        )
+        .fetch_one(&pool)
+        .await?,
+        1
+    );
+    let stale = ResourceWorkCleanupStatus {
+        revision: Revision::new(2)?,
+        ..status.clone()
+    };
+    assert!(matches!(
+        store
+            .consume_environment_cleanup_status(&item, &stale)
+            .await,
+        Err(ResourceStoreError::CapacityReadbackInvalid)
+    ));
+    status.revision = Revision::new(4)?;
+    status.storage_purged = true;
+    status.cleanup_complete = true;
+    status.disk_retention.as_mut().ok_or("retention")?.state = EnvironmentDiskState::Purged;
+    status.disk_retention.as_mut().ok_or("retention")?.purged_at = Some(expires);
+    let usage = status.retained_storage_usage.as_mut().ok_or("storage")?;
+    usage.closed = true;
+    usage.measured_until = expires;
+    store
+        .consume_environment_cleanup_status(&item, &status)
+        .await?;
+    store
+        .consume_environment_cleanup_status(&item, &status)
+        .await?;
+    assert_eq!(sqlx::query_as::<_, (bool,bool)>("SELECT compute_released,storage_released FROM resource.capacity_claims WHERE claim_id=$1").bind(claim.id.as_uuid()).fetch_one(&pool).await?, (true,true));
+    assert_eq!(
+        sqlx::query_as::<_, (bool, time::OffsetDateTime)>(
+            "SELECT closed,closed_at FROM resource.retained_storage_intervals"
+        )
+        .fetch_one(&pool)
+        .await?,
+        (true, expires.get())
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource.retained_storage_platform_costs"
+        )
+        .fetch_one(&pool)
+        .await?,
+        2
+    );
+    assert_eq!(credits.account(request.project_id).await?, before);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource.credit_ledger_entries")
+            .fetch_one(&pool)
+            .await?,
+        ledger_before
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource.resource_charges")
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+    Ok(())
+}

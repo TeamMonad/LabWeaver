@@ -162,6 +162,16 @@ Resource 的容量 shell 就绪后，激活 Environment lease 前读取原 lease
 
 `ResourceEnvironmentHandoff` 使用现有 handoff 字段和 work-handoffs、work-lease-updates、work-cleanups 路径。类别由可信不可变 ReleasePublished 的 environmentSpec.class 得到，不由 courseId 或浏览器选择；在途 Work 消费者的符号仍指向同一具体 DTO。Experiment/Work 的实际接收、创建、启动、重启、停止、租约刷新与计量接线归 Environment owner（#207）。资金 DTO 和 Resource 事务可独立验证，不代表整个 Environment 用户旅程、预付持久存储产品或真实集群验收已经完成。
 
+## 保留盘与计算退役
+
+Environment 的 cleanup readback 是 Resource 接受退役事实的输入。Resource 按原 Environment、项目、申请、lease、容量绑定及 lease revision 核验；累计存储 watermark 以 `(environmentId, startedAt)` 唯一识别。仅接受递增的 `measuredUntil`，重放不重复处理，倒序读回不得回退 watermark。未知或无读回不是零用量。
+
+`computeRetired` 与 `storagePurged` 是独立事实。计算退役后释放 CPU、内存和 GPU 维度，原 WorkloadResources 规格仍保留作为审计事实；存储维度直到实际 purge 才释放。Delete 与欠费保留期间的存储成本由平台承担，不使用旧 compute hold，不增加项目 Credits spent、项目预算 spent 或项目债务。费率存在时保存不可变平台成本和费率快照；缺少费率不把占用或成本视为零。
+
+保留存储区间只在其关闭事实首次被 Resource 接受时终结：到期清盘完成，实际 purge，或已获新的计算资金授权并观察到 restored generation 的 `reactivatedAt`。单纯 Restore 到 Stopped 不关闭存储区间。重复 purge、expiry、restore 或 cleanup 回执不能重复关闭、重开或收费；关闭后延迟的 retained readback 不得重开区间。新的运行区间必须以新 generation 和当前授权开始。
+
+**恢复资金目前有意 fail-closed：** Restore 不会继承原 generation 的 compute 资金许可。compute 已退役后，旧 grant/revision 不授权新 compute，也不应提交其计量。恢复后的 generation 在 Resource 的新恢复资金准入路径交付前保持拒绝；不能将普通 lease renewal 或原 hold 当成恢复资金。该 admission 必须重验当前项目范围与 Credits 余额、仍有效的原批准窗口，并按当前费率版本新建 hold；无效批准或余额不足时拒绝。上述恢复准入由独立增量实现，当前路径不声称已支持恢复后运行。
+
 
 ## 审批与续期的 HTTP 重放
 

@@ -3,11 +3,13 @@
     clippy::too_many_lines,
     reason = "keep each full transaction invariant visible"
 )]
+use contracts::http::RecordResourceUsageRequest;
 use contracts::http::CreateResourceRateRequest;
 use contracts::resource::credits::{CreditAdminOperation, CreditHoldResolutionRequest};
 use contracts::resource::{
     CapacityClaim, CapacityClaimState, FixedDecimal, Money, ResourceApproval, ResourceBillingUnit,
-    ResourceRequest, ResourceRequestState, ResourceTarget, WorkloadResources,
+    ResourceRequest, ResourceRequestState, ResourceTarget, ResourceUsageKind,
+    ResourceUsageQuantities, ResourceUsageTarget, UsageMeasurement, WorkloadResources,
 };
 use contracts::{
     ActorId, CapacityClaimId, EnvironmentId, LeaseId, PlatformRole, ProjectId, ReleaseId,
@@ -818,5 +820,69 @@ async fn fractional_renewals_reserve_the_combined_known_charge_without_rounding_
     let account = credits.account(request.project_id).await?;
     assert_eq!(account.spent, money("0.000001")?);
     assert_eq!(account.platform_absorbed, FixedDecimal::zero());
+    Ok(())
+}
+
+#[tokio::test]
+async fn retired_compute_rejects_old_grant_and_usage_without_billing() -> Result<()> {
+    let (_container, pool, store, credits, request, lease_id) = fixture().await?;
+    prices(&store, "1.000000").await?;
+    allowance(&credits, request.project_id, "50.000000").await?;
+    let from = store.current_time().await?;
+    let until = at(from, 10)?;
+    activate(&store, lease_id, from, until).await?;
+    assert!(
+        store
+            .environment_credit_grant(OWNER, lease_id)
+            .await?
+            .can_authorize_execution
+    );
+    sqlx::query("UPDATE resource.capacity_claims SET compute_released=true WHERE claim_id=(SELECT claim_id FROM resource.resource_leases WHERE lease_id=$1)")
+        .bind(lease_id.as_uuid()).execute(&pool).await?;
+    assert!(
+        !store
+            .environment_credit_grant(OWNER, lease_id)
+            .await?
+            .can_authorize_execution
+    );
+    let before = credits.account(request.project_id).await?;
+    let rejected = store
+        .record_usage(
+            &RecordResourceUsageRequest {
+                kind: ResourceUsageKind::Compute,
+                target: ResourceUsageTarget::ResourceRequest {
+                    request_id: request.id,
+                    lease_id: Some(lease_id),
+                },
+                source_event_id: contracts::EventId::new(),
+                measured_from: from,
+                measured_until: until,
+                measurement: UsageMeasurement::Known {
+                    quantities: ResourceUsageQuantities {
+                        quantity_divisor: 1000,
+                        cpu_millicore_seconds: 10_000,
+                        memory_byte_seconds: 0,
+                        storage_byte_seconds: 0,
+                        gpu_unit_seconds: 0,
+                    },
+                },
+            },
+            until,
+        )
+        .await;
+    assert!(matches!(
+        rejected,
+        Err(resource_service::store::ResourceStoreError::UsageConflict)
+    ));
+    assert_eq!(credits.account(request.project_id).await?, before);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource.resource_usage_records WHERE request_id=$1"
+        )
+        .bind(request.id.as_uuid())
+        .fetch_one(&pool)
+        .await?,
+        0
+    );
     Ok(())
 }
