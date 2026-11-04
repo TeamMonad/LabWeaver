@@ -22,6 +22,16 @@ CREATE TABLE IF NOT EXISTS resource.retained_storage_intervals (
     CHECK (closed = (closed_at IS NOT NULL))
 );
 
+-- A missing historical tariff must not monopolize the bounded settlement batch. The
+-- ALTER is replay-safe for databases that already applied the initial 0026 draft.
+ALTER TABLE resource.retained_storage_intervals
+    ADD COLUMN IF NOT EXISTS settlement_attempts integer NOT NULL DEFAULT 0
+        CHECK (settlement_attempts >= 0),
+    ADD COLUMN IF NOT EXISTS settlement_next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp();
+CREATE INDEX IF NOT EXISTS retained_storage_settlement_due
+    ON resource.retained_storage_intervals (settlement_next_attempt_at, environment_id, started_at)
+    WHERE priced_until < measured_until;
+
 -- A monotonic producer revision/generation fence. Stale receipts cannot reopen terminal facts.
 CREATE TABLE IF NOT EXISTS resource.environment_cleanup_fences (
     lease_id uuid PRIMARY KEY REFERENCES resource.resource_leases(lease_id),

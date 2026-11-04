@@ -1008,13 +1008,17 @@ impl PgResourceStore {
                 // insert takes KEY SHARE locks for both foreign keys, so acquire the optional
                 // Lease lock first and keep every request/lease transaction in the same order.
                 let locked_lease = if let Some(lease_id) = lease_id {
-                    let lease_row = sqlx::query("SELECT l.request_id,l.state,COALESCE(c.compute_released,false) AS compute_released,f.compute_retired_at FROM resource.resource_leases l LEFT JOIN resource.capacity_claims c ON c.claim_id=l.claim_id LEFT JOIN resource.environment_cleanup_fences f ON f.lease_id=l.lease_id WHERE l.lease_id=$1 FOR UPDATE OF l")
+                    let lease_row = sqlx::query("SELECT request_id,state FROM resource.resource_leases WHERE lease_id=$1 FOR UPDATE")
                     .bind(lease_id.as_uuid())
                     .fetch_optional(&mut *transaction)
                     .await?
                     .ok_or(ResourceStoreError::LeaseNotFound)?;
-                    if lease_row.try_get::<bool, _>("compute_released")?
-                        && lease_row.try_get::<Option<time::OffsetDateTime>, _>("compute_retired_at")?
+                    // READ COMMITTED takes a new snapshot for this statement after any lease
+                    // lock wait. Cleanup updates the claim/fence while holding that same lease.
+                    let retirement = sqlx::query("SELECT c.compute_released,f.compute_retired_at FROM resource.resource_leases l JOIN resource.capacity_claims c ON c.claim_id=l.claim_id LEFT JOIN resource.environment_cleanup_fences f ON f.lease_id=l.lease_id WHERE l.lease_id=$1")
+                        .bind(lease_id.as_uuid()).fetch_one(&mut *transaction).await?;
+                    if retirement.try_get::<bool, _>("compute_released")?
+                        && retirement.try_get::<Option<time::OffsetDateTime>, _>("compute_retired_at")?
                             .is_some_and(|retired| input.measured_until.get() > retired)
                     {
                         return Err(ResourceStoreError::UsageConflict);

@@ -170,11 +170,15 @@ Environment 的 cleanup readback 是 Resource 接受退役事实的输入。Reso
 
 Resource0026 用 `capacity_claims.compute_released/storage_released` 保存维度释放，不改写原规格；GPU reservation 同事务释放。`retained_storage_intervals` 保留真实占用 watermark、待计价 watermark 和终态关闭时刻，`retained_storage_platform_costs` 追加平台承担的微 Credits 增量及累计费率数量快照。每次按完整累计区间跨版本拆分、精确舍入，再扣除已记录的平台成本；高频短区间不丢失最小金额单位。已使用的历史费率窗口不能回溯截短。缺价时仍提交计算退役与真实存储事实，计价保持待核实；既有结算循环补齐费率后重试，包括已关闭的盘。缺少存储测量时保存原 cleanup receipt 中的未知事实，不制造零字节或零费用用量行。
 
+保留盘按每个原费率区间使用 `u128` 计算“字节 × 毫秒”和金额，不能因普通大盘跨完整保留期超过 `u64` 而阻塞清盘。平台成本内部快照的 `quantity` 以十进制字符串保存宽数量，`quantityDivisor=1000`；已有快照不重写，公开 `ResourceChargeLine` 仍保持原 `u64` 契约。结算维护每轮最多读取 16 条到期候选；缺价项增加 `settlement_attempts`，将 `settlement_next_attempt_at` 按 1–60 秒有界退避推进，让其他可计价区间继续结算。到期候选按下次尝试时间排序，永久缺价项不能持续占据队首。
+
 保留存储区间只在其关闭事实首次被 Resource 接受时终结：到期清盘完成，实际 purge，或已获新的计算资金授权并观察到 restored generation 的 `reactivatedAt`。单纯 Restore 到 Stopped 不关闭存储区间。重复 purge、expiry、restore 或 cleanup 回执不能重复关闭、重开或收费；关闭后延迟的 retained readback 不得重开区间。新的运行区间必须以新 generation 和当前授权开始。
 
 **恢复资金目前有意 fail-closed：** Restore 不会继承原 generation 的 compute 资金许可。compute 已退役后，旧 grant/revision 不授权新 compute，也不应提交其计量。恢复后的 generation 在 Resource 的新恢复资金准入路径交付前保持拒绝；不能将普通 lease renewal 或原 hold 当成恢复资金。该 admission 必须重验当前项目范围与 Credits 余额、仍有效的原批准窗口，并按当前费率版本新建 hold；无效批准或余额不足时拒绝。上述恢复准入由独立增量实现，当前路径不声称已支持恢复后运行。
 
 当前旧资金入口的稳定拒绝为 `LW_RESOURCE_USAGE_CONFLICT`：普通续期不能给已退役计算重新注资，旧 lease 的新计算或存储计量也不能跨过原 `computeRetiredAt` 再扣旧 hold。退役边界之前的迟到计量仍可按原事件幂等结算。资金查询返回 `canAuthorizeExecution=false`，不将原 grant 回执当作恢复授权；Source 的 `reactivatedAt` 仅关闭原平台存储区间，不清除 compute-released fence。
+
+计量准入先用独立 SQL 语句取得 lease 行锁，再用新语句读取 claim 与 cleanup fence；等待并发退役事务提交后，必须按最新已提交事实拒绝跨退役边界的旧用量，不能沿用等待前的 JOIN 快照。
 
 
 ## 审批与续期的 HTTP 重放

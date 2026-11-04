@@ -587,30 +587,32 @@ async fn price_retained_interval(
         return Ok(());
     }
     let storage_bytes = u64::try_from(row.try_get::<i64, _>("storage_bytes")?)?;
-    let quantity = storage_bytes
-        .checked_mul(u64::try_from((until - started_at).whole_milliseconds())?)
-        .ok_or(ResourceStoreError::NumericOverflow)?;
     crate::costing::rate_lock(tx).await?;
-    let mut lines = Vec::new();
+    let unit = contracts::resource::ResourceBillingUnit::StorageByteSecond;
+    let segments = crate::pricing::select_rate_segments(
+        tx, unit, None, None, None,
+        UtcTimestamp::from_utc(started_at)?, UtcTimestamp::from_utc(until)?,
+    ).await?;
+    let mut snapshots = Vec::with_capacity(segments.len());
     let mut currency = None;
-    crate::pricing::append_rate_segments(
-        tx,
-        UtcTimestamp::from_utc(started_at)?,
-        UtcTimestamp::from_utc(until)?,
-        1000,
-        contracts::resource::ResourceBillingUnit::StorageByteSecond,
-        quantity,
-        None,
-        None,
-        None,
-        &mut lines,
-        &mut currency,
-    )
-    .await?;
-    let amount = lines.iter().try_fold(0_i128, |sum, line| {
-        sum.checked_add(line.amount.amount.scaled())
-            .ok_or(ResourceStoreError::NumericOverflow)
-    })?;
+    let mut amount = 0_i128;
+    for (rate, millis) in segments {
+        let quantity = u128::from(storage_bytes).checked_mul(millis)
+            .ok_or(ResourceStoreError::NumericOverflow)?;
+        if currency.as_ref().is_some_and(|value| value != &rate.unit_price.currency) {
+            return Err(ResourceStoreError::RateCurrencyConflict);
+        }
+        if currency.is_none() {
+            currency = Some(rate.unit_price.currency.clone());
+        }
+        let charge = crate::pricing::multiply_money_wide(&rate.unit_price, quantity, rate.unit_quantity, 1000)?;
+        amount = amount.checked_add(charge.amount.scaled()).ok_or(ResourceStoreError::NumericOverflow)?;
+        snapshots.push(serde_json::json!({
+            "rateId": rate.id, "rateRevision": rate.revision, "unit": unit,
+            "quantity": quantity.to_string(), "quantityDivisor": 1000,
+            "unitQuantity": rate.unit_quantity, "unitPrice": rate.unit_price, "amount": charge,
+        }));
+    }
     // The provider reports a cumulative meter. Round cumulative rate quantities once,
     // then append only the unpaid delta; frequent sub-microcredit polls cannot lose cost.
     let previous: String = sqlx::query_scalar("SELECT COALESCE(sum(amount),0)::text FROM resource.retained_storage_platform_costs WHERE environment_id=$1 AND started_at=$2")
@@ -623,7 +625,7 @@ async fn price_retained_interval(
         )
         .filter(|value| *value >= 0)
         .ok_or(ResourceStoreError::NumericOverflow)?;
-    let snapshots = serde_json::to_value(&lines)?;
+    let snapshots = serde_json::Value::Array(snapshots);
     sqlx::query("INSERT INTO resource.retained_storage_platform_costs(cost_id,environment_id,started_at,measured_from,measured_until,storage_bytes,rate_snapshots,amount,currency) VALUES($1,$2,$3,$4,$5,$6,$7,$8::text::numeric,$9) ON CONFLICT(environment_id,started_at,measured_until) DO NOTHING")
         .bind(Uuid::now_v7()).bind(environment_id).bind(started_at).bind(from).bind(until)
         .bind(i64::try_from(storage_bytes)?).bind(snapshots).bind(amount.to_string())
@@ -640,30 +642,22 @@ pub(crate) async fn settle_retained_storage_once(
 ) -> Result<bool, ResourceStoreError> {
     let mut tx = pool.begin().await?;
     crate::costing::rate_lock(&mut tx).await?;
-    let row = sqlx::query("SELECT environment_id,started_at FROM resource.retained_storage_intervals WHERE priced_until<LEAST(measured_until,COALESCE(closed_at,measured_until)) ORDER BY priced_until,environment_id LIMIT 1 FOR UPDATE SKIP LOCKED")
-        .fetch_optional(&mut *tx).await?;
-    let Some(row) = row else {
-        tx.commit().await?;
-        return Ok(false);
-    };
-    match price_retained_interval(
-        &mut tx,
-        row.try_get("environment_id")?,
-        row.try_get("started_at")?,
-    )
-    .await
-    {
-        Ok(()) => {
-            tx.commit().await?;
-            Ok(true)
-        }
-        Err(ResourceStoreError::RateUnconfigured) => {
-            tx.commit().await?;
-            Ok(false)
-        }
-        Err(error) => {
-            tx.rollback().await?;
-            Err(error)
+    let rows = sqlx::query("SELECT environment_id,started_at FROM resource.retained_storage_intervals WHERE priced_until<LEAST(measured_until,COALESCE(closed_at,measured_until)) AND settlement_next_attempt_at<=clock_timestamp() ORDER BY settlement_next_attempt_at,environment_id,started_at LIMIT 16 FOR UPDATE SKIP LOCKED")
+        .fetch_all(&mut *tx).await?;
+    let mut did_work = false;
+    for row in rows {
+        let environment_id = row.try_get("environment_id")?;
+        let started_at = row.try_get("started_at")?;
+        match price_retained_interval(&mut tx, environment_id, started_at).await {
+            Ok(()) => did_work = true,
+            Err(ResourceStoreError::RateUnconfigured) => {
+                // Same saturating attempts and bounded exponential delay as pending usage.
+                sqlx::query("UPDATE resource.retained_storage_intervals SET settlement_attempts=LEAST(settlement_attempts,2147483646)+1,settlement_next_attempt_at=clock_timestamp()+make_interval(secs=>LEAST(60,power(2,LEAST(settlement_attempts,6)))::integer) WHERE environment_id=$1 AND started_at=$2")
+                    .bind(environment_id).bind(started_at).execute(&mut *tx).await?;
+            },
+            Err(error) => { tx.rollback().await?; return Err(error); },
         }
     }
+    tx.commit().await?;
+    Ok(did_work)
 }
