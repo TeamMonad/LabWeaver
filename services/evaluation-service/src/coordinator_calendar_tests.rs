@@ -1,6 +1,6 @@
 use super::FreezeCoordinator;
-use contracts::{CourseId, FrozenSubmissionId, ReleaseId};
-use sqlx::postgres::PgPoolOptions;
+use contracts::{CourseId, ReleaseId};
+use crate::PgEvaluationControlStore;
 use std::error::Error;
 
 #[allow(clippy::too_many_lines)]
