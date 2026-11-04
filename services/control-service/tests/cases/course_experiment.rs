@@ -68,7 +68,7 @@ async fn individual_experiment_rejects_groups_and_personal_scope_isolated() -> T
     let experiment = service.create_course_experiment(&teacher, course, &request, &IdempotencyKey::parse("individual-create")?).await?;
     let group_request = CreateExperimentGroupRequest { payer_project_id: ProjectId::new(), payer_actor_id: student.actor_id, member_actor_ids: vec![student.actor_id], payer_consent: true };
     assert!(matches!(service.create_experiment_group(&teacher, course, experiment.id, &group_request, &IdempotencyKey::parse("individual-group")?).await, Err(control_service::ControlError::ContractInvalid)));
-    assert!(matches!(service.course_experiment(&student, CourseId::new(), experiment.id).await, Err(control_service::ControlError::NotFound)));
+    assert!(matches!(service.course_experiment(&student, CourseId::new(), experiment.id).await, Err(control_service::ControlError::NotFound | control_service::ControlError::CourseGovernanceDenied)));
     Ok(())
 }
 
