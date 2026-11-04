@@ -1624,6 +1624,7 @@ fn classify_binding_rejection(status: StatusCode, body: &[u8]) -> FreezeCoordina
 
 #[cfg(test)]
 mod tests {
+    use super::calendar_production_roles;
     use super::{
         ENVIRONMENT_FREEZE_SCOPE, FreezeCoordinator, FreezeCoordinatorConfiguration,
         FreezeCoordinatorError, classify_binding_rejection, command_deadline_exceeded,
@@ -1693,7 +1694,6 @@ mod tests {
     use testcontainers_modules::postgres::Postgres;
     use tokio::net::TcpListener;
     use tokio_rustls::TlsAcceptor;
-    use super::calendar_production_roles;
     mod calendar_tests {
         include!("coordinator_calendar_tests.rs");
     }
@@ -1871,10 +1871,13 @@ mod tests {
         let pool = if let Some(roles) = &roles {
             roles.provisioner.clone()
         } else {
-            let pool = PgPoolOptions::new().max_connections(4).connect(&format!(
-                "postgres://postgres:postgres@127.0.0.1:{}/postgres",
-                database.get_host_port_ipv4(5432).await?
-            )).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(4)
+                .connect(&format!(
+                    "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+                    database.get_host_port_ipv4(5432).await?
+                ))
+                .await?;
             apply_evaluation_migrations(&pool).await?;
             pool
         };
@@ -2102,7 +2105,14 @@ spec:
             requested_at: now,
         };
         if calendar_boundaries {
-            calendar_tests::assert_boundaries(&mut coordinator, &pool, &command, &expected_manifest, &kubernetes_server).await?;
+            calendar_tests::assert_boundaries(
+                &mut coordinator,
+                &pool,
+                &command,
+                &expected_manifest,
+                &kubernetes_server,
+            )
+            .await?;
             kubernetes_server.stop().await;
             environment_server.stop().await;
             admission_server.stop().await;
