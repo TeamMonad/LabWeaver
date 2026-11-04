@@ -4841,6 +4841,9 @@ async fn migrated_pool()
     ))
     .execute(&pool)
     .await?;
+    sqlx::raw_sql(include_str!("../../../migrations/resource/0026_retained_storage_consumer.sql"))
+        .execute(&pool)
+        .await?;
     Ok((container, pool))
 }
 
