@@ -73,11 +73,20 @@ async fn service() -> TestResult<(
     Ok((roles, service, course, teacher, ta, student))
 }
 
-async fn course_release(pool: &sqlx::PgPool, course: CourseId) -> TestResult<ReleaseId> {
+/// A published release backed by a validated environment candidate of `class`.
+async fn course_release(
+    pool: &sqlx::PgPool,
+    course: CourseId,
+    class: &str,
+) -> TestResult<ReleaseId> {
     let release = ReleaseId::new();
+    let (project, candidate) = (Uuid::now_v7(), Uuid::now_v7());
+    let spec = Sha256Digest::of_bytes(release.as_uuid().as_bytes()).to_string();
+    sqlx::query("INSERT INTO control.candidates(candidate_id,candidate_kind,course_id,project_id,revision,state,content_sha256,contract) VALUES($1,'environment',$2,$3,1,'validated',$4,jsonb_build_object('spec',jsonb_build_object('class',$5::text)))")
+        .bind(candidate).bind(course.as_uuid()).bind(project).bind(&spec).bind(class)
+        .execute(pool).await?;
     sqlx::query("INSERT INTO control.environment_template_releases(release_id,project_id,course_id,version,environment_candidate_id,candidate_revision,spec_sha256,contract,published_at) VALUES($1,$2,$3,1,$4,1,$5,'{}'::jsonb,date_trunc('milliseconds',clock_timestamp()))")
-        .bind(release.as_uuid()).bind(Uuid::now_v7()).bind(course.as_uuid()).bind(Uuid::now_v7())
-        .bind(Sha256Digest::of_bytes(release.as_uuid().as_bytes()).to_string())
+        .bind(release.as_uuid()).bind(project).bind(course.as_uuid()).bind(candidate).bind(&spec)
         .execute(pool).await?;
     Ok(release)
 }
@@ -98,7 +107,7 @@ async fn project_role(
 async fn experiment_create_permissions_and_group_policy_are_enforced() -> TestResult {
     let (roles, service, course, teacher, ta, student) = service().await?;
     let request = CreateCourseExperimentRequest {
-        release_id: course_release(&roles.provisioner, course).await?,
+        release_id: course_release(&roles.provisioner, course, "experiment").await?,
         policy: ExperimentPolicy::Group,
     };
     let denied_student = service
@@ -120,8 +129,26 @@ async fn experiment_create_permissions_and_group_policy_are_enforced() -> TestRe
         denied_ta,
         Err(control_service::ControlError::CourseGovernanceDenied)
     ));
+    let work_release = CreateCourseExperimentRequest {
+        release_id: course_release(&roles.provisioner, course, "work").await?,
+        policy: ExperimentPolicy::Group,
+    };
+    assert!(
+        matches!(
+            service
+                .create_course_experiment(
+                    &teacher,
+                    course,
+                    &work_release,
+                    &IdempotencyKey::parse("work-release")?,
+                )
+                .await,
+            Err(control_service::ControlError::NotFound)
+        ),
+        "a Work release of the same course cannot be registered as a course experiment"
+    );
     let foreign_release = CreateCourseExperimentRequest {
-        release_id: course_release(&roles.provisioner, CourseId::new()).await?,
+        release_id: course_release(&roles.provisioner, CourseId::new(), "experiment").await?,
         policy: ExperimentPolicy::Group,
     };
     assert!(
@@ -322,7 +349,7 @@ async fn experiment_create_permissions_and_group_policy_are_enforced() -> TestRe
 async fn individual_experiment_rejects_groups_and_personal_scope_isolated() -> TestResult {
     let (roles, service, course, teacher, _ta, student) = service().await?;
     let request = CreateCourseExperimentRequest {
-        release_id: course_release(&roles.provisioner, course).await?,
+        release_id: course_release(&roles.provisioner, course, "experiment").await?,
         policy: ExperimentPolicy::Individual,
     };
     let experiment = service

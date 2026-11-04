@@ -60,9 +60,10 @@ impl ControlService {
         {
             return Err(ControlError::CourseGovernanceDenied);
         }
-        // The release must be a current (not withdrawn) release of this course; a release from
-        // another course is reported as not found so its existence is not disclosed.
-        let release_in_course: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM control.environment_template_releases r WHERE r.release_id=$1 AND r.course_id=$2 AND NOT EXISTS(SELECT 1 FROM control.release_withdrawals w WHERE w.release_id=r.release_id))")
+        // The release must be a current (not withdrawn) Experiment release of this course, backed
+        // by its validated environment candidate (the same view runtime authorization trusts).
+        // Work releases and other courses' releases are reported as not found.
+        let release_in_course: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM control.runtime_authorization_configurations v WHERE v.release_id=$1 AND v.course_id=$2 AND v.candidate_contract->'spec'->>'class'='experiment' AND NOT EXISTS(SELECT 1 FROM control.release_withdrawals w WHERE w.release_id=v.release_id))")
             .bind(request.release_id.as_uuid())
             .bind(course_id.as_uuid())
             .fetch_one(&mut *tx)
