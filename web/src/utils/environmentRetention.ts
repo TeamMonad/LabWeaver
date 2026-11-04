@@ -268,14 +268,32 @@ export function knownEnvironmentCode(code: string | null | undefined): boolean {
 }
 
 /**
+ * `/recover` admits only the environment owner. Its generic scope refusal
+ * carries no detail, so restore and purge continuation name that rule; other
+ * routes keep their own wording for the same code.
+ */
+const DISK_RECOVERY_CODE_TEXT: Record<string, CodeText> = {
+  LW_AUTH_SCOPE_DENIED: { reason: '只有这个环境的所有者可以恢复磁盘或继续清除磁盘，平台拒绝了这次请求。', nextStep: '请联系环境所有者操作；重试不会成功。', final: true },
+}
+
+function diagnosticFrom(table: Record<string, CodeText>, code: string, detail: string | undefined, fallback: string, retryable: boolean, problem?: DiagnosticProblem): DiagnosticViewModel {
+  const text = table[code]
+  const diagnostic = makeDiagnostic(code, detail ?? text?.reason ?? fallback, text?.final ? false : retryable, problem)
+  if (text?.nextStep) diagnostic.nextStep = text.nextStep
+  return diagnostic
+}
+
+/**
  * Diagnostic for a rejected lifecycle or retention request: the server detail
  * or the readable Chinese reason first, then code/requestId via the banner.
  */
 export function environmentDiagnostic(code: string, detail: string | undefined, fallback: string, retryable: boolean, problem?: DiagnosticProblem): DiagnosticViewModel {
-  const text = CODE_TEXT[code]
-  const diagnostic = makeDiagnostic(code, detail ?? text?.reason ?? fallback, text?.final ? false : retryable, problem)
-  if (text?.nextStep) diagnostic.nextStep = text.nextStep
-  return diagnostic
+  return diagnosticFrom(CODE_TEXT, code, detail, fallback, retryable, problem)
+}
+
+/** A refused `/recover` (restore or purge continuation); the server's refusal stays authoritative. */
+export function diskRecoveryDiagnostic(code: string, detail: string | undefined, fallback: string, retryable: boolean, problem?: DiagnosticProblem): DiagnosticViewModel {
+  return diagnosticFrom(DISK_RECOVERY_CODE_TEXT[code] ? DISK_RECOVERY_CODE_TEXT : CODE_TEXT, code, detail, fallback, retryable, problem)
 }
 
 /** A persisted operation code shown without a request: reason and next step only. */

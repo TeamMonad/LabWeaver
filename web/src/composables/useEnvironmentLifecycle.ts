@@ -13,6 +13,7 @@ import {
 import {
   DISK_STATE_LABEL,
   RESTORE_FUNDING_NOTICE,
+  diskRecoveryDiagnostic,
   environmentDiagnostic,
   failedPurge,
   retentionExpired,
@@ -158,7 +159,7 @@ export function useEnvironmentLifecycle(
         const problem = extractProblemDetails(result.error)
         return {
           ok: false,
-          diagnostic: environmentDiagnostic(
+          diagnostic: diskRecoveryDiagnostic(
             problem?.diagnosticCode ?? 'ENVIRONMENT_RECOVER_FAILED',
             problem?.detail,
             '磁盘恢复请求没有被受理。',
@@ -173,7 +174,7 @@ export function useEnvironmentLifecycle(
       const problem = extractProblemDetails(error)
       return {
         ok: false,
-        diagnostic: environmentDiagnostic(
+        diagnostic: diskRecoveryDiagnostic(
           problem?.diagnosticCode ?? 'ENVIRONMENT_RECOVER_UNCONFIRMED',
           problem?.detail,
           '请求结果尚未确认，平台可能已经受理。',

@@ -275,6 +275,40 @@ describe('restore and purge controls', () => {
     expect(controls.diskRecoveryDiagnostic.value).toMatchObject({ code: 'LW_ENVIRONMENT_DISK_RETENTION_EXPIRED', message: '七天磁盘保留期已结束，不能恢复。', requestId: 'req-9', retryable: false })
   })
 
+  it.each(['restore', 'purge'] as const)('explains an owner-only %s refusal reason first, keeps code and request id, and offers no retry', async (intent) => {
+    const data = intent === 'restore'
+      ? instance()
+      : instance({ observedState: 'failed', diskRetention: disk({ state: 'purging' }), operation: { id: 'op-purge', kind: 'purge', state: 'failed', attempt: 3, maxAttempts: 3 } as never })
+    const { controls, permissions } = harness(data)
+    recover.mockResolvedValueOnce({ error: { diagnosticCode: 'LW_AUTH_SCOPE_DENIED', status: 403, requestId: 'req-owner' } } as never)
+    controls.requestDiskRecovery(data, intent)
+    await controls.confirmDiskRecovery()
+    expect(controls.diskRecoveryDiagnostic.value).toMatchObject({
+      code: 'LW_AUTH_SCOPE_DENIED',
+      requestId: 'req-owner',
+      status: 403,
+      retryable: false,
+      message: '只有这个环境的所有者可以恢复磁盘或继续清除磁盘，平台拒绝了这次请求。',
+    })
+    expect(controls.diskRecoveryDiagnostic.value?.nextStep).toContain('联系环境所有者')
+    expect(permissions.refresh).toHaveBeenCalled()
+  })
+
+  it('shows the owner-only refusal in the panel before its code and request id', async () => {
+    recover.mockResolvedValueOnce({ error: { diagnosticCode: 'LW_AUTH_SCOPE_DENIED', status: 403, requestId: 'req-owner' } } as never)
+    const { wrapper, controls } = mountWithContext(EnvironmentDiskRetentionPanel, instance())
+    controls.requestDiskRecovery(instance(), 'restore')
+    await controls.confirmDiskRecovery()
+    await flushPromises()
+    const banner = wrapper.get('[data-testid="disk-recovery-diagnostic"]')
+    const text = banner.text()
+    expect(text.indexOf('只有这个环境的所有者')).toBeGreaterThanOrEqual(0)
+    expect(text.indexOf('只有这个环境的所有者')).toBeLessThan(text.indexOf('LW_AUTH_SCOPE_DENIED'))
+    expect(text).toContain('req-owner')
+    expect(banner.findAll('button').some((button) => button.text().includes('重试'))).toBe(false)
+    document.body.innerHTML = ''
+  })
+
   it('drops a confirmation whose revision moved on before it was confirmed', async () => {
     const data = instance()
     const { controls, env } = harness(data)
