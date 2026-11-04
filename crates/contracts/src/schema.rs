@@ -94,6 +94,26 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::membership_governance::CourseStudentView
     );
     document!(
+        "schemas/contracts/v1/course-experiment.schema.json",
+        crate::course_experiments::CourseExperiment
+    );
+    document!(
+        "schemas/contracts/v1/experiment-group.schema.json",
+        crate::course_experiments::ExperimentGroup
+    );
+    document!(
+        "schemas/contracts/v1/course-experiment-group-view.schema.json",
+        crate::course_experiments::CourseExperimentGroupView
+    );
+    document!(
+        "schemas/contracts/v1/http/create-course-experiment-request.schema.json",
+        crate::course_experiments::CreateCourseExperimentRequest
+    );
+    document!(
+        "schemas/contracts/v1/http/create-experiment-group-request.schema.json",
+        crate::course_experiments::CreateExperimentGroupRequest
+    );
+    document!(
         "schemas/contracts/v1/project-page.schema.json",
         crate::membership_governance::ProjectPage
     );
@@ -1902,6 +1922,10 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 | "updateCourseCalendar"
                 | "getCourseStudentView"
                 | "importCourseRoster"
+                | "createCourseExperiment"
+                | "getCourseExperiment"
+                | "createExperimentGroup"
+                | "listExperimentGroups"
         ) {
             operation_json["x-labweaver-errors"] = json!([
                 "LW_CONTRACT_DOCUMENT_INVALID",
@@ -1915,6 +1939,13 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 "LW_COURSE_ROSTER_ROLE_INVALID",
                 "LW_COURSE_ROSTER_ACCOUNT_NOT_FOUND",
                 "LW_COURSE_ROSTER_GOVERNANCE_DENIED",
+                "LW_COURSE_EXPERIMENT_PAYER_CONSENT_REQUIRED",
+                "LW_COURSE_EXPERIMENT_NOT_OPEN",
+                "LW_COURSE_EXPERIMENT_CLOSED",
+                "LW_COURSE_EXPERIMENT_LATE",
+                "LW_COURSE_EXPERIMENT_GROUP_REQUIRED",
+                "LW_COURSE_EXPERIMENT_GROUP_MEMBER_DENIED",
+                "LW_COURSE_EXPERIMENT_PAYER_IMMUTABLE",
                 "LW_IDEMPOTENCY_CONFLICT"
             ]);
         }
@@ -2471,6 +2502,8 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "reportPlatformConfigurationApply" => "http/report-platform-configuration-apply-request",
         "updateCourseCalendar" => "http/update-course-calendar",
         "importCourseRoster" => "http/course-roster-import-request",
+        "createCourseExperiment" => "http/create-course-experiment-request",
+        "createExperimentGroup" => "http/create-experiment-group-request",
         "createProjectMembershipInvitation" => "http/create-project-membership-invitation",
         "createCourseMembershipInvitation" => "http/create-course-membership-invitation",
         "acceptMembershipInvitation" => "http/accept-membership-invitation",
@@ -2588,6 +2621,11 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         }
         "getCourseCalendar" | "updateCourseCalendar" => contract_ref("course-calendar"),
         "importCourseRoster" => contract_ref("http/course-roster-import-result"),
+        "createCourseExperiment" | "getCourseExperiment" => contract_ref("course-experiment"),
+        "createExperimentGroup" => contract_ref("course-experiment-group-view"),
+        "listExperimentGroups" => {
+            json!({"type":"array","items":contract_ref("course-experiment-group-view")})
+        }
         "getCourseStudentView" => contract_ref("http/course-student-view"),
         "getPlatformConfigurationApply" => contract_ref("platform-configuration-apply"),
         "listIncomingMembershipInvitations"

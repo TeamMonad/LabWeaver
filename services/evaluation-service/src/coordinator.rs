@@ -30,12 +30,17 @@ use reqwest::{
 use russh::keys::ssh_key::{LineEnding, PrivateKey, private::Ed25519Keypair};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sqlx::Row;
 
 use crate::authoring_client::{AuthoringAdmissionClient, AuthoringAdmissionClientError};
 use crate::{
     EvaluationControlStoreError, FreezeCommandDurableOutcome, FreezeRequest, FreezeWorkerDispatch,
     FreezeWorkerProfile, PgEvaluationControlStore, PgFreezeCommandStore, SubmissionFreezeCommand,
 };
+#[cfg(test)]
+#[path = "../../control-service/tests/support/production_roles.rs"]
+#[allow(dead_code)]
+mod calendar_production_roles;
 
 const WORKER_IMAGE_PULL_SECRET_NAME: &str = "harbor-labweaver-system-pull";
 
@@ -488,6 +493,84 @@ impl FreezeCoordinator {
         Ok(namespace)
     }
 
+    async fn check_course_calendar(
+        &self,
+        course_id: Option<contracts::CourseId>,
+        release_id: contracts::ReleaseId,
+    ) -> Result<(), FreezeCoordinatorError> {
+        let Some(course_id) = course_id else {
+            return Ok(());
+        };
+        let row = sqlx::query("SELECT calendar_revision,open_at,due_at,time_zone,late_policy,late_until FROM control.course_experiment_windows WHERE course_id=$1 AND release_id=$2").bind(course_id.as_uuid()).bind(release_id.as_uuid()).fetch_optional(self.evaluation.pool()).await.map_err(|error| {
+            tracing::warn!(%error, "course calendar read failed");
+            FreezeCoordinatorError::BindingUnavailable
+        })?;
+        let Some(row) = row else {
+            return Ok(());
+        };
+        let revision = Revision::new(
+            u64::try_from(
+                row.try_get::<i64, _>("calendar_revision")
+                    .map_err(|_| FreezeCoordinatorError::BindingInvalid)?,
+            )
+            .map_err(|_| FreezeCoordinatorError::BindingInvalid)?,
+        )
+        .map_err(|_| FreezeCoordinatorError::BindingInvalid)?;
+        let late_policy = match row
+            .try_get::<String, _>("late_policy")
+            .map_err(|_| FreezeCoordinatorError::BindingInvalid)?
+            .as_str()
+        {
+            "hard_close" => contracts::membership_governance::CourseLatePolicy::HardClose,
+            "allow_with_mark" => contracts::membership_governance::CourseLatePolicy::AllowWithMark,
+            _ => return Err(FreezeCoordinatorError::BindingInvalid),
+        };
+        let open_at = row
+            .try_get::<Option<time::OffsetDateTime>, _>("open_at")
+            .map_err(|_| FreezeCoordinatorError::BindingInvalid)?
+            .map(UtcTimestamp::from_utc)
+            .transpose()
+            .map_err(|_| FreezeCoordinatorError::BindingInvalid)?;
+        let due_at = UtcTimestamp::from_utc(
+            row.try_get::<time::OffsetDateTime, _>("due_at")
+                .map_err(|_| FreezeCoordinatorError::BindingInvalid)?,
+        )
+        .map_err(|_| FreezeCoordinatorError::BindingInvalid)?;
+        let late_until = row
+            .try_get::<Option<time::OffsetDateTime>, _>("late_until")
+            .map_err(|_| FreezeCoordinatorError::BindingInvalid)?
+            .map(UtcTimestamp::from_utc)
+            .transpose()
+            .map_err(|_| FreezeCoordinatorError::BindingInvalid)?;
+        let calendar = contracts::membership_governance::CourseCalendar {
+            course_id,
+            revision,
+            open_at,
+            due_at,
+            time_zone: row
+                .try_get("time_zone")
+                .map_err(|_| FreezeCoordinatorError::BindingInvalid)?,
+            state: contracts::membership_governance::CourseCalendarState::Open,
+            late_policy,
+            late_until,
+        };
+        match calendar.state_at(
+            self.evaluation
+                .authority_now()
+                .await
+                .map_err(|_| FreezeCoordinatorError::BindingUnavailable)?,
+        ) {
+            contracts::membership_governance::CourseCalendarState::NotOpen => {
+                Err(FreezeCoordinatorError::CourseExperimentNotOpen)
+            }
+            contracts::membership_governance::CourseCalendarState::Closed => {
+                Err(FreezeCoordinatorError::CourseExperimentClosed)
+            }
+            contracts::membership_governance::CourseCalendarState::Open
+            | contracts::membership_governance::CourseCalendarState::Late => Ok(()),
+        }
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "the linear resource construction keeps secret, source, and Job bindings reviewable together"
@@ -573,6 +656,8 @@ impl FreezeCoordinator {
             }
             Err(error) => return Err(FreezeCoordinatorError::AuthoringAdmission(error)),
         }
+        self.check_course_calendar(command.course_id, binding.environment.release_id)
+            .await?;
         let now = self.store.authority_now().await?;
         let request = FreezeRequest {
             frozen_submission_id: command.frozen_submission_id,
@@ -1422,6 +1507,12 @@ pub enum FreezeCoordinatorError {
     CertificateInvalid,
     #[error("LW_COLLECT_BINDING_INVALID")]
     BindingInvalid,
+    #[error("LW_COURSE_EXPERIMENT_NOT_OPEN")]
+    CourseExperimentNotOpen,
+    #[error("LW_COURSE_EXPERIMENT_CLOSED")]
+    CourseExperimentClosed,
+    #[error("LW_COURSE_EXPERIMENT_LATE")]
+    CourseExperimentLate,
     #[error("LW_ENVIRONMENT_FREEZE_NOT_ELIGIBLE")]
     BindingNotEligible,
     #[error("LW_COLLECT_BINDING_UNAVAILABLE")]
@@ -1463,7 +1554,13 @@ impl FreezeCoordinatorError {
     const fn is_terminal_command_error(&self) -> bool {
         matches!(
             self,
-            Self::BindingInvalid | Self::BindingNotEligible | Self::Json(_) | Self::Ssh(_)
+            Self::BindingInvalid
+                | Self::BindingNotEligible
+                | Self::CourseExperimentNotOpen
+                | Self::CourseExperimentClosed
+                | Self::CourseExperimentLate
+                | Self::Json(_)
+                | Self::Ssh(_)
         )
     }
 
@@ -1472,6 +1569,9 @@ impl FreezeCoordinatorError {
             Self::ConfigurationInvalid => "LW_COLLECT_COORDINATOR_CONFIG_INVALID",
             Self::CertificateInvalid => "LW_COLLECT_COORDINATOR_CERTIFICATE_INVALID",
             Self::BindingInvalid => "LW_COLLECT_BINDING_INVALID",
+            Self::CourseExperimentNotOpen => "LW_COURSE_EXPERIMENT_NOT_OPEN",
+            Self::CourseExperimentClosed => "LW_COURSE_EXPERIMENT_CLOSED",
+            Self::CourseExperimentLate => "LW_COURSE_EXPERIMENT_LATE",
             Self::BindingNotEligible => "LW_ENVIRONMENT_FREEZE_NOT_ELIGIBLE",
             Self::BindingUnavailable => "LW_COLLECT_BINDING_UNAVAILABLE",
             Self::KubernetesRejected => "LW_COLLECT_KUBERNETES_REJECTED",
@@ -1520,6 +1620,7 @@ fn classify_binding_rejection(status: StatusCode, body: &[u8]) -> FreezeCoordina
 
 #[cfg(test)]
 mod tests {
+    use super::calendar_production_roles;
     use super::{
         ENVIRONMENT_FREEZE_SCOPE, FreezeCoordinator, FreezeCoordinatorConfiguration,
         FreezeCoordinatorError, classify_binding_rejection, command_deadline_exceeded,
@@ -1564,7 +1665,7 @@ mod tests {
         server::conn::auto::Builder,
         service::TowerToHyperService,
     };
-    use persistence_sqlx::{Domain, MigrationCatalog, Sha256Digest};
+    use persistence_sqlx::Sha256Digest;
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
         KeyPair, KeyUsagePurpose,
@@ -1572,7 +1673,6 @@ mod tests {
     use reqwest::{Certificate, Client, Url};
     use rustls::{ServerConfig, pki_types::PrivateKeyDer};
     use serde_json::{Value, json};
-    use sqlx::postgres::PgPoolOptions;
     use std::{
         collections::{BTreeMap, BTreeSet},
         error::Error,
@@ -1585,10 +1685,11 @@ mod tests {
         },
     };
     use tempfile::TempDir;
-    use testcontainers::{ImageExt, runners::AsyncRunner};
-    use testcontainers_modules::postgres::Postgres;
     use tokio::net::TcpListener;
     use tokio_rustls::TlsAcceptor;
+    mod calendar_tests {
+        include!("coordinator_calendar_tests.rs");
+    }
 
     #[test]
     fn existing_profile_example_requires_no_worker_credential_files()
@@ -1740,23 +1841,23 @@ mod tests {
         Ok(())
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "the integration fixture keeps the complete admission and Kubernetes boundary in one scenario"
-    )]
     #[tokio::test]
     async fn coordinator_profiles_preserve_admission_and_recover_dispatch_without_binding()
     -> Result<(), Box<dyn std::error::Error>> {
-        let database = Postgres::default().with_tag("17.5-alpine").start().await?;
-        let database_url = format!(
-            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
-            database.get_host_port_ipv4(5432).await?
-        );
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&database_url)
-            .await?;
-        apply_evaluation_migrations(&pool).await?;
+        Box::pin(coordinator_scenario(false)).await
+    }
+
+    #[tokio::test]
+    async fn freeze_course_calendar_boundaries_reject_without_frozen_submission_and_accept_late()
+    -> Result<(), Box<dyn std::error::Error>> {
+        Box::pin(coordinator_scenario(true)).await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn coordinator_scenario(calendar_boundaries: bool) -> Result<(), Box<dyn Error>> {
+        // Production schema and roles: the freeze path reads Control's course windows.
+        let roles = calendar_production_roles::ProductionRoles::start().await?;
+        let pool = roles.provisioner.clone();
 
         let project_id = ProjectId::new();
         let course_id = CourseId::new();
@@ -1980,6 +2081,20 @@ spec:
             trace_id: "coordinator-manifest-mismatch".to_owned(),
             requested_at: now,
         };
+        if calendar_boundaries {
+            calendar_tests::assert_boundaries(
+                &mut coordinator,
+                &pool,
+                &command,
+                &expected_manifest,
+                &kubernetes_server,
+            )
+            .await?;
+            kubernetes_server.stop().await;
+            environment_server.stop().await;
+            admission_server.stop().await;
+            return Ok(());
+        }
 
         let result = coordinator
             .create_resources(&command, "student", "lw-freeze-test")
@@ -2301,31 +2416,6 @@ spec:
 
         kubernetes_server.stop().await;
         admission_server.stop().await;
-        drop(database);
-        Ok(())
-    }
-
-    async fn apply_evaluation_migrations(pool: &sqlx::PgPool) -> Result<(), Box<dyn Error>> {
-        sqlx::query("CREATE SCHEMA evaluation")
-            .execute(pool)
-            .await?;
-        let mut connection = pool.acquire().await?;
-        sqlx::query("SET search_path = evaluation, pg_catalog")
-            .execute(&mut *connection)
-            .await?;
-        let migration_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
-        let catalog = MigrationCatalog::load(&migration_root.join("catalog.yaml"))?;
-        let domain = catalog
-            .domains
-            .iter()
-            .find(|domain| domain.name == Domain::Evaluation)
-            .ok_or("evaluation migration domain missing")?;
-        for migration in &domain.migrations {
-            let sql = MigrationCatalog::read_verified_sql(&migration_root, migration)?;
-            sqlx::raw_sql(sqlx::AssertSqlSafe(&*sql))
-                .execute(&mut *connection)
-                .await?;
-        }
         Ok(())
     }
 

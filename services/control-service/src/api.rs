@@ -27,6 +27,7 @@ use contracts::authoring::{
     AgentRun, AgentRunPurpose, AgentTrackKind, CandidateDecision, EnvironmentCandidate,
     ProjectLlmEgressPolicy, RuntimeKind,
 };
+use contracts::course_experiments::{CreateCourseExperimentRequest, CreateExperimentGroupRequest};
 use contracts::http::{
     AgentRunListQuery, AgentWorkExecutionIntentQuery, ApproveWorkConfigurationRequest,
     AuthoringPublicationAdmissionQuery, CancelCandidateBuildRequest,
@@ -336,6 +337,18 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route(
             "/api/v1/admin/images/{catalog_id}/disable",
             post(disable_admin_image),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/experiments",
+            post(create_course_experiment),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/experiments/{experiment_id}",
+            get(get_course_experiment),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/experiments/{experiment_id}/groups",
+            post(create_experiment_group).get(list_experiment_groups),
         )
         .merge(platform_configuration::public_routes())
         .with_state(state);
@@ -3514,6 +3527,105 @@ impl IntoResponse for ApiError {
     }
 }
 
+async fn create_course_experiment(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path(course_id): Path<CourseId>,
+    headers: HeaderMap,
+    Json(request): Json<CreateCourseExperimentRequest>,
+) -> Result<Response, ApiError> {
+    let idempotency_key = idempotency(&headers)?;
+    let decision = authorize_decision(
+        &state,
+        &principal,
+        &headers,
+        "createCourseExperiment",
+        course_id,
+    )
+    .await?;
+    let experiment = state
+        .control
+        .create_course_experiment(&decision.actor, course_id, &request, &idempotency_key)
+        .await?;
+    Ok(with_etag(
+        StatusCode::CREATED,
+        &experiment,
+        experiment.revision,
+    ))
+}
+
+async fn get_course_experiment(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path((course_id, experiment_id)): Path<(CourseId, contracts::CourseExperimentId)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let decision = authorize_decision(
+        &state,
+        &principal,
+        &headers,
+        "getCourseExperiment",
+        course_id,
+    )
+    .await?;
+    let experiment = state
+        .control
+        .course_experiment(&decision.actor, course_id, experiment_id)
+        .await?;
+    Ok(with_etag(StatusCode::OK, &experiment, experiment.revision))
+}
+
+async fn create_experiment_group(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path((course_id, experiment_id)): Path<(CourseId, contracts::CourseExperimentId)>,
+    headers: HeaderMap,
+    Json(request): Json<CreateExperimentGroupRequest>,
+) -> Result<Response, ApiError> {
+    let idempotency_key = idempotency(&headers)?;
+    let decision = authorize_decision(
+        &state,
+        &principal,
+        &headers,
+        "createExperimentGroup",
+        course_id,
+    )
+    .await?;
+    let view = state
+        .control
+        .create_experiment_group(
+            &decision.actor,
+            course_id,
+            experiment_id,
+            &request,
+            &idempotency_key,
+        )
+        .await?;
+    Ok(with_etag(StatusCode::CREATED, &view, view.group.revision))
+}
+
+async fn list_experiment_groups(
+    State(state): State<Arc<ApiState>>,
+    Extension(principal): Extension<GatewayPrincipal>,
+    Path((course_id, experiment_id)): Path<(CourseId, contracts::CourseExperimentId)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let decision = authorize_decision(
+        &state,
+        &principal,
+        &headers,
+        "listExperimentGroups",
+        course_id,
+    )
+    .await?;
+    Ok(Json(
+        state
+            .control
+            .experiment_groups(&decision.actor, course_id, experiment_id)
+            .await?,
+    )
+    .into_response())
+}
 #[cfg(test)]
 #[path = "api/model_input_contract_tests.rs"]
 mod model_input_contract_tests;

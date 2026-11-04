@@ -2871,6 +2871,13 @@
           "LW_COURSE_ROSTER_ROLE_INVALID",
           "LW_COURSE_ROSTER_ACCOUNT_NOT_FOUND",
           "LW_COURSE_ROSTER_GOVERNANCE_DENIED",
+          "LW_COURSE_EXPERIMENT_PAYER_CONSENT_REQUIRED",
+          "LW_COURSE_EXPERIMENT_NOT_OPEN",
+          "LW_COURSE_EXPERIMENT_CLOSED",
+          "LW_COURSE_EXPERIMENT_LATE",
+          "LW_COURSE_EXPERIMENT_GROUP_REQUIRED",
+          "LW_COURSE_EXPERIMENT_GROUP_MEMBER_DENIED",
+          "LW_COURSE_EXPERIMENT_PAYER_IMMUTABLE",
           "LW_IDEMPOTENCY_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",
@@ -2999,6 +3006,13 @@
           "LW_COURSE_ROSTER_ROLE_INVALID",
           "LW_COURSE_ROSTER_ACCOUNT_NOT_FOUND",
           "LW_COURSE_ROSTER_GOVERNANCE_DENIED",
+          "LW_COURSE_EXPERIMENT_PAYER_CONSENT_REQUIRED",
+          "LW_COURSE_EXPERIMENT_NOT_OPEN",
+          "LW_COURSE_EXPERIMENT_CLOSED",
+          "LW_COURSE_EXPERIMENT_LATE",
+          "LW_COURSE_EXPERIMENT_GROUP_REQUIRED",
+          "LW_COURSE_EXPERIMENT_GROUP_MEMBER_DENIED",
+          "LW_COURSE_EXPERIMENT_PAYER_IMMUTABLE",
           "LW_IDEMPOTENCY_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentRevisioned",
@@ -3514,6 +3528,514 @@
         "x-labweaver-permission": "evaluation_release:withdraw",
         "x-labweaver-problem-content-type": "application/problem+json",
         "x-labweaver-retryable": false,
+        "x-labweaver-scope": "course",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/courses/{courseId}/experiments": {
+      "post": {
+        "description": "Permission: course_experiment:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "createCourseExperiment",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "courseId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/create-course-experiment-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/course-experiment.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "course_experiment:write"
+            ]
+          }
+        ],
+        "summary": "createCourseExperiment",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_AUTH_SCOPE_DENIED",
+          "LW_COURSE_GOVERNANCE_DENIED",
+          "LW_COURSE_CALENDAR_NOT_FOUND",
+          "LW_COURSE_CALENDAR_INVALID",
+          "LW_COURSE_CALENDAR_CONFLICT",
+          "LW_COURSE_ROSTER_IMPORT_INVALID",
+          "LW_COURSE_ROSTER_ROW_INVALID",
+          "LW_COURSE_ROSTER_ROLE_INVALID",
+          "LW_COURSE_ROSTER_ACCOUNT_NOT_FOUND",
+          "LW_COURSE_ROSTER_GOVERNANCE_DENIED",
+          "LW_COURSE_EXPERIMENT_PAYER_CONSENT_REQUIRED",
+          "LW_COURSE_EXPERIMENT_NOT_OPEN",
+          "LW_COURSE_EXPERIMENT_CLOSED",
+          "LW_COURSE_EXPERIMENT_LATE",
+          "LW_COURSE_EXPERIMENT_GROUP_REQUIRED",
+          "LW_COURSE_EXPERIMENT_GROUP_MEMBER_DENIED",
+          "LW_COURSE_EXPERIMENT_PAYER_IMMUTABLE",
+          "LW_IDEMPOTENCY_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-permission": "course_experiment:write",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/courses/{courseId}/experiments/{experimentId}": {
+      "get": {
+        "description": "Permission: course_experiment:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "getCourseExperiment",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "courseId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "experimentId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/course-experiment.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "course_experiment:read"
+            ]
+          }
+        ],
+        "summary": "getCourseExperiment",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_AUTH_SCOPE_DENIED",
+          "LW_COURSE_GOVERNANCE_DENIED",
+          "LW_COURSE_CALENDAR_NOT_FOUND",
+          "LW_COURSE_CALENDAR_INVALID",
+          "LW_COURSE_CALENDAR_CONFLICT",
+          "LW_COURSE_ROSTER_IMPORT_INVALID",
+          "LW_COURSE_ROSTER_ROW_INVALID",
+          "LW_COURSE_ROSTER_ROLE_INVALID",
+          "LW_COURSE_ROSTER_ACCOUNT_NOT_FOUND",
+          "LW_COURSE_ROSTER_GOVERNANCE_DENIED",
+          "LW_COURSE_EXPERIMENT_PAYER_CONSENT_REQUIRED",
+          "LW_COURSE_EXPERIMENT_NOT_OPEN",
+          "LW_COURSE_EXPERIMENT_CLOSED",
+          "LW_COURSE_EXPERIMENT_LATE",
+          "LW_COURSE_EXPERIMENT_GROUP_REQUIRED",
+          "LW_COURSE_EXPERIMENT_GROUP_MEMBER_DENIED",
+          "LW_COURSE_EXPERIMENT_PAYER_IMMUTABLE",
+          "LW_IDEMPOTENCY_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "course_experiment:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
+        "x-labweaver-timeout-ms": 30000
+      }
+    },
+    "/api/v1/courses/{courseId}/experiments/{experimentId}/groups": {
+      "get": {
+        "description": "Permission: course_experiment:read. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "listExperimentGroups",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "courseId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "experimentId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "../contracts/v1/course-experiment-group-view.schema.json"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "course_experiment:read"
+            ]
+          }
+        ],
+        "summary": "listExperimentGroups",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_AUTH_SCOPE_DENIED",
+          "LW_COURSE_GOVERNANCE_DENIED",
+          "LW_COURSE_CALENDAR_NOT_FOUND",
+          "LW_COURSE_CALENDAR_INVALID",
+          "LW_COURSE_CALENDAR_CONFLICT",
+          "LW_COURSE_ROSTER_IMPORT_INVALID",
+          "LW_COURSE_ROSTER_ROW_INVALID",
+          "LW_COURSE_ROSTER_ROLE_INVALID",
+          "LW_COURSE_ROSTER_ACCOUNT_NOT_FOUND",
+          "LW_COURSE_ROSTER_GOVERNANCE_DENIED",
+          "LW_COURSE_EXPERIMENT_PAYER_CONSENT_REQUIRED",
+          "LW_COURSE_EXPERIMENT_NOT_OPEN",
+          "LW_COURSE_EXPERIMENT_CLOSED",
+          "LW_COURSE_EXPERIMENT_LATE",
+          "LW_COURSE_EXPERIMENT_GROUP_REQUIRED",
+          "LW_COURSE_EXPERIMENT_GROUP_MEMBER_DENIED",
+          "LW_COURSE_EXPERIMENT_PAYER_IMMUTABLE",
+          "LW_IDEMPOTENCY_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "None",
+        "x-labweaver-permission": "course_experiment:read",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
+        "x-labweaver-scope": "course",
+        "x-labweaver-timeout-ms": 30000
+      },
+      "post": {
+        "description": "Permission: course_experiment_group:write. Timeout: 30000 ms. Cancellable: false. Retryable: true. v1 permits additive endpoints and optional response fields only.",
+        "operationId": "createExperimentGroup",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "courseId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "experimentId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../contracts/v1/http/create-experiment-group-request.schema.json"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../contracts/v1/course-experiment-group-view.schema.json"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "pattern": "^\\\"rev-[1-9][0-9]*\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "410": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "429": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem"
+          }
+        },
+        "security": [
+          {
+            "oidc": [
+              "course_experiment_group:write"
+            ]
+          }
+        ],
+        "summary": "createExperimentGroup",
+        "x-labweaver-allowed-roles": [
+          "teacher",
+          "student",
+          "platform_admin"
+        ],
+        "x-labweaver-cancellable": false,
+        "x-labweaver-errors": [
+          "LW_CONTRACT_DOCUMENT_INVALID",
+          "LW_AUTH_SCOPE_DENIED",
+          "LW_COURSE_GOVERNANCE_DENIED",
+          "LW_COURSE_CALENDAR_NOT_FOUND",
+          "LW_COURSE_CALENDAR_INVALID",
+          "LW_COURSE_CALENDAR_CONFLICT",
+          "LW_COURSE_ROSTER_IMPORT_INVALID",
+          "LW_COURSE_ROSTER_ROW_INVALID",
+          "LW_COURSE_ROSTER_ROLE_INVALID",
+          "LW_COURSE_ROSTER_ACCOUNT_NOT_FOUND",
+          "LW_COURSE_ROSTER_GOVERNANCE_DENIED",
+          "LW_COURSE_EXPERIMENT_PAYER_CONSENT_REQUIRED",
+          "LW_COURSE_EXPERIMENT_NOT_OPEN",
+          "LW_COURSE_EXPERIMENT_CLOSED",
+          "LW_COURSE_EXPERIMENT_LATE",
+          "LW_COURSE_EXPERIMENT_GROUP_REQUIRED",
+          "LW_COURSE_EXPERIMENT_GROUP_MEMBER_DENIED",
+          "LW_COURSE_EXPERIMENT_PAYER_IMMUTABLE",
+          "LW_IDEMPOTENCY_CONFLICT"
+        ],
+        "x-labweaver-idempotency": "IdempotentCreate",
+        "x-labweaver-permission": "course_experiment_group:write",
+        "x-labweaver-problem-content-type": "application/problem+json",
+        "x-labweaver-retryable": true,
         "x-labweaver-scope": "course",
         "x-labweaver-timeout-ms": 30000
       }
@@ -4358,6 +4880,13 @@
           "LW_COURSE_ROSTER_ROLE_INVALID",
           "LW_COURSE_ROSTER_ACCOUNT_NOT_FOUND",
           "LW_COURSE_ROSTER_GOVERNANCE_DENIED",
+          "LW_COURSE_EXPERIMENT_PAYER_CONSENT_REQUIRED",
+          "LW_COURSE_EXPERIMENT_NOT_OPEN",
+          "LW_COURSE_EXPERIMENT_CLOSED",
+          "LW_COURSE_EXPERIMENT_LATE",
+          "LW_COURSE_EXPERIMENT_GROUP_REQUIRED",
+          "LW_COURSE_EXPERIMENT_GROUP_MEMBER_DENIED",
+          "LW_COURSE_EXPERIMENT_PAYER_IMMUTABLE",
           "LW_IDEMPOTENCY_CONFLICT"
         ],
         "x-labweaver-idempotency": "IdempotentCreate",
@@ -4462,6 +4991,13 @@
           "LW_COURSE_ROSTER_ROLE_INVALID",
           "LW_COURSE_ROSTER_ACCOUNT_NOT_FOUND",
           "LW_COURSE_ROSTER_GOVERNANCE_DENIED",
+          "LW_COURSE_EXPERIMENT_PAYER_CONSENT_REQUIRED",
+          "LW_COURSE_EXPERIMENT_NOT_OPEN",
+          "LW_COURSE_EXPERIMENT_CLOSED",
+          "LW_COURSE_EXPERIMENT_LATE",
+          "LW_COURSE_EXPERIMENT_GROUP_REQUIRED",
+          "LW_COURSE_EXPERIMENT_GROUP_MEMBER_DENIED",
+          "LW_COURSE_EXPERIMENT_PAYER_IMMUTABLE",
           "LW_IDEMPOTENCY_CONFLICT"
         ],
         "x-labweaver-idempotency": "None",

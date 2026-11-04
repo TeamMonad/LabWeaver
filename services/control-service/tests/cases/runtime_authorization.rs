@@ -30,6 +30,8 @@ use sqlx::PgPool;
 use std::collections::BTreeSet;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+#[path = "course_calendar_runtime.rs"]
+mod calendar_cases;
 #[path = "environment_funded_handoff.rs"]
 mod funded_handoff;
 #[path = "runtime_authorization_lease.rs"]
@@ -226,6 +228,7 @@ pub(super) async fn assert_bindings_after_publication(
     release: &EnvironmentTemplateRelease,
     now: UtcTimestamp,
     executor_failure: Option<ExecutorFailure>,
+    assert_calendar: bool,
 ) -> TestResult {
     let work = candidate.spec.class == contracts::authoring::EnvironmentClass::Work;
     if !work {
@@ -439,6 +442,15 @@ pub(super) async fn assert_bindings_after_publication(
         },
         lease_id: LeaseId::new(),
     };
+    if assert_calendar {
+        Box::pin(calendar_cases::assert_calendar_boundaries(
+            pool,
+            &request,
+            &resource_approval,
+            &allocation,
+        ))
+        .await?;
+    }
     store
         .approve(
             "runtime-approve",

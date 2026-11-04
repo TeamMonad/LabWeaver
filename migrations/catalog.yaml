@@ -73,6 +73,9 @@ domains:
       - id: 22
         file: control/0022_course_calendar_roster.sql
         sha256: 577a01dd03506e3551619f68f5f7ea22f0b4bebfac58b807daf896ae43b36e9d
+      - id: 23
+        file: control/0023_course_experiments_groups.sql
+        sha256: f0d49145360e6f56def196115c9df61c28a9bcfce88729189594dfaf6b10ac73
   - name: access
     migrations:
       - id: 1

@@ -33,6 +33,12 @@ pub enum RuntimeBindingError {
     AllocationPending,
     #[error("LW_RUNTIME_AUTHORIZATION_INPUT_UNAVAILABLE")]
     Unavailable,
+    #[error("LW_COURSE_EXPERIMENT_NOT_OPEN")]
+    CourseExperimentNotOpen,
+    #[error("LW_COURSE_EXPERIMENT_CLOSED")]
+    CourseExperimentClosed,
+    #[error("LW_COURSE_EXPERIMENT_LATE")]
+    CourseExperimentLate,
 }
 
 pub(crate) async fn current_inputs(
@@ -264,6 +270,7 @@ pub async fn resolve_binding(
         .map_err(|_| RuntimeBindingError::Unavailable)?;
     let (identity, spec, status) = current_inputs(&mut tx, request).await?;
     check_policy_use(&status, RuntimePolicyUse::Admission)?;
+    check_course_calendar(&mut tx, request, &spec).await?;
     let applied = status
         .applied
         .as_ref()
@@ -310,6 +317,7 @@ async fn validated_policy(
     binding: &RuntimeAuthorizationBinding,
 ) -> Result<contracts::platform_configuration::PlatformConfigurationVersion, RuntimeBindingError> {
     let (identity, spec, status) = current_inputs(tx, request).await?;
+    check_course_calendar(tx, request, &spec).await?;
     binding.validate_current(request, &identity, &status)?;
     let declared = declared_runtime_permissions(&spec, request.project_id)?;
     if declared.capabilities != binding.permissions.capabilities
@@ -378,4 +386,93 @@ pub async fn current_authorization(
         .await
         .map_err(|_| RuntimeBindingError::Unavailable)?;
     Ok(binding)
+}
+async fn check_course_calendar(
+    tx: &mut Transaction<'_, Postgres>,
+    request: &ResourceRequest,
+    spec: &EnvironmentSpec,
+) -> Result<(), RuntimeBindingError> {
+    if spec.class != EnvironmentClass::Experiment || request.course_id.is_none() {
+        return Ok(());
+    }
+    let course_id = request.course_id.ok_or(RuntimeBindingError::Unavailable)?;
+    // Course experiments are keyed by release; other targets carry no course calendar.
+    let Some(release_id) = request.target.release().map(|(id, _)| id.as_uuid()) else {
+        return Ok(());
+    };
+    // No course experiment for this release: the course has no calendar policy for it.
+    // An experiment whose calendar is missing yields NULL calendar facts and fails closed.
+    let Some((revision, open_at, due_at, time_zone, late_policy, late_until)) = sqlx::query_as::<
+        _,
+        (
+            Option<i64>,
+            Option<time::OffsetDateTime>,
+            Option<time::OffsetDateTime>,
+            Option<String>,
+            Option<String>,
+            Option<time::OffsetDateTime>,
+        ),
+    >(
+        "SELECT calendar_revision,open_at,due_at,time_zone,late_policy,late_until \
+             FROM control.course_experiment_windows WHERE course_id=$1 AND release_id=$2",
+    )
+    .bind(course_id.as_uuid())
+    .bind(release_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| {
+        tracing::warn!(%error, "course calendar read failed");
+        RuntimeBindingError::Unavailable
+    })?
+    else {
+        return Ok(());
+    };
+    let (Some(revision), Some(due_at), Some(time_zone), Some(late_policy)) =
+        (revision, due_at, time_zone, late_policy)
+    else {
+        return Err(RuntimeBindingError::Unavailable);
+    };
+    let revision = contracts::Revision::new(
+        u64::try_from(revision).map_err(|_| RuntimeBindingError::Unavailable)?,
+    )
+    .map_err(|_| RuntimeBindingError::Unavailable)?;
+    let late_policy = match late_policy.as_str() {
+        "hard_close" => contracts::membership_governance::CourseLatePolicy::HardClose,
+        "allow_with_mark" => contracts::membership_governance::CourseLatePolicy::AllowWithMark,
+        _ => return Err(RuntimeBindingError::Unavailable),
+    };
+    let calendar = contracts::membership_governance::CourseCalendar {
+        course_id,
+        revision,
+        open_at: open_at
+            .map(contracts::UtcTimestamp::from_utc)
+            .transpose()
+            .map_err(|_| RuntimeBindingError::Unavailable)?,
+        due_at: contracts::UtcTimestamp::from_utc(due_at)
+            .map_err(|_| RuntimeBindingError::Unavailable)?,
+        time_zone,
+        state: contracts::membership_governance::CourseCalendarState::Open,
+        late_policy,
+        late_until: late_until
+            .map(contracts::UtcTimestamp::from_utc)
+            .transpose()
+            .map_err(|_| RuntimeBindingError::Unavailable)?,
+    };
+    let now = contracts::UtcTimestamp::from_utc(
+        sqlx::query_scalar("SELECT date_trunc('milliseconds',clock_timestamp())")
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|_| RuntimeBindingError::Unavailable)?,
+    )
+    .map_err(|_| RuntimeBindingError::Unavailable)?;
+    match calendar.state_at(now) {
+        contracts::membership_governance::CourseCalendarState::NotOpen => {
+            Err(RuntimeBindingError::CourseExperimentNotOpen)
+        }
+        contracts::membership_governance::CourseCalendarState::Closed => {
+            Err(RuntimeBindingError::CourseExperimentClosed)
+        }
+        contracts::membership_governance::CourseCalendarState::Open
+        | contracts::membership_governance::CourseCalendarState::Late => Ok(()),
+    }
 }

@@ -12,6 +12,7 @@ pub mod api;
 mod candidate_builds;
 pub mod clients;
 mod course_calendar;
+mod course_experiments;
 mod manual_templates;
 mod material_uploads;
 mod membership_governance;
@@ -9527,6 +9528,14 @@ pub enum ControlError {
     CourseGovernanceDenied,
     #[error("LW_COURSE_LAST_INSTRUCTOR_PROTECTED")]
     CourseInstructorProtected,
+    #[error("LW_COURSE_EXPERIMENT_PAYER_CONSENT_REQUIRED")]
+    CourseExperimentPayerConsentRequired,
+    #[error("LW_COURSE_EXPERIMENT_GROUP_REQUIRED")]
+    CourseExperimentGroupRequired,
+    #[error("LW_COURSE_EXPERIMENT_GROUP_MEMBER_DENIED")]
+    CourseExperimentGroupMemberDenied,
+    #[error("LW_COURSE_EXPERIMENT_PAYER_IMMUTABLE")]
+    CourseExperimentPayerImmutable,
     #[error("LW_RUNTIME_TEACHER_APPROVAL_REQUIRED")]
     TeacherApprovalDenied,
     #[error("LW_LLM_POLICY_INVALID")]
