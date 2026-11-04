@@ -601,8 +601,13 @@ describe('ResourceFinanceView', () => {
     expect(form.get('button[type="submit"]').text()).toContain('继续创建剩余 3 类')
     await form.trigger('submit')
     await flushPromises()
-    const units = vi.mocked(createResourceRate).mock.calls.map(([call]) => call!.body.unit)
-    expect(units).toEqual(['llm_input_token', 'llm_output_token', 'llm_output_token', 'llm_cache_read_token', 'llm_cache_write_token'])
+    const calls = vi.mocked(createResourceRate).mock.calls.map(([call]) => ({ unit: call!.body.unit, key: call!.headers!['Idempotency-Key'] }))
+    expect(calls.map((call) => call.unit)).toEqual(['llm_input_token', 'llm_output_token', 'llm_output_token', 'llm_cache_read_token', 'llm_cache_write_token'])
+    // The failed kind is retried with the identical intent key; every other kind has its own key.
+    expect(calls[2]!.key).toBe(calls[1]!.key)
+    const distinctKinds = [calls[0], calls[1], calls[3], calls[4]].map((call) => call!.key)
+    expect(distinctKinds.every((key) => typeof key === 'string' && key.length > 0)).toBe(true)
+    expect(new Set(distinctKinds).size).toBe(4)
     expect(wrapper.find('[data-testid="model-rate-progress"]').exists()).toBe(false)
   })
 
