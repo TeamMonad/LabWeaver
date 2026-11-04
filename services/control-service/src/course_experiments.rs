@@ -98,6 +98,9 @@ impl ControlService {
         course_id: CourseId,
         experiment_id: CourseExperimentId,
     ) -> Result<CourseExperiment, ControlError> {
+        let member: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM control.course_memberships WHERE course_id=$1 AND actor_id=$2 AND state='active' AND (expires_at IS NULL OR expires_at>clock_timestamp()))")
+            .bind(course_id.as_uuid()).bind(_actor.actor_id.as_uuid()).fetch_one(&self.pool).await.map_err(db)?;
+        if !member && !_actor.roles.contains(&contracts::PlatformRole::PlatformAdmin) { return Err(ControlError::CourseGovernanceDenied); }
         let row = sqlx::query("SELECT experiment_id,course_id,contract FROM control.course_experiments WHERE experiment_id=$1 AND course_id=$2").bind(experiment_id.as_uuid()).bind(course_id.as_uuid()).fetch_optional(&self.pool).await.map_err(db)?.ok_or(ControlError::NotFound)?;
         decode_experiment(&row)
     }
@@ -192,7 +195,7 @@ impl ControlService {
         let experiment = self
             .course_experiment(actor, course_id, experiment_id)
             .await?;
-        let rows = sqlx::query("SELECT g.contract FROM control.experiment_groups g WHERE g.experiment_id=$1 ORDER BY g.group_id").bind(experiment_id.as_uuid()).fetch_all(&self.pool).await.map_err(db)?;
+        let rows = if actor.roles.contains(&contracts::PlatformRole::PlatformAdmin) || sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM control.course_memberships WHERE course_id=$1 AND actor_id=$2 AND object_role='instructor' AND state='active')").bind(course_id.as_uuid()).bind(actor.actor_id.as_uuid()).fetch_one(&self.pool).await.map_err(db)? { sqlx::query("SELECT g.contract FROM control.experiment_groups g WHERE g.experiment_id=$1 ORDER BY g.group_id").bind(experiment_id.as_uuid()).fetch_all(&self.pool).await.map_err(db)? } else { sqlx::query("SELECT g.contract FROM control.experiment_groups g JOIN control.experiment_group_members gm ON gm.group_id=g.group_id WHERE g.experiment_id=$1 AND gm.actor_id=$2 AND gm.state='active' ORDER BY g.group_id").bind(experiment_id.as_uuid()).bind(actor.actor_id.as_uuid()).fetch_all(&self.pool).await.map_err(db)? };
         rows.into_iter()
             .map(|row| {
                 let group: ExperimentGroup =

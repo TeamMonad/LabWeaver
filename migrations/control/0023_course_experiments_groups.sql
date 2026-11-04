@@ -60,6 +60,7 @@ BEGIN
         GRANT SELECT ON control.course_experiment_windows TO lw_resource_runtime;
     END IF;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='lw_evaluation_runtime') THEN
+        GRANT USAGE ON SCHEMA control TO lw_evaluation_runtime;
         GRANT SELECT ON control.course_experiment_windows TO lw_evaluation_runtime;
     END IF;
 END $$;

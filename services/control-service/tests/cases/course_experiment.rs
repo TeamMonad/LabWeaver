@@ -3,8 +3,9 @@ use contracts::course_experiments::{CreateCourseExperimentRequest, CreateExperim
 use contracts::http::IdempotencyKey;
 use contracts::{ActorId, AuthenticatedActor, CourseId, PlatformRole, ProjectId, ReleaseId, UtcTimestamp};
 use control_service::ControlService;
-use uuid::Uuid;
+use persistence_sqlx::Sha256Digest;
 
+#[allow(dead_code)]
 #[path = "../support/production_roles.rs"]
 mod production_roles;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -12,7 +13,7 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 async fn actor(pool: &sqlx::PgPool, roles: Vec<PlatformRole>, name: &str) -> TestResult<AuthenticatedActor> {
     let id = ActorId::new();
     sqlx::query("INSERT INTO access.actors(actor_id,issuer,subject_sha256,username,display_name) VALUES($1,'https://synthetic.invalid',$2,$3,$3)")
-        .bind(id.as_uuid()).bind(format!("{:x}", id.as_uuid())).bind(name).execute(pool).await?;
+        .bind(id.as_uuid()).bind(Sha256Digest::of_bytes(id.as_uuid().as_bytes()).to_string()).bind(name).execute(pool).await?;
     let now = UtcTimestamp::from_utc(sqlx::query_scalar("SELECT clock_timestamp()").fetch_one(pool).await?)?;
     Ok(AuthenticatedActor { actor_id: id, roles, expires_at: UtcTimestamp::from_utc(now.get() + time::Duration::hours(1))? })
 }
@@ -31,7 +32,7 @@ async fn service() -> TestResult<(production_roles::ProductionRoles, ControlServ
 
 #[tokio::test]
 async fn experiment_create_permissions_and_group_policy_are_enforced() -> TestResult {
-    let (_roles, service, course, teacher, ta, student) = service().await?;
+    let (roles, service, course, teacher, ta, student) = service().await?;
     let request = CreateCourseExperimentRequest { release_id: ReleaseId::new(), policy: ExperimentPolicy::Group };
     let denied_student = service.create_course_experiment(&student, course, &request, &IdempotencyKey::parse("student-create")?).await;
     assert!(matches!(denied_student, Err(control_service::ControlError::CourseGovernanceDenied)));
@@ -43,10 +44,20 @@ async fn experiment_create_permissions_and_group_policy_are_enforced() -> TestRe
     let group = service.create_experiment_group(&teacher, course, experiment.id, &group_request, &IdempotencyKey::parse("group-create")?).await?;
     assert_eq!(group.group.payer_project_id, member_project);
     assert_eq!(group.group.payer_actor_id, student.actor_id);
+    let other_student = actor(&roles.provisioner, vec![PlatformRole::Student], "experiment-other-student").await?;
+    sqlx::query("INSERT INTO control.course_memberships(course_id,actor_id,role,object_role,state,revision) VALUES($1,$2,'student','participant','active',1)").bind(course.as_uuid()).bind(other_student.actor_id.as_uuid()).execute(&roles.provisioner).await?;
+    let second_request = CreateExperimentGroupRequest { payer_project_id: ProjectId::new(), payer_actor_id: other_student.actor_id, member_actor_ids: vec![other_student.actor_id], payer_consent: true };
+    service.create_experiment_group(&teacher, course, experiment.id, &second_request, &IdempotencyKey::parse("group-create-2")?).await?;
+    assert_eq!(service.experiment_groups(&student, course, experiment.id).await?.len(), 1);
+    assert_eq!(service.experiment_groups(&other_student, course, experiment.id).await?.len(), 1);
     let replay = service.create_experiment_group(&teacher, course, experiment.id, &group_request, &IdempotencyKey::parse("group-create")?).await?;
     assert_eq!(replay.group.id, group.group.id);
-    let conflict = CreateExperimentGroupRequest { payer_consent: false, ..group_request };
+    let conflict = CreateExperimentGroupRequest { payer_project_id: ProjectId::new(), ..group_request };
     assert!(matches!(service.create_experiment_group(&teacher, course, experiment.id, &conflict, &IdempotencyKey::parse("group-create")?).await, Err(control_service::ControlError::IdempotencyConflict)));
+    let missing_consent = CreateExperimentGroupRequest { payer_consent: false, ..group_request };
+    assert!(matches!(service.create_experiment_group(&teacher, course, experiment.id, &missing_consent, &IdempotencyKey::parse("missing-consent")?).await, Err(control_service::ControlError::ContractInvalid)));
+    let payer_not_member = CreateExperimentGroupRequest { payer_actor_id: ta.actor_id, member_actor_ids: vec![student.actor_id], ..group_request };
+    assert!(matches!(service.create_experiment_group(&teacher, course, experiment.id, &payer_not_member, &IdempotencyKey::parse("payer-not-member")?).await, Err(control_service::ControlError::ContractInvalid)));
     Ok(())
 }
 
