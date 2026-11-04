@@ -372,6 +372,25 @@ async fn retained_environment(f: &Fixture) -> TestResult<EnvironmentInstance> {
     retained.operation.state = OperationState::Succeeded;
     retained.operation.accepted_revision = retained.revision;
     retained.operation.access_revocation_revision = Some(retained.revision);
+    retained.operation.cleanup_target = Some(contracts::environment::EnvironmentCleanupTarget {
+        namespace: format!("lw-env-{}", retained.id),
+        uid: Uuid::now_v7(),
+        retain_disk: true,
+        purge_disk: false,
+        objects: vec![contracts::execution::ExecutionObjectRef {
+            api_version: "v1".into(),
+            resource: "persistentvolumeclaims".into(),
+            name: "workspace".into(),
+            uid: Uuid::now_v7().to_string(),
+        }],
+    });
+    retained.cleanup_evidence = Some(contracts::ArtifactRef {
+        artifact_id: contracts::ArtifactId::new(),
+        store_binding: "restore-cleanup-evidence".into(),
+        object_version: "verified-retirement".into(),
+        size_bytes: 1,
+        media_type: "application/json".into(),
+    });
     retained.validate()?;
     sqlx::query("UPDATE environment.environment_instances SET revision=$2,desired_state='deleted',observed_state='deleted',contract=$3 WHERE environment_id=$1")
         .bind(retained.id.as_uuid()).bind(i64::try_from(retained.revision.get())?).bind(serde_json::to_value(&retained)?).execute(&f.roles.environment).await?;
@@ -559,6 +578,50 @@ async fn restore_funding_environment_recover_rejection_stays_retained_and_retry_
     .bind(serde_json::to_value(&f.approval)?)
     .execute(&f.roles.provisioner)
     .await?;
+    sqlx::query("UPDATE control.project_memberships SET state='revoked',revision=revision+1 WHERE project_id=$1 AND actor_id=$2")
+        .bind(f.request.project_id.as_uuid()).bind(f.request.requester_id.as_uuid()).execute(&f.roles.control).await?;
+    let revoked = recover(retained.revision).await?;
+    assert_eq!(revoked.1["diagnosticCode"], "LW_RUNTIME_SCOPE_DENIED");
+    assert_eq!(f.holds().await?, 1);
+    sqlx::query("UPDATE control.project_memberships SET state='active',revision=revision+1 WHERE project_id=$1 AND actor_id=$2")
+        .bind(f.request.project_id.as_uuid()).bind(f.request.requester_id.as_uuid()).execute(&f.roles.control).await?;
+    let credits = PgCreditStore::new(f.roles.resource.clone());
+    credits
+        .admin(
+            "restore-http-drain",
+            f.request.requester_id,
+            &[contracts::PlatformRole::PlatformAdmin],
+            &CreditAdminOperation::Adjust {
+                project_id: f.request.project_id,
+                amount: FixedDecimal::parse("-99.400000")?,
+                reason: "synthetic restore insufficient credits".into(),
+            },
+        )
+        .await?;
+    let insufficient = recover(retained.revision).await?;
+    assert_eq!(insufficient.1["diagnosticCode"], "LW_CREDITS_INSUFFICIENT");
+    let unchanged = store.load(retained.id).await?;
+    assert_eq!(unchanged.observed_state, ObservedEnvironmentState::Stopped);
+    assert_eq!(unchanged.generation, stopped.generation);
+    assert!(
+        store
+            .claim_due("restore-rejected-no-effects", Duration::from_secs(5))
+            .await?
+            .is_none()
+    );
+    assert_eq!(f.holds().await?, 1);
+    credits
+        .admin(
+            "restore-http-refill",
+            f.request.requester_id,
+            &[contracts::PlatformRole::PlatformAdmin],
+            &CreditAdminOperation::Grant {
+                project_id: f.request.project_id,
+                amount: FixedDecimal::parse("1.000000")?,
+                reason: "synthetic restore allowance restored".into(),
+            },
+        )
+        .await?;
     let accepted = recover(retained.revision).await?;
     assert_eq!(accepted.0, StatusCode::ACCEPTED, "{}", accepted.1);
     assert_eq!(f.holds().await?, 2);

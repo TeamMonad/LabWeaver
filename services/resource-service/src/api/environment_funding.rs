@@ -47,7 +47,8 @@ pub(super) async fn restore(
 ) -> Result<Json<contracts::resource::environment_funding::EnvironmentCreditGrant>, ResourceApiError>
 {
     super::require_environment_service(&state, &identity)?;
-    let key = super::required_header(&headers, "idempotency-key")?;
+    let key = super::required_header(&headers, "idempotency-key")
+        .map_err(|_| ResourceApiError::Invalid)?;
     Ok(Json(
         state
             .store
