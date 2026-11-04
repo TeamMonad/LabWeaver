@@ -2,6 +2,7 @@ use super::FreezeCoordinator;
 use contracts::{CourseId, ReleaseId};
 use crate::PgEvaluationControlStore;
 use std::error::Error;
+use sqlx::postgres::PgPoolOptions;
 
 #[allow(clippy::too_many_lines)]
 pub(super) async fn assert_boundaries(
