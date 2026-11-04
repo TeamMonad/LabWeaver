@@ -739,6 +739,18 @@ fn course_browser_router() -> Router<Arc<AppState>> {
             "/api/v1/courses/{course_id}/student-view",
             axum::routing::any(proxy::forward_control),
         )
+        .route(
+            "/api/v1/courses/{course_id}/experiments",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/experiments/{experiment_id}",
+            axum::routing::any(proxy::forward_control),
+        )
+        .route(
+            "/api/v1/courses/{course_id}/experiments/{experiment_id}/groups",
+            axum::routing::any(proxy::forward_control),
+        )
 }
 
 fn internal_router(state: Arc<AppState>) -> Router {

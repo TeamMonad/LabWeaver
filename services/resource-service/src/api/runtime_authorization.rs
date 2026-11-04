@@ -44,7 +44,10 @@ pub(super) fn status(error: &crate::runtime_authorization::RuntimeBindingError) 
         ) => StatusCode::FORBIDDEN,
         RuntimeBindingError::AllocationPending
         | RuntimeBindingError::LeaseNotActive
-        | RuntimeBindingError::Authorization(_) => StatusCode::CONFLICT,
+        | RuntimeBindingError::Authorization(_)
+        | RuntimeBindingError::CourseExperimentNotOpen
+        | RuntimeBindingError::CourseExperimentClosed
+        | RuntimeBindingError::CourseExperimentLate => StatusCode::CONFLICT,
     }
 }
 
@@ -53,6 +56,11 @@ pub(super) fn detail(error: &crate::runtime_authorization::RuntimeBindingError) 
     use contracts::runtime_authorization::RuntimeAuthorizationError;
     match error {
         RuntimeBindingError::Unavailable => "当前授权信息不可用，请稍后重试或联系管理员。",
+        RuntimeBindingError::CourseExperimentNotOpen => "课程实验尚未开放，请在开放时间后再试。",
+        RuntimeBindingError::CourseExperimentClosed => "课程实验已截止，当前提交不再接受。",
+        RuntimeBindingError::CourseExperimentLate => {
+            "课程实验处于迟交阶段，运行请求仍受课程规则约束。"
+        }
         RuntimeBindingError::AllocationPending => {
             "资源申请已批准，正在分配环境，请等待完成，无需重新提交申请。"
         }

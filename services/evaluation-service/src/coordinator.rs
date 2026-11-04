@@ -30,6 +30,7 @@ use reqwest::{
 use russh::keys::ssh_key::{LineEnding, PrivateKey, private::Ed25519Keypair};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sqlx::Row;
 
 use crate::authoring_client::{AuthoringAdmissionClient, AuthoringAdmissionClientError};
 use crate::{
@@ -488,6 +489,81 @@ impl FreezeCoordinator {
         Ok(namespace)
     }
 
+    async fn check_course_calendar(
+        &self,
+        course_id: Option<contracts::CourseId>,
+        release_id: contracts::ReleaseId,
+    ) -> Result<(), FreezeCoordinatorError> {
+        let Some(course_id) = course_id else {
+            return Ok(());
+        };
+        let row = sqlx::query("SELECT revision,open_at,due_at,time_zone,late_policy,late_until FROM control.course_experiment_windows WHERE course_id=$1 AND release_id=$2").bind(course_id.as_uuid()).bind(release_id.as_uuid()).fetch_optional(self.evaluation.pool()).await.map_err(|_| FreezeCoordinatorError::BindingUnavailable)?;
+        let Some(row) = row else {
+            return Ok(());
+        };
+        let revision = Revision::new(
+            u64::try_from(
+                row.try_get::<i64, _>("revision")
+                    .map_err(|_| FreezeCoordinatorError::BindingInvalid)?,
+            )
+            .map_err(|_| FreezeCoordinatorError::BindingInvalid)?,
+        )
+        .map_err(|_| FreezeCoordinatorError::BindingInvalid)?;
+        let late_policy = match row
+            .try_get::<String, _>("late_policy")
+            .map_err(|_| FreezeCoordinatorError::BindingInvalid)?
+            .as_str()
+        {
+            "hard_close" => contracts::membership_governance::CourseLatePolicy::HardClose,
+            "allow_with_mark" => contracts::membership_governance::CourseLatePolicy::AllowWithMark,
+            _ => return Err(FreezeCoordinatorError::BindingInvalid),
+        };
+        let open_at = row
+            .try_get::<Option<time::OffsetDateTime>, _>("open_at")
+            .map_err(|_| FreezeCoordinatorError::BindingInvalid)?
+            .map(UtcTimestamp::from_utc)
+            .transpose()
+            .map_err(|_| FreezeCoordinatorError::BindingInvalid)?;
+        let due_at = UtcTimestamp::from_utc(
+            row.try_get::<time::OffsetDateTime, _>("due_at")
+                .map_err(|_| FreezeCoordinatorError::BindingInvalid)?,
+        )
+        .map_err(|_| FreezeCoordinatorError::BindingInvalid)?;
+        let late_until = row
+            .try_get::<Option<time::OffsetDateTime>, _>("late_until")
+            .map_err(|_| FreezeCoordinatorError::BindingInvalid)?
+            .map(UtcTimestamp::from_utc)
+            .transpose()
+            .map_err(|_| FreezeCoordinatorError::BindingInvalid)?;
+        let calendar = contracts::membership_governance::CourseCalendar {
+            course_id,
+            revision,
+            open_at,
+            due_at,
+            time_zone: row
+                .try_get("time_zone")
+                .map_err(|_| FreezeCoordinatorError::BindingInvalid)?,
+            state: contracts::membership_governance::CourseCalendarState::Open,
+            late_policy,
+            late_until,
+        };
+        match calendar.state_at(
+            self.evaluation
+                .authority_now()
+                .await
+                .map_err(|_| FreezeCoordinatorError::BindingUnavailable)?,
+        ) {
+            contracts::membership_governance::CourseCalendarState::NotOpen => {
+                Err(FreezeCoordinatorError::CourseExperimentNotOpen)
+            }
+            contracts::membership_governance::CourseCalendarState::Closed => {
+                Err(FreezeCoordinatorError::CourseExperimentClosed)
+            }
+            contracts::membership_governance::CourseCalendarState::Open
+            | contracts::membership_governance::CourseCalendarState::Late => Ok(()),
+        }
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "the linear resource construction keeps secret, source, and Job bindings reviewable together"
@@ -573,6 +649,8 @@ impl FreezeCoordinator {
             }
             Err(error) => return Err(FreezeCoordinatorError::AuthoringAdmission(error)),
         }
+        self.check_course_calendar(command.course_id, binding.environment.release_id)
+            .await?;
         let now = self.store.authority_now().await?;
         let request = FreezeRequest {
             frozen_submission_id: command.frozen_submission_id,
@@ -1422,6 +1500,12 @@ pub enum FreezeCoordinatorError {
     CertificateInvalid,
     #[error("LW_COLLECT_BINDING_INVALID")]
     BindingInvalid,
+    #[error("LW_COURSE_EXPERIMENT_NOT_OPEN")]
+    CourseExperimentNotOpen,
+    #[error("LW_COURSE_EXPERIMENT_CLOSED")]
+    CourseExperimentClosed,
+    #[error("LW_COURSE_EXPERIMENT_LATE")]
+    CourseExperimentLate,
     #[error("LW_ENVIRONMENT_FREEZE_NOT_ELIGIBLE")]
     BindingNotEligible,
     #[error("LW_COLLECT_BINDING_UNAVAILABLE")]
@@ -1463,7 +1547,13 @@ impl FreezeCoordinatorError {
     const fn is_terminal_command_error(&self) -> bool {
         matches!(
             self,
-            Self::BindingInvalid | Self::BindingNotEligible | Self::Json(_) | Self::Ssh(_)
+            Self::BindingInvalid
+                | Self::BindingNotEligible
+                | Self::CourseExperimentNotOpen
+                | Self::CourseExperimentClosed
+                | Self::CourseExperimentLate
+                | Self::Json(_)
+                | Self::Ssh(_)
         )
     }
 
@@ -1472,6 +1562,9 @@ impl FreezeCoordinatorError {
             Self::ConfigurationInvalid => "LW_COLLECT_COORDINATOR_CONFIG_INVALID",
             Self::CertificateInvalid => "LW_COLLECT_COORDINATOR_CERTIFICATE_INVALID",
             Self::BindingInvalid => "LW_COLLECT_BINDING_INVALID",
+            Self::CourseExperimentNotOpen => "LW_COURSE_EXPERIMENT_NOT_OPEN",
+            Self::CourseExperimentClosed => "LW_COURSE_EXPERIMENT_CLOSED",
+            Self::CourseExperimentLate => "LW_COURSE_EXPERIMENT_LATE",
             Self::BindingNotEligible => "LW_ENVIRONMENT_FREEZE_NOT_ELIGIBLE",
             Self::BindingUnavailable => "LW_COLLECT_BINDING_UNAVAILABLE",
             Self::KubernetesRejected => "LW_COLLECT_KUBERNETES_REJECTED",

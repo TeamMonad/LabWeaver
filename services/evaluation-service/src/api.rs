@@ -1040,6 +1040,12 @@ pub enum EvaluationApiError {
     RevisionInvalid,
     #[error("{0}")]
     FreezeFailed(String),
+    #[error("LW_COURSE_EXPERIMENT_NOT_OPEN")]
+    CourseExperimentNotOpen,
+    #[error("LW_COURSE_EXPERIMENT_CLOSED")]
+    CourseExperimentClosed,
+    #[error("LW_COURSE_EXPERIMENT_LATE")]
+    CourseExperimentLate,
     #[error(transparent)]
     Control(#[from] EvaluationControlStoreError),
     #[error(transparent)]

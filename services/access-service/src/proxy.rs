@@ -624,6 +624,42 @@ async fn authorize_evaluation_release_path(
         {
             (*course, "importCourseRoster")
         }
+        (method, ["", "api", "v1", "courses", course, "experiments"])
+            if *method == Method::POST =>
+        {
+            (*course, "createCourseExperiment")
+        }
+        (method, ["", "api", "v1", "courses", course, "experiments", _])
+            if *method == Method::GET =>
+        {
+            (*course, "getCourseExperiment")
+        }
+        (
+            method,
+            [
+                "",
+                "api",
+                "v1",
+                "courses",
+                course,
+                "experiments",
+                _,
+                "groups",
+            ],
+        ) if *method == Method::POST => (*course, "createExperimentGroup"),
+        (
+            method,
+            [
+                "",
+                "api",
+                "v1",
+                "courses",
+                course,
+                "experiments",
+                _,
+                "groups",
+            ],
+        ) if *method == Method::GET => (*course, "listExperimentGroups"),
         (method, ["", "api", "v1", "courses", course, "student-view"])
             if *method == Method::GET =>
         {

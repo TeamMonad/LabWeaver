@@ -1,0 +1,39 @@
+{
+  "$defs": {
+    "ActorId": {
+      "description": "Strongly typed UUIDv7 identifier for `ActorId`.",
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed UUIDv7 identifier for `ProjectId`.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "memberActorIds": {
+      "items": {
+        "$ref": "#/$defs/ActorId"
+      },
+      "type": "array"
+    },
+    "payerActorId": {
+      "$ref": "#/$defs/ActorId"
+    },
+    "payerConsent": {
+      "type": "boolean"
+    },
+    "payerProjectId": {
+      "$ref": "#/$defs/ProjectId"
+    }
+  },
+  "required": [
+    "payerProjectId",
+    "payerActorId",
+    "memberActorIds",
+    "payerConsent"
+  ],
+  "title": "CreateExperimentGroupRequest",
+  "type": "object"
+}

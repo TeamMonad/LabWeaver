@@ -20,6 +20,7 @@
 pub mod access;
 pub mod auth;
 pub mod authoring;
+pub mod course_experiments;
 pub mod diagnostic;
 pub mod environment;
 pub mod evaluation;
