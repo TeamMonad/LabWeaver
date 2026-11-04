@@ -394,7 +394,7 @@ async fn check_course_calendar(
     spec: &EnvironmentSpec,
 ) -> Result<(), RuntimeBindingError> {
     if spec.class != EnvironmentClass::Experiment || identity.teacher_scope.is_none() {
-        return Ok();
+        return Ok(());
     }
     let role: String = sqlx::query_scalar("SELECT current_user")
         .fetch_one(&mut **tx)
