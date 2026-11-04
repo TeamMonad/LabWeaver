@@ -6920,8 +6920,10 @@ async fn retained_storage_migration_replays_on_real_postgres()
     Ok(())
 }
 
-async fn assert_retained_disk_consumer(reactivated: bool, arrears: bool)
--> Result<(), Box<dyn std::error::Error>> {
+async fn assert_retained_disk_consumer(
+    reactivated: bool,
+    arrears: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     use contracts::environment::{
         EnvironmentDiskRetention, EnvironmentDiskState, EnvironmentRetainedStorageUsage,
         ObservedEnvironmentState, ResourceWorkCleanupStatus,
@@ -6937,9 +6939,23 @@ async fn assert_retained_disk_consumer(reactivated: bool, arrears: bool)
         .ok_or("active cleanup")?;
     assert_eq!(item.claim.id, claim.id);
     if arrears {
-        store.revoke_lease("arrears-cleanup", lease.id, lease.revision, "isolated arrears retention".into(), actor, "arrears-cleanup").await?;
-        item = store.next_lease_cleanup(actor).await?.ok_or("arrears cleanup")?;
-        item.claim = store.mark_capacity_releasing(item.claim.id, item.claim.revision).await?;
+        store
+            .revoke_lease(
+                "arrears-cleanup",
+                lease.id,
+                lease.revision,
+                "isolated arrears retention".into(),
+                actor,
+                "arrears-cleanup",
+            )
+            .await?;
+        item = store
+            .next_lease_cleanup(actor)
+            .await?
+            .ok_or("arrears cleanup")?;
+        item.claim = store
+            .mark_capacity_releasing(item.claim.id, item.claim.revision)
+            .await?;
     }
     let ResourceTarget::Environment { environment_id, .. } = request.target else {
         return Err("environment target".into());
@@ -7117,6 +7133,7 @@ async fn retained_disk_arrears_expiry_closes_once() -> Result<(), Box<dyn std::e
 }
 
 #[tokio::test]
-async fn retained_disk_reactivated_boundary_closes_without_old_compute_grant() -> Result<(), Box<dyn std::error::Error>> {
+async fn retained_disk_reactivated_boundary_closes_without_old_compute_grant()
+-> Result<(), Box<dyn std::error::Error>> {
     assert_retained_disk_consumer(true, false).await
 }

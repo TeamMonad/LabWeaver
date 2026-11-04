@@ -1268,7 +1268,8 @@ impl PgResourceStore {
     /// Attempts one durable pending settlement. Missing rate configuration leaves the usage row
     /// pending so a later rate publication can settle it; no zero-value charge is synthesized.
     pub async fn settle_pending_usage_once(&self) -> Result<bool, ResourceStoreError> {
-        let retained_work = crate::environment_funding::settle_retained_storage_once(&self.pool).await?;
+        let retained_work =
+            crate::environment_funding::settle_retained_storage_once(&self.pool).await?;
         let rows = sqlx::query(
             "SELECT usage_record_id, contract
              FROM resource.resource_usage_records
