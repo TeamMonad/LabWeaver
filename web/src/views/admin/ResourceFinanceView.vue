@@ -212,12 +212,11 @@
             <option value="memory_byte_second">内存 GiB 小时</option>
             <option value="storage_byte_second">存储 GiB 小时</option>
             <option value="build_second">镜像构建小时</option>
-            <option value="llm_input_token">模型输入 token（每百万）</option>
-            <option value="llm_output_token">模型输出 token（每百万）</option>
-            <option value="llm_cache_read_token">模型缓存读取 token（每百万）</option>
-            <option value="llm_cache_write_token">模型缓存写入 token（每百万）</option>
           </AppSelect>
         </label>
+        <p class="rate-equivalent">
+          模型 token 费率需要四类一起配置，请使用下方“模型 token 费率”表单。
+        </p>
         <label v-if="rateUnit === 'gpu_unit_second'">
           <span>GPU 目录分配类型</span>
           <AppSelect
@@ -274,33 +273,12 @@
             required
           >
         </label>
-        <template v-if="isModelRate">
-          <label>
-            <span>模型标识</span>
-            <input
-              v-model.trim="rateModelBinding"
-              class="text-input"
-              aria-label="模型标识"
-              maxlength="256"
-              placeholder="网关实际调用的模型名称"
-              required
-            >
-          </label>
-          <label>
-            <span>单次调用最多预占（CREDITS）</span>
-            <input
-              v-model="rateMaxPreauthorization"
-              class="text-input"
-              aria-label="单次调用最多预占"
-              inputmode="decimal"
-              placeholder="例如 2 或 0.5"
-              required
-            >
-          </label>
-          <p class="rate-equivalent">
-            模型调用开始前按单次上限预占 Credits，结束后按实际 token 扣收。同一模型的输入、输出、缓存读取和缓存写入四类费率都配置后，模型调用才能开始；缺任何一类会拒绝调用，不按免费处理。
-          </p>
-        </template>
+        <p
+          v-if="rateUnit === 'build_second'"
+          class="rate-equivalent"
+        >
+          构建开始前按允许的最长构建时间预占 Credits，结束后按 BuildKit 记录的实际构建时间扣收。没有该构建器的现行 CREDITS 费率时构建会被拒绝，不按免费处理。
+        </p>
         <label>
           <span>单价（每 {{ rateDisplayUnits[rateUnit].label }}）</span>
           <input
@@ -318,8 +296,10 @@
           <input
             v-model="rateCurrency"
             class="text-input"
+            aria-label="币种"
             maxlength="32"
             pattern="[A-Za-z0-9_\-]{1,32}"
+            :readonly="rateUnit === 'build_second'"
             required
           >
         </label>
@@ -351,6 +331,21 @@
           实际提交：{{ rateUnitQuantity ?? '无效' }} {{ rateDisplayUnits[rateUnit].base }}，金额 {{ canonicalRateAmount(rateAmount) ?? '无效' }} {{ rateCurrency }}。换算不改现有费率或历史费用。
         </p>
         <p
+          v-if="rateDimensionMessage"
+          class="rate-equivalent warning-text"
+          role="alert"
+          data-testid="rate-dimension-error"
+        >
+          {{ rateDimensionMessage }}
+        </p>
+        <p
+          v-if="rateReplacementHint"
+          class="rate-equivalent"
+          data-testid="rate-replacement-hint"
+        >
+          {{ rateReplacementHint }}
+        </p>
+        <p
           v-if="rateDateError"
           class="rate-equivalent warning-text"
           role="alert"
@@ -365,6 +360,12 @@
           创建费率版本
         </button>
       </form>
+      <ModelRateForm
+        :rates="rates.rates.kind === 'success' ? rates.rates.data : rates.rates.kind === 'empty' ? [] : null"
+        :now="now"
+        :busy="rates.acting !== null"
+        :create="rates.create"
+      />
     </section>
 
     <p
@@ -781,13 +782,26 @@ import { RouterLink, useRoute, useRouter } from 'vue-router'
 import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import ProjectCreditsPanel from '@/components/console/ProjectCreditsPanel.vue'
+import ModelRateForm from '@/components/credits/ModelRateForm.vue'
 import ProjectResourceCostEstimatePanel from '@/components/console/ProjectResourceCostEstimatePanel.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import SvgIcon from '@/components/common/SvgIcon.vue'
 import { useProjectResourceFinance, type ResourceCharge } from '@/composables/useProjectResourceFinance'
-import { canonicalRateAmount, equivalentRatePrice, modelTokenUnits, rateDisplayUnits, rateVersionState, validRateBinding } from '@/utils/resourceRates'
+import {
+  canonicalRateAmount,
+  equivalentRatePrice,
+  localDateTimeValue,
+  rateCurrencyError,
+  rateDimensionError,
+  rateDisplayUnits,
+  rateVersionState,
+  rateWindowError,
+  supersededRate,
+  toUtcTimestamp,
+  type ModelTokenUnit,
+  type RateDimensionDraft,
+} from '@/utils/resourceRates'
 import { billingUnitLabel } from '@/composables/useProjectResourceCostEstimate'
-import { canonicalCreditsAmount } from '@/composables/useProjectCredits'
 import { fetchAllGpuCatalogEntries } from '@/utils/resourceLists'
 import { extractProblemDetails, makeDiagnostic, type AsyncState } from '@/types/async'
 import { useResourceRates } from '@/composables/useResourceRates'
@@ -845,19 +859,14 @@ const selectedChargeId = ref('')
 const adjustmentAmount = ref('0.000000')
 const adjustmentReason = ref('')
 const rates = useResourceRates()
-const rateUnit = ref<ResourceBillingUnit>('gpu_unit_second')
+const rateUnit = ref<Exclude<ResourceBillingUnit, ModelTokenUnit>>('gpu_unit_second')
 const rateGpuSelection = ref('')
 const rateUnitQuantity = computed(() => Number(rateDisplayUnits[rateUnit.value].quantity))
 const rateAmount = ref('')
 const rateCurrency = ref('CREDITS')
 const rateBuilderBinding = ref('')
-const rateModelBinding = ref('')
-const rateMaxPreauthorization = ref('')
-const isModelRate = computed(() => (modelTokenUnits as readonly string[]).includes(rateUnit.value))
-const canonicalMaxPreauthorization = computed(() => {
-  const amount = canonicalCreditsAmount(rateMaxPreauthorization.value, false)
-  return amount && amount !== '0.000000' ? amount : null
-})
+// Build admission only prices CREDITS rates; the currency field is fixed for that unit.
+watch(rateUnit, (unit) => { if (unit === 'build_second') rateCurrency.value = 'CREDITS' })
 const rateEffectiveFrom = ref(localDateTimeValue(new Date(Date.now() + 5 * 60_000)))
 const rateEffectiveUntil = ref('')
 const now = ref(Date.now())
@@ -903,12 +912,27 @@ async function loadCatalog() {
     catalog.value = { kind: 'error', diagnostic: makeDiagnostic(problem?.diagnosticCode ?? 'GPU_CATALOG_LOAD_FAILED', problem?.detail ?? '无法加载 GPU 目录，不能创建 GPU 费率。', problem?.retryable ?? true, problem) }
   }
 }
-const rateDateError = computed(() => {
-  const from = Date.parse(rateEffectiveFrom.value)
-  if (!Number.isFinite(from)) return '请输入有效生效时间。'
-  if (from <= now.value) return '新版本须在未来生效，不能回溯修改历史计价。'
-  if (rateEffectiveUntil.value && (!Number.isFinite(Date.parse(rateEffectiveUntil.value)) || Date.parse(rateEffectiveUntil.value) <= from)) return '结束时间须晚于生效时间。'
-  return null
+const rateDateError = computed(() => rateWindowError(rateEffectiveFrom.value, rateEffectiveUntil.value, now.value))
+/** Dimension fields exactly as `submitRate` sends them. */
+const rateDraft = computed<RateDimensionDraft>(() => ({
+  unit: rateUnit.value,
+  gpuClass: rateUnit.value === 'gpu_unit_second' ? selectedGpu.value?.class ?? null : null,
+  gpuMode: rateUnit.value === 'gpu_unit_second' ? selectedGpu.value?.mode ?? null : null,
+  builderBinding: rateUnit.value === 'build_second' ? rateBuilderBinding.value : null,
+}))
+const rateDimensionProblem = computed(() => rateDimensionError(rateDraft.value))
+// Untouched required fields are left to the disabled submit; only entered values get a reason.
+const rateDimensionMessage = computed(() => {
+  if (rateUnit.value === 'build_second' && !rateBuilderBinding.value) return null
+  if (rateUnit.value === 'gpu_unit_second' && !selectedGpu.value) return null
+  return rateDimensionProblem.value
+})
+const rateReplacementHint = computed(() => {
+  if (rates.rates.kind !== 'success' || rateDimensionProblem.value) return null
+  const replaced = supersededRate(rates.rates.data, rateDraft.value)
+  const from = toUtcTimestamp(rateEffectiveFrom.value)
+  if (!replaced || !from) return null
+  return `生效后将在 ${formatTimestamp(from)} 结束同一维度的现行版本 ${replaced.revision}（${replaced.unitQuantity} 基础单位 ${replaced.unitPrice.amount} ${replaced.unitPrice.currency}）；该时间之前的用量仍按原版本计价。`
 })
 
 const selectedCharge = computed(() => finance.charges.kind === 'success'
@@ -953,10 +977,8 @@ const canSaveBudget = computed(() => {
 const canSubmitAdjustment = computed(() => Boolean(selectedCharge.value && /^-?(0|[1-9][0-9]*)\.[0-9]{6}$/.test(adjustmentAmount.value) && adjustmentReason.value.trim()))
 const canSubmitRate = computed(() => Boolean(
   rateUnitQuantity.value && canonicalRateAmount(rateAmount.value)
-  && /^[A-Za-z0-9_-]{1,32}$/.test(rateCurrency.value)
-  && (rateUnit.value !== 'gpu_unit_second' || selectedGpu.value)
-  && (rateUnit.value !== 'build_second' || validRateBinding(rateBuilderBinding.value, 128))
-  && (!isModelRate.value || (validRateBinding(rateModelBinding.value, 256) && canonicalMaxPreauthorization.value))
+  && !rateCurrencyError(rateUnit.value, rateCurrency.value)
+  && !rateDimensionProblem.value
   && !rateDateError.value,
 ))
 const endingRate = computed(() => {
@@ -1128,16 +1150,6 @@ function chargeTargetLabel(charge: ResourceCharge) {
   return usage ? usageTargetLabel(usage) : '项目用量关联待同步'
 }
 
-function localDateTimeValue(date = new Date()) {
-  const pad = (value: number) => String(value).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
-}
-
-function toUtcTimestamp(value: string): string | null {
-  const timestamp = Date.parse(value)
-  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null
-}
-
 function rateLabel(rate: ResourceRateSchema) {
   if (rate.unit === 'gpu_unit_second') return `GPU ${rate.gpuClass} · ${rateModeLabel(rate.gpuMode)}`
   if (rate.unit === 'build_second') return `镜像构建 · ${rate.builderBinding ?? '未指定构建器'}`
@@ -1185,10 +1197,9 @@ async function submitRate() {
   const created = await rates.create({
     unit: rateUnit.value,
     unitQuantity: rateUnitQuantity.value!,
-    gpuClass: rateUnit.value === 'gpu_unit_second' ? selectedGpu.value!.class : null,
-    gpuMode: rateUnit.value === 'gpu_unit_second' ? selectedGpu.value!.mode : null,
+    gpuClass: rateDraft.value.gpuClass ?? null,
+    gpuMode: rateDraft.value.gpuMode ?? null,
     ...(rateUnit.value === 'build_second' ? { builderBinding: rateBuilderBinding.value } : {}),
-    ...(isModelRate.value ? { modelBinding: rateModelBinding.value, maxPreauthorization: canonicalMaxPreauthorization.value } : {}),
     unitPrice: { currency: rateCurrency.value.trim(), amount: canonicalRateAmount(rateAmount.value)! },
     effectiveFrom,
     effectiveUntil,

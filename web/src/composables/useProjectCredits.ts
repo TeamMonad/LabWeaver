@@ -1,9 +1,12 @@
 import { computed, onScopeDispose, ref, watch, type Ref } from 'vue'
 import {
   createCreditAdminOperation,
+  getProjectBuildCost,
   getProjectCredits,
   listProjectCreditHolds,
   listProjectCreditLedger,
+  type BuildCostRecordSchema,
+  type BuildUsageMeasurement,
   type CreditAccountSchema,
   type CreditAdminOperationSchema,
   type CreditHold,
@@ -12,7 +15,7 @@ import {
   type CreditLedgerPageSchema,
 } from '@/generated/contracts'
 import { diagnosticFromError, makeDiagnostic, type AsyncState, type DiagnosticViewModel } from '@/types/async'
-import { idempotencyKey } from '@/utils/format'
+import { formatTimestamp, idempotencyKey } from '@/utils/format'
 import { clearPendingCommand, listPendingCommands, readPendingCommand, writePendingCommand } from '@/utils/pendingCommands'
 
 const fixedDecimalPattern = /^-?(0|[1-9][0-9]*)\.[0-9]{6}$/
@@ -61,6 +64,72 @@ export function creditHoldUnknownStatus(hold: CreditHold): CreditHoldUnknownStat
     message: '用量未知待核实',
     reconciliationDueAt: hold.reconciliationDueAt,
     unknownSince: hold.unknownSince,
+  }
+}
+
+/** What a hold funds. A hold carries exactly one business target; only resource holds link a ResourceRequest. */
+export function creditHoldTargetLabel(hold: Pick<CreditHold, 'requestId' | 'buildRequestId' | 'buildAttempt' | 'modelCallId'>): string {
+  if (hold.requestId) return '资源申请'
+  if (hold.buildRequestId) return hold.buildAttempt ? `镜像构建（第 ${hold.buildAttempt} 次）` : '镜像构建'
+  if (hold.modelCallId) return '模型调用'
+  return '其他业务'
+}
+
+function scaledCredits(value: string): bigint {
+  return BigInt(value.replace('.', ''))
+}
+
+function formatCredits(scaled: bigint): string {
+  const sign = scaled < 0n ? '-' : ''
+  const magnitude = scaled < 0n ? -scaled : scaled
+  return `${sign}${magnitude / 1_000_000n}.${(magnitude % 1_000_000n).toString().padStart(6, '0')}`
+}
+
+export interface CreditHoldSettlement {
+  /** Settlement entries found; zero means none is on the loaded ledger page, not that nothing was charged. */
+  entries: number
+  /** Credits debited from the project. */
+  spent: string
+  /** Cost beyond the remaining hold, or arriving after release, that the platform bears. */
+  platformAbsorbed: string
+}
+
+/**
+ * Sum the project-side "settle" ledger entries of one hold from the entries
+ * the page has loaded. Exact six-decimal arithmetic; a missing entry is
+ * reported as `entries: 0`, never as a zero charge.
+ */
+export function creditHoldSettlement(holdId: string, entries: readonly CreditLedgerEntry[]): CreditHoldSettlement {
+  let count = 0
+  let spent = 0n
+  let absorbed = 0n
+  for (const entry of entries) {
+    if (entry.holdId !== holdId || entry.kind !== 'settle' || !entry.projectId) continue
+    count += 1
+    spent += scaledCredits(entry.spentDelta)
+    absorbed += scaledCredits(entry.platformAbsorbed)
+  }
+  return { entries: count, spent: formatCredits(spent), platformAbsorbed: formatCredits(absorbed) }
+}
+
+/** Build execution history as Resource recorded it; unknown and not-started never read as zero time. */
+export function buildMeasurementLabel(measurement: BuildUsageMeasurement | null | undefined): string {
+  if (!measurement) return '尚无构建执行记录。'
+  if (measurement.state === 'known') return `实际构建 ${formatTimestamp(measurement.startedAt)} 至 ${formatTimestamp(measurement.finishedAt)}`
+  if (measurement.state === 'not_started') return `构建未开始：${measurement.reason}`
+  return `构建用时未知，待核实：${measurement.reason}`
+}
+
+/** One build attempt's estimate, hold, measurement and settled charge, read from Resource. */
+export async function fetchBuildCostRecord(projectId: string, buildRequestId: string, attempt: number): Promise<AsyncState<BuildCostRecordSchema>> {
+  try {
+    const result = await getProjectBuildCost({ path: { projectId, buildRequestId, attempt } })
+    if (result.error || !result.data) {
+      return { kind: 'error', diagnostic: diagnosticFromError(result.error, 'BUILD_COST_LOAD_FAILED', '无法读取这次构建的费用记录。') }
+    }
+    return { kind: 'success', data: result.data }
+  } catch (error) {
+    return { kind: 'error', diagnostic: diagnosticFromError(error, 'BUILD_COST_LOAD_FAILED', '无法读取这次构建的费用记录。') }
   }
 }
 

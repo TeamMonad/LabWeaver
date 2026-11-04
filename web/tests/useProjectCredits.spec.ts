@@ -8,12 +8,18 @@ import {
   listProjectCreditLedger,
 } from '@/generated/contracts'
 import {
+  buildMeasurementLabel,
   canonicalCreditsAmount,
+  creditHoldSettlement,
   creditHoldStateLabel,
+  creditHoldTargetLabel,
+  creditHoldUnknownStatus,
   creditLedgerKindLabel,
   isDestructiveCreditOperation,
   isPositiveCreditsAmount,
   useProjectCredits,
+  type CreditHold,
+  type CreditLedgerEntry,
 } from '@/composables/useProjectCredits'
 import { syncPendingCommandOwner } from '@/utils/pendingCommands'
 
@@ -76,6 +82,38 @@ describe('Credits amount and label helpers', () => {
     expect(creditLedgerKindLabel('new_kind')).toBe('new_kind')
     expect(creditHoldStateLabel('unknown')).toBe('用量待核实')
     expect(creditHoldStateLabel('later')).toContain('later')
+  })
+
+  it('names the single business target of a hold without assuming a resource request', () => {
+    expect(creditHoldTargetLabel({ requestId: 'r' })).toBe('资源申请')
+    expect(creditHoldTargetLabel({ requestId: null, buildRequestId: 'b', buildAttempt: 3 })).toBe('镜像构建（第 3 次）')
+    expect(creditHoldTargetLabel({ requestId: null, modelCallId: 'call' })).toBe('模型调用')
+  })
+
+  it('classifies unknown holds by their finite deadline and release, never as settled zero', () => {
+    const hold = { id: 'h', state: 'unknown', measurementUnknown: true, unknownSince: '2026-10-12T09:00:00.000Z', reconciliationDueAt: '2026-10-12T10:00:00.000Z' } as CreditHold
+    expect(creditHoldUnknownStatus(hold)).toEqual(expect.objectContaining({ kind: 'pending', reconciliationDueAt: '2026-10-12T10:00:00.000Z' }))
+    expect(creditHoldUnknownStatus({ ...hold, state: 'released', expiredUnknownAt: '2026-10-12T10:00:00.000Z' })).toEqual(expect.objectContaining({ kind: 'released', message: '待核实，预占已释放' }))
+    expect(creditHoldUnknownStatus({ ...hold, state: 'settled', measurementUnknown: false })).toEqual({ kind: 'none' })
+  })
+
+  it('sums only project-side settle entries of one hold exactly, and reports none as missing rather than zero', () => {
+    const entry = (overrides: Partial<CreditLedgerEntry>) => ({ id: 'e', kind: 'settle', projectId: 'p', holdId: 'h', spentDelta: '0.000000', platformAbsorbed: '0.000000', ...overrides }) as CreditLedgerEntry
+    const entries = [
+      entry({ spentDelta: '9007199254.740993' }),
+      entry({ spentDelta: '0.000007', platformAbsorbed: '1.000001' }),
+      entry({ projectId: null, spentDelta: '5.000000' }),
+      entry({ holdId: 'other', spentDelta: '5.000000' }),
+      entry({ kind: 'release', spentDelta: '5.000000' }),
+    ]
+    expect(creditHoldSettlement('h', entries)).toEqual({ entries: 2, spent: '9007199254.741000', platformAbsorbed: '1.000001' })
+    expect(creditHoldSettlement('missing', entries)).toEqual({ entries: 0, spent: '0.000000', platformAbsorbed: '0.000000' })
+  })
+
+  it('describes build measurements without turning unknown or not-started time into zero', () => {
+    expect(buildMeasurementLabel({ state: 'unknown', reason: 'history lost' })).toBe('构建用时未知，待核实：history lost')
+    expect(buildMeasurementLabel({ state: 'not_started', reason: 'cancelled' })).toBe('构建未开始：cancelled')
+    expect(buildMeasurementLabel(null)).toBe('尚无构建执行记录。')
   })
 })
 

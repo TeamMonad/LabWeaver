@@ -513,27 +513,113 @@ describe('ResourceFinanceView', () => {
     expect(body).not.toHaveProperty('modelBinding')
   })
 
-  it('requires model identity and a positive per-call preauthorization cap for model token rates', async () => {
+  it('locks build-second rates to CREDITS and names the version a new build rate closes', async () => {
+    vi.mocked(listResourceRates).mockResolvedValue(page([
+      { ...existingRate, id: 'rate-build', revision: 3, unit: 'build_second', unitQuantity: 3600, gpuClass: null, gpuMode: null, builderBinding: 'buildkit-primary-v1', unitPrice: { currency: 'CREDITS', amount: '1.000000' } },
+    ]))
     const wrapper = mountView()
     await flushPromises()
     const form = wrapper.get('[data-testid="resource-rate-form"]')
-    await form.get('select[aria-label="计费单位"]').setValue('llm_output_token')
-    await form.get('input[aria-label="费率单价"]').setValue('15')
+    await form.get('input[aria-label="币种"]').setValue('USD')
+    await form.get('select[aria-label="计费单位"]').setValue('build_second')
+    const currency = form.get('input[aria-label="币种"]')
+    expect((currency.element as HTMLInputElement).value).toBe('CREDITS')
+    expect(currency.attributes('readonly')).toBeDefined()
+    expect(form.find('option[value="llm_input_token"]').exists()).toBe(false)
+    await form.get('input[aria-label="费率单价"]').setValue('1.2')
     await form.get('input[data-app-datetime]').setValue('2030-01-01T00:00')
-    await form.get('input[aria-label="模型标识"]').setValue('claude-sonnet-4')
+    await form.get('input[aria-label="构建器标识"]').setValue('buildkit primary')
+    expect(form.get('[data-testid="rate-dimension-error"]').text()).toContain('不能含空格')
+    expect(form.find('[data-testid="rate-replacement-hint"]').exists()).toBe(false)
+    await form.get('input[aria-label="构建器标识"]').setValue('buildkit-primary-v1')
+    expect(form.find('[data-testid="rate-dimension-error"]').exists()).toBe(false)
+    expect(form.get('[data-testid="rate-replacement-hint"]').text()).toContain('结束同一维度的现行版本 3')
+  })
+
+  it('creates the four model token rates with one shared per-call cap in CREDITS', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    const form = wrapper.get('[data-testid="model-rate-form"]')
     const submit = form.get('button[type="submit"]')
+    expect(submit.attributes('disabled')).toBeDefined()
+    expect(wrapper.get('section.rates-card').find('[role="alert"]').exists()).toBe(false)
+    await form.get('input[aria-label="模型标识"]').setValue('claude-sonnet-4')
+    await form.get('input[aria-label="模型费率生效时间"]').setValue('2030-01-01T00:00')
+    await form.get('input[aria-label="输入 token 单价"]').setValue('3')
+    await form.get('input[aria-label="输出 token 单价"]').setValue('15')
+    await form.get('input[aria-label="缓存读取 token 单价"]').setValue('0.3')
+    expect(form.get('[data-testid="model-rate-error"]').text()).toContain('大于 0')
     await form.get('input[aria-label="单次调用最多预占"]').setValue('0')
     expect(submit.attributes('disabled')).toBeDefined()
-    await form.get('input[aria-label="单次调用最多预占"]').setValue('2.5')
+    await form.get('input[aria-label="单次调用最多预占"]').setValue('2')
+    expect(form.get('[data-testid="model-rate-error"]').text()).toContain('缓存写入')
+    expect(submit.attributes('disabled')).toBeDefined()
+    await form.get('input[aria-label="缓存写入 token 单价"]').setValue('0')
     expect(submit.attributes('disabled')).toBeUndefined()
-    expect(form.text()).toContain('四类费率都配置后')
+    const impact = form.get('[data-testid="model-rate-impact"]').text()
+    expect(impact).toContain('冻结 2.000000 CREDITS')
+    expect(impact).toContain('上限约覆盖 133,333 个 token')
+    expect(impact).toContain('由平台承担')
+    expect(impact).toContain('缓存写入单价为 0')
     vi.mocked(createResourceRate).mockResolvedValue({ data: existingRate as never, error: undefined as never })
     await form.trigger('submit')
     await flushPromises()
-    expect(createResourceRate).toHaveBeenCalledWith(expect.objectContaining({ body: expect.objectContaining({
-      unit: 'llm_output_token', unitQuantity: 1_000_000, modelBinding: 'claude-sonnet-4', maxPreauthorization: '2.500000',
-      unitPrice: { amount: '15.000000', currency: 'CREDITS' },
-    }) }))
+    expect(createResourceRate).toHaveBeenCalledTimes(4)
+    const bodies = vi.mocked(createResourceRate).mock.calls.map(([call]) => call!.body)
+    expect(bodies.map((body) => [body.unit, body.unitPrice.amount])).toEqual([
+      ['llm_input_token', '3.000000'], ['llm_output_token', '15.000000'], ['llm_cache_read_token', '0.300000'], ['llm_cache_write_token', '0.000000'],
+    ])
+    for (const body of bodies) {
+      expect(body).toEqual(expect.objectContaining({ unitQuantity: 1_000_000, modelBinding: 'claude-sonnet-4', maxPreauthorization: '2.000000', unitPrice: expect.objectContaining({ currency: 'CREDITS' }), effectiveFrom: new Date('2030-01-01T00:00').toISOString() }))
+      expect(body).not.toHaveProperty('builderBinding')
+    }
+    const keys = vi.mocked(createResourceRate).mock.calls.map(([call]) => call!.headers!['Idempotency-Key'])
+    expect(new Set(keys).size).toBe(4)
+    expect(wrapper.find('[data-testid="model-rate-progress"]').exists()).toBe(false)
+  })
+
+  it('continues a partially created model rate set without resubmitting created dimensions', async () => {
+    vi.mocked(createResourceRate)
+      .mockResolvedValueOnce({ data: existingRate as never, error: undefined as never })
+      .mockResolvedValueOnce({ data: undefined as never, error: { type: 'about:blank', title: 'Conflict', status: 409, detail: 'x', diagnosticCode: 'LW_RESOURCE_CONTRACT_INVALID', retryable: false } as never })
+      .mockResolvedValue({ data: existingRate as never, error: undefined as never })
+    const wrapper = mountView()
+    await flushPromises()
+    const form = wrapper.get('[data-testid="model-rate-form"]')
+    await form.get('input[aria-label="模型标识"]').setValue('claude-sonnet-4')
+    await form.get('input[aria-label="单次调用最多预占"]').setValue('2')
+    await form.get('input[aria-label="模型费率生效时间"]').setValue('2030-01-01T00:00')
+    for (const label of ['输入', '输出', '缓存读取', '缓存写入']) await form.get(`input[aria-label="${label} token 单价"]`).setValue('1')
+    await form.trigger('submit')
+    await flushPromises()
+    expect(createResourceRate).toHaveBeenCalledTimes(2)
+    expect(wrapper.text()).toContain('不符合平台约定')
+    const progress = form.get('[data-testid="model-rate-progress"]').text()
+    expect(progress).toContain('已创建 1 / 4')
+    expect(progress).toContain('生效后调用会被拒绝')
+    expect(form.get('input[aria-label="模型标识"]').attributes('disabled')).toBeDefined()
+    expect(form.get('button[type="submit"]').text()).toContain('继续创建剩余 3 类')
+    await form.trigger('submit')
+    await flushPromises()
+    const units = vi.mocked(createResourceRate).mock.calls.map(([call]) => call!.body.unit)
+    expect(units).toEqual(['llm_input_token', 'llm_output_token', 'llm_output_token', 'llm_cache_read_token', 'llm_cache_write_token'])
+    expect(wrapper.find('[data-testid="model-rate-progress"]').exists()).toBe(false)
+  })
+
+  it('shows which models can be called and why others will be refused', async () => {
+    const modelRate = { ...existingRate, gpuClass: null, gpuMode: null, unitQuantity: 1_000_000, modelBinding: 'claude-sonnet-4', maxPreauthorization: '2.000000', unitPrice: { currency: 'CREDITS', amount: '3.000000' } }
+    vi.mocked(listResourceRates).mockResolvedValue(page([
+      ...['llm_input_token', 'llm_output_token', 'llm_cache_read_token', 'llm_cache_write_token'].map((unit) => ({ ...modelRate, id: `ready-${unit}`, unit })),
+      ...['llm_input_token', 'llm_output_token'].map((unit) => ({ ...modelRate, id: `partial-${unit}`, unit, modelBinding: 'partial-model' })),
+      ...['llm_input_token', 'llm_output_token', 'llm_cache_read_token'].map((unit) => ({ ...modelRate, id: `mixed-${unit}`, unit, modelBinding: 'mixed-model' })),
+      { ...modelRate, id: 'mixed-cw', unit: 'llm_cache_write_token', modelBinding: 'mixed-model', maxPreauthorization: '5.000000' },
+    ]))
+    const wrapper = mountView()
+    await flushPromises()
+    const readiness = wrapper.get('[data-testid="model-rate-readiness"]')
+    expect(readiness.get('[data-model="claude-sonnet-4"]').text()).toContain('可调用 · 单次最多预占 2.000000 CREDITS')
+    expect(readiness.get('[data-model="partial-model"]').text()).toContain('缺少缓存读取、缓存写入费率')
+    expect(readiness.get('[data-model="mixed-model"]').text()).toContain('单次预占上限不一致（2.000000 / 5.000000 CREDITS）')
   })
 
   it('warns that non-CREDITS rates cannot fund project Credits admission', async () => {
