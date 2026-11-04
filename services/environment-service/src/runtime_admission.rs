@@ -16,6 +16,14 @@ pub trait EnvironmentRuntimeAuthority: Send + Sync {
         request: &ResolveEnvironmentRuntimeAuthorizationRequest,
     ) -> Result<EnvironmentRuntimeAuthorizationResolution, crate::ResourceUsageClientError>;
 
+    async fn restore_funding(
+        &self,
+        request: &contracts::resource::environment_funding::RestoreEnvironmentFundingRequest,
+    ) -> Result<
+        contracts::resource::environment_funding::EnvironmentCreditGrant,
+        crate::ResourceUsageClientError,
+    >;
+
     async fn resolve_credit_grant(
         &self,
         authorization: &contracts::environment::EnvironmentLeaseAuthorization,
@@ -36,6 +44,27 @@ impl EnvironmentRuntimeAuthority for crate::metering::ResourceUsageClient {
             .json()
             .await
             .map_err(|_| crate::ResourceUsageClientError::InvalidResponse)
+    }
+
+    async fn restore_funding(
+        &self,
+        request: &contracts::resource::environment_funding::RestoreEnvironmentFundingRequest,
+    ) -> Result<
+        contracts::resource::environment_funding::EnvironmentCreditGrant,
+        crate::ResourceUsageClientError,
+    > {
+        self.post_json_with_key(
+            "internal/v1/environment-restore-funding",
+            &format!(
+                "restore-{}-{}",
+                request.lease_id, request.restored_generation
+            ),
+            request,
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|_| crate::ResourceUsageClientError::InvalidResponse)
     }
 
     async fn resolve_credit_grant(
@@ -157,6 +186,34 @@ impl EnvironmentRuntimeAdmission {
         Ok(resolution)
     }
 
+    /// Recover leaves the disk stopped. Admission is replayed before a later Start, never after
+    /// provisioning, and uses the stable disk generation rather than a changing HTTP revision.
+    pub async fn fund_restored_instance(
+        &self,
+        instance: &EnvironmentInstance,
+    ) -> Result<(), RuntimeAdmissionError> {
+        let Some(disk) = instance.disk_retention.as_ref().filter(|disk| {
+            disk.state == contracts::environment::EnvironmentDiskState::Restored
+                && disk.reactivated_at.is_none()
+        }) else {
+            return Ok(());
+        };
+        self.authority
+            .restore_funding(
+                &contracts::resource::environment_funding::RestoreEnvironmentFundingRequest {
+                    lease_id: instance.lease_id.ok_or(RuntimeAdmissionError::Binding)?,
+                    environment_id: instance.id,
+                    project_id: instance.project_id,
+                    requester_id: instance.owner_id,
+                    restored_generation: disk
+                        .restored_generation
+                        .ok_or(RuntimeAdmissionError::Binding)?,
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn for_instance(
         &self,
         instance: &EnvironmentInstance,
@@ -173,6 +230,11 @@ impl EnvironmentRuntimeAdmission {
     ) -> Result<EnvironmentRuntimeAuthorizationResolution, RuntimeAdmissionError> {
         if !instance.has_resource_lease() {
             return Err(RuntimeAdmissionError::AllocationPathUnsupported);
+        }
+        if instance
+            .requires_compute_authorization(contracts::environment::EnvironmentOperationKind::Start)
+        {
+            self.fund_restored_instance(instance).await?;
         }
         let request_id = instance
             .runtime_authorization

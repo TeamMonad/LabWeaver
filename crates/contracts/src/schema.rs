@@ -488,6 +488,10 @@ pub fn generate_all() -> Result<Vec<GeneratedArtifact>, GenerationError> {
         crate::resource::environment_funding::EnvironmentCreditGrant
     );
     document!(
+        "schemas/contracts/v1/restore-environment-funding-request.schema.json",
+        crate::resource::environment_funding::RestoreEnvironmentFundingRequest
+    );
+    document!(
         "schemas/contracts/v1/build-cost-record.schema.json",
         crate::resource::build_costing::BuildCostRecord
     );
@@ -1751,6 +1755,22 @@ fn openapi(surface: ApiSurface) -> Result<Value, GenerationError> {
                 "LW_IDEMPOTENCY_CONFLICT"
             ]);
         }
+        if operation.operation_id == "restoreEnvironmentFunding" {
+            operation_json["x-labweaver-errors"] = json!([
+                "LW_RESOURCE_APPROVAL_INVALID",
+                "LW_RUNTIME_SCOPE_DENIED",
+                "LW_CREDITS_SCOPE_DENIED",
+                "LW_CREDITS_INSUFFICIENT",
+                "LW_CREDITS_CONFLICT",
+                "LW_RESOURCE_SCOPE_CONFLICT",
+                "LW_RESOURCE_USAGE_CONFLICT",
+                "LW_RESOURCE_RATE_UNCONFIGURED",
+                "LW_RESOURCE_GPU_CAPACITY_EXHAUSTED"
+            ]);
+            operation_json["description"] = json!(
+                "Environment-only fresh funding for a restored stopped generation. Rechecks current membership, runtime policy, original approval window and project Credits, creates exactly one new current-rate hold per lease/restoredGeneration, and binds the next compute generation to a new lease revision. Replays still recheck authorization; different bodies conflict."
+            );
+        }
         if matches!(operation.operation_id, "admitModelCost" | "settleModelCost") {
             operation_json["x-labweaver-errors"] = json!([
                 "LW_CREDITS_INSUFFICIENT",
@@ -2544,6 +2564,7 @@ fn request_schema(operation_id: &str) -> Option<Value> {
         "createCreditAdminOperation" => "credit-admin-operation",
         "createCreditHold" => "credit-hold-request",
         "estimateProjectResourceCost" => "resource-cost-estimate-request",
+        "restoreEnvironmentFunding" => "restore-environment-funding-request",
         "estimateProjectBuildCost" => "build-cost-estimate-request",
         "admitBuildCost" => "build-cost-admission-request",
         "observeBuildCost" => "observe-build-cost-request",
@@ -2736,7 +2757,9 @@ fn response_schema(operation_id: &str) -> Option<Value> {
         "listProjectCreditHolds" => contract_ref("credit-hold-page"),
         "getProjectCredits" => contract_ref("credit-account"),
         "estimateProjectResourceCost" => contract_ref("resource-cost-estimate"),
-        "getEnvironmentCreditGrant" => contract_ref("environment-credit-grant"),
+        "getEnvironmentCreditGrant"
+        | "restoreEnvironmentFunding"
+        | "getProjectEnvironmentCreditGrant" => contract_ref("environment-credit-grant"),
         "resolveEnvironmentRuntimeAuthorization" => {
             contract_ref("environment-runtime-authorization-resolution")
         }

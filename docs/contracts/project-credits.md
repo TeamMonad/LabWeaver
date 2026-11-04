@@ -174,9 +174,13 @@ Resource0026 用 `capacity_claims.compute_released/storage_released` 保存维�
 
 保留存储区间只在其关闭事实首次被 Resource 接受时终结：到期清盘完成，实际 purge，或已获新的计算资金授权并观察到 restored generation 的 `reactivatedAt`。单纯 Restore 到 Stopped 不关闭存储区间。重复 purge、expiry、restore 或 cleanup 回执不能重复关闭、重开或收费；关闭后延迟的 retained readback 不得重开区间。新的运行区间必须以新 generation 和当前授权开始。
 
-**恢复资金目前有意 fail-closed：** Restore 不会继承原 generation 的 compute 资金许可。compute 已退役后，旧 grant/revision 不授权新 compute，也不应提交其计量。恢复后的 generation 在 Resource 的新恢复资金准入路径交付前保持拒绝；不能将普通 lease renewal 或原 hold 当成恢复资金。该 admission 必须重验当前项目范围与 Credits 余额、仍有效的原批准窗口，并按当前费率版本新建 hold；无效批准或余额不足时拒绝。上述恢复准入由独立增量实现，当前路径不声称已支持恢复后运行。
+**恢复资金是新的准入，不是续用旧 hold：** Environment 在 `/recover` 持久化新的 Stopped generation 后调用 `restoreEnvironmentFunding`（POST `/internal/v1/environment-restore-funding`，`resource.credits.hold`，已配置 Environment 服务 JWT）。请求 DTO `RestoreEnvironmentFundingRequest` 包含 `leaseId/environmentId/projectId/requesterId/restoredGeneration`，要求 `Idempotency-Key`；响应为 `EnvironmentCreditGrant`。该内部操作不对浏览器开放，公开的项目 Credits holds/ledger 读取仍可查看新预占。
 
-当前旧资金入口的稳定拒绝为 `LW_RESOURCE_USAGE_CONFLICT`：普通续期不能给已退役计算重新注资，旧 lease 的新计算或存储计量也不能跨过原 `computeRetiredAt` 再扣旧 hold。退役边界之前的迟到计量仍可按原事件幂等结算。资金查询返回 `canAuthorizeExecution=false`，不将原 grant 回执当作恢复授权；Source 的 `reactivatedAt` 仅关闭原平台存储区间，不清除 compute-released fence。
+Resource 锁定原 lease，在同一事务重验当前账号、项目/课程成员、运行策略与 Credits 项目范围，以及原批准有效窗口；复用现有估价与 Credits 事务函数，以当前费率为新 epoch 建立独立 hold，并推进 lease revision。覆盖从本次准入时刻开始，到批准时长和原批准截止的较早者；旧 hold、旧费率窗口与已入账费用不改写。批准过期/撤销返回 `LW_RESOURCE_APPROVAL_INVALID`，撤权返回 `LW_RUNTIME_SCOPE_DENIED`，余额不足返回 `LW_CREDITS_INSUFFICIENT`，同键不同 body 返回 `LW_CREDITS_CONFLICT`。拒绝回滚全部资金/窗口写入，环境保持 Stopped 和可读诊断，不发起 Kubernetes 启动。缺费率或运行策略也明确拒绝。
+
+`(leaseId, restoredGeneration)` 唯一约束和幂等记录保证同键重放、换键重试及并发重复只产生一个新 hold；重放仍重验当前范围和批准。Stopped 的恢复代次不执行计算，其下一个运行代次消费此资金。每次 Start 在任何运行副作用之前重验准入和当前 runtime receipt；资金查询读取当前 epoch 的真实 hold，而不是把历史成功响应当作永久执行许可。只有实际 reactivation readback 同时匹配新 lease revision 与该运行 generation 才清除 `compute_released`；旧回执不能清除。保留存储仍复用原 `reactivatedAt` 关闭/计价逻辑，单纯恢复和预占不关闭平台存储区间。
+
+普通续期仍以 `LW_RESOURCE_USAGE_CONFLICT` 拒绝已退役计算。退役之前的迟到计量保留原 hold；新 epoch 的计算和存储计量按其窗口选择新 hold，跨保留边界的计量拒绝，不向旧 hold 扣恢复费用。
 
 计量准入先用独立 SQL 语句取得 lease 行锁，再用新语句读取 claim 与 cleanup fence；等待并发退役事务提交后，必须按最新已提交事实拒绝跨退役边界的旧用量，不能沿用等待前的 JOIN 快照。
 

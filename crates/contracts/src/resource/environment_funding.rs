@@ -25,3 +25,15 @@ pub struct EnvironmentCreditGrant {
     /// Only a current active lease and known, unexpired original funds authorize new execution.
     pub can_authorize_execution: bool,
 }
+
+/// Environment requests fresh funding after restoring a retained disk, before starting compute.
+/// The restored generation remains stopped; its next compute generation consumes this funding.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RestoreEnvironmentFundingRequest {
+    pub lease_id: LeaseId,
+    pub environment_id: crate::EnvironmentId,
+    pub project_id: crate::ProjectId,
+    pub requester_id: crate::ActorId,
+    pub restored_generation: u64,
+}

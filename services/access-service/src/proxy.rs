@@ -1181,6 +1181,30 @@ async fn authorize_resource_request(
             .await?;
             return Ok("getProjectBuildCost");
         }
+        [
+            "",
+            "api",
+            "v1",
+            "projects",
+            project_id,
+            "environment-credit-grants",
+            lease_id,
+        ] if *method == Method::GET => {
+            let project_id = project_id
+                .parse()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            lease_id
+                .parse::<contracts::LeaseId>()
+                .map_err(|_| ApiError::bad_request("LW_CONTRACT_DOCUMENT_INVALID"))?;
+            authorize_resource_scope(
+                state,
+                session,
+                contracts::AuthorizationScope::Project { project_id },
+                "getProjectEnvironmentCreditGrant",
+            )
+            .await?;
+            return Ok("getProjectEnvironmentCreditGrant");
+        }
         ["", "api", "v1", "projects", project_id, "credits"] if *method == Method::GET => {
             let project_id = project_id
                 .parse()

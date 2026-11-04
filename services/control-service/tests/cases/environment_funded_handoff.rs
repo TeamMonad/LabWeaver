@@ -90,6 +90,22 @@ impl EnvironmentRuntimeAuthority for PgAuthority {
             lease_authorization: value.lease,
         })
     }
+    async fn restore_funding(
+        &self,
+        input: &contracts::resource::environment_funding::RestoreEnvironmentFundingRequest,
+    ) -> std::result::Result<EnvironmentCreditGrant, ResourceUsageClientError> {
+        self.0
+            .restore_environment_funding(
+                &format!("restore-{}-{}", input.lease_id, input.restored_generation),
+                OWNER,
+                input,
+            )
+            .await
+            .map_err(|error| ResourceUsageClientError::Problem {
+                diagnostic_code: error.to_string(),
+                retryable: false,
+            })
+    }
     async fn resolve_credit_grant(
         &self,
         lease: &EnvironmentLeaseAuthorization,

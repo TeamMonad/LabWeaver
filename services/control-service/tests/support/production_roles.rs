@@ -18,6 +18,8 @@ pub struct ProductionRoles {
     pub provisioner: PgPool,
     pub control: PgPool,
     pub access: PgPool,
+    pub resource: PgPool,
+    pub environment: PgPool,
     container: ContainerAsync<Postgres>,
 }
 
@@ -87,10 +89,14 @@ impl ProductionRoles {
         let access = role_pool(&url, Domain::Access.runtime_role()).await?;
         assert_read_only_cross_schema(&control, Domain::Control, Domain::Access).await?;
         assert_read_only_cross_schema(&access, Domain::Access, Domain::Control).await?;
+        let resource = role_pool(&url, Domain::Resource.runtime_role()).await?;
+        let environment = role_pool(&url, Domain::Environment.runtime_role()).await?;
         Ok(Self {
             provisioner,
             control,
             access,
+            resource,
+            environment,
             container,
         })
     }

@@ -1023,6 +1023,12 @@ impl PgResourceStore {
                     {
                         return Err(ResourceStoreError::UsageConflict);
                     }
+                    let crosses_retention: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource.environment_restore_funding rf JOIN resource.environment_credit_windows w ON w.lease_id=rf.lease_id AND w.lease_revision=rf.lease_revision JOIN resource.environment_cleanup_fences f ON f.lease_id=rf.lease_id WHERE rf.lease_id=$1 AND $2<f.compute_retired_at AND $3>f.compute_retired_at AND $2<w.covered_from) OR EXISTS(SELECT 1 FROM resource.environment_restore_funding rf JOIN resource.environment_credit_windows w ON w.lease_id=rf.lease_id AND w.lease_revision=rf.lease_revision JOIN resource.environment_cleanup_fences f ON f.lease_id=rf.lease_id WHERE rf.lease_id=$1 AND $2>=f.compute_retired_at AND $2<w.covered_from)")
+                        .bind(lease_id.as_uuid()).bind(input.measured_from.get()).bind(input.measured_until.get())
+                        .fetch_one(&mut *transaction).await?;
+                    if crosses_retention {
+                        return Err(ResourceStoreError::UsageConflict);
+                    }
                     Some((
                         lease_row.try_get::<uuid::Uuid, _>("request_id")?,
                         lease_row.try_get::<String, _>("state")?,
@@ -5585,7 +5591,7 @@ async fn load_locked(
     decode_request(row.try_get("contract")?)
 }
 
-async fn load_locked_lease(
+pub(crate) async fn load_locked_lease(
     transaction: &mut Transaction<'_, Postgres>,
     lease_id: LeaseId,
 ) -> Result<ResourceLease, ResourceStoreError> {
@@ -5598,7 +5604,7 @@ async fn load_locked_lease(
     decode_lease(row.try_get("contract")?)
 }
 
-async fn update_lease(
+pub(crate) async fn update_lease(
     transaction: &mut Transaction<'_, Postgres>,
     current: &ResourceLease,
     next: &ResourceLease,
@@ -6246,7 +6252,7 @@ fn ensure_environment_reservation_identity(
 }
 
 impl PgResourceStore {
-    async fn validate_existing_gpu_allocation(
+    pub(crate) async fn validate_existing_gpu_allocation(
         &self,
         transaction: &mut Transaction<'_, Postgres>,
         allocation: &GpuAllocation,

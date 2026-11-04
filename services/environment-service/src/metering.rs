@@ -1078,6 +1078,7 @@ impl ResourceUsageClient {
             "resource.usage.record",
             "resource.environment.resolve",
             "resource.environment.release",
+            "resource.credits.hold",
         ]
         .iter()
         .all(|scope| scopes.contains(*scope))
@@ -1241,6 +1242,24 @@ impl ResourceUsageClient {
                     .join(path)
                     .map_err(|_| ResourceUsageClientError::Configuration)?,
             )
+            .json(body);
+        self.send_request(request).await
+    }
+
+    pub(crate) async fn post_json_with_key<T: serde::Serialize>(
+        &self,
+        path: &str,
+        key: &str,
+        body: &T,
+    ) -> Result<reqwest::Response, ResourceUsageClientError> {
+        let request = self
+            .client
+            .post(
+                self.base_uri
+                    .join(path)
+                    .map_err(|_| ResourceUsageClientError::Configuration)?,
+            )
+            .header("idempotency-key", key)
             .json(body);
         self.send_request(request).await
     }

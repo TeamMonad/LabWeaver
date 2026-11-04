@@ -651,6 +651,40 @@ impl PgEnvironmentStore {
         decode_contract(row.try_get("contract")?)
     }
 
+    /// Records a restore admission failure without changing lifecycle intent or scheduling work.
+    pub async fn record_restore_funding_diagnostic(
+        &self,
+        environment_id: EnvironmentId,
+        restored_generation: u64,
+        diagnostic: Option<&str>,
+    ) -> Result<(), EnvironmentStoreError> {
+        let mut tx = self.pool.begin().await?;
+        let value = sqlx::query_scalar("SELECT contract FROM environment.environment_instances WHERE environment_id=$1 FOR UPDATE")
+            .bind(environment_id.as_uuid()).fetch_one(&mut *tx).await?;
+        let current = decode_contract(value)?;
+        if current.desired_state != DesiredEnvironmentState::Stopped
+            || current.disk_retention.as_ref().is_none_or(|disk| {
+                disk.restored_generation != Some(restored_generation)
+                    || disk.reactivated_at.is_some()
+            })
+        {
+            return Err(EnvironmentStoreError::RevisionConflict);
+        }
+        if current.last_diagnostic_code.as_deref() != diagnostic {
+            let mut updated = current.clone();
+            updated.revision =
+                contracts::Revision::new(current.revision.get().checked_add(1).ok_or(
+                    EnvironmentStoreError::NumericOverflow("restore diagnostic revision"),
+                )?)?;
+            updated.last_diagnostic_code = diagnostic.map(str::to_owned);
+            update_instance(&mut tx, &current, &updated).await?;
+            enqueue_environment_event(&mut tx, &updated, subjects::ENVIRONMENT_STATE_CHANGED)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Lists Deleted Experiment instances that still hold a durable Resource reservation.
     ///
     /// Deletion is terminal, so the reservation can be released and the allocation cleared. The
@@ -927,6 +961,10 @@ impl PgEnvironmentStore {
             .lease_authorization
             .as_ref()
             .ok_or(EnvironmentStoreError::LeaseAuthorizationInvalid)?;
+        let restoring = current.disk_retention.as_ref().is_some_and(|disk| {
+            disk.state == contracts::environment::EnvironmentDiskState::Restored
+                && disk.reactivated_at.is_none()
+        });
         if !current.has_resource_lease()
             || current.desired_state == DesiredEnvironmentState::Deleted
             || matches!(
@@ -948,7 +986,7 @@ impl PgEnvironmentStore {
             || current_authorization.owner_actor_id != authorization.owner_actor_id
             || current_authorization.capacity_binding != authorization.capacity_binding
             || current_authorization.resource_request_id != authorization.resource_request_id
-            || current_authorization.active_from != authorization.active_from
+            || (!restoring && current_authorization.active_from != authorization.active_from)
             || current_authorization.approved_resources != authorization.approved_resources
             || current_authorization.gpu_allocation != authorization.gpu_allocation
         {
@@ -962,7 +1000,7 @@ impl PgEnvironmentStore {
             return Ok(current);
         }
         if authorization.lease_revision <= current_authorization.lease_revision
-            || authorization.expires_at <= current_authorization.expires_at
+            || (!restoring && authorization.expires_at <= current_authorization.expires_at)
         {
             return Err(EnvironmentStoreError::LeaseAuthorizationInvalid);
         }

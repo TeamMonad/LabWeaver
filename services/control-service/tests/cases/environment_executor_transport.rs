@@ -62,6 +62,15 @@ impl EnvironmentRuntimeAuthority for Interleave {
     {
         self.authority.resolve_runtime_authorization(request).await
     }
+    async fn restore_funding(
+        &self,
+        input: &contracts::resource::environment_funding::RestoreEnvironmentFundingRequest,
+    ) -> std::result::Result<
+        contracts::resource::environment_funding::EnvironmentCreditGrant,
+        ResourceUsageClientError,
+    > {
+        self.authority.restore_funding(input).await
+    }
     async fn resolve_credit_grant(
         &self,
         lease: &EnvironmentLeaseAuthorization,

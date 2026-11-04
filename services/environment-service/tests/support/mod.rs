@@ -485,6 +485,15 @@ impl environment_service::EnvironmentRuntimeAuthority for RuntimeFixtureAuthorit
         }
         Ok(receipt)
     }
+    async fn restore_funding(
+        &self,
+        _input: &contracts::resource::environment_funding::RestoreEnvironmentFundingRequest,
+    ) -> Result<
+        contracts::resource::environment_funding::EnvironmentCreditGrant,
+        environment_service::ResourceUsageClientError,
+    > {
+        Err(environment_service::ResourceUsageClientError::InvalidResponse)
+    }
     async fn resolve_credit_grant(
         &self,
         lease: &contracts::environment::EnvironmentLeaseAuthorization,

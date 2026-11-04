@@ -1082,6 +1082,7 @@ async fn recover_environment(
         )
         .await?
     {
+        fund_recovered_environment(&state, environment_id).await?;
         return Ok((StatusCode::ACCEPTED, Json(receipt)));
     }
     let restoring = instance.desired_state
@@ -1093,7 +1094,7 @@ async fn recover_environment(
                     | contracts::environment::EnvironmentDiskState::Purged
             )
         });
-    accept_lifecycle(
+    let accepted = accept_lifecycle(
         &state,
         environment_id,
         &headers,
@@ -1107,7 +1108,46 @@ async fn recover_environment(
         context.trace_id(),
         None,
     )
-    .await
+    .await?;
+    if restoring {
+        fund_recovered_environment(&state, environment_id).await?;
+    }
+    Ok(accepted)
+}
+
+async fn fund_recovered_environment(
+    state: &EnvironmentApiState,
+    environment_id: EnvironmentId,
+) -> Result<(), EnvironmentApiError> {
+    let instance = state.store.load(environment_id).await?;
+    if instance.desired_state != contracts::environment::DesiredEnvironmentState::Stopped {
+        return Ok(());
+    }
+    if instance
+        .disk_retention
+        .as_ref()
+        .is_none_or(|disk| disk.reactivated_at.is_some())
+    {
+        return Ok(());
+    }
+    let admission = state
+        .runtime_admission
+        .as_ref()
+        .ok_or(crate::RuntimeAdmissionError::Unavailable)?;
+    let result = admission.fund_restored_instance(&instance).await;
+    state
+        .store
+        .record_restore_funding_diagnostic(
+            environment_id,
+            instance.generation,
+            result
+                .as_ref()
+                .err()
+                .map(crate::RuntimeAdmissionError::diagnostic_code),
+        )
+        .await?;
+    result?;
+    Ok(())
 }
 
 async fn upgrade_environment_template(
