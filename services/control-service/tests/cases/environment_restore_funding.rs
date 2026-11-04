@@ -3,12 +3,7 @@
     clippy::too_many_lines,
     reason = "keep each restore transaction invariant together"
 )]
-#[allow(
-    clippy::duplicate_mod,
-    reason = "shared production role harness is also compiled by other integration cases"
-)]
-#[path = "../support/production_roles.rs"]
-mod production_roles;
+use super::super::membership_governance_cases::production_roles::ProductionRoles;
 use super::*;
 use contracts::environment::{
     EnvironmentDiskRetention, EnvironmentDiskState, EnvironmentRetainedStorageUsage,
@@ -22,7 +17,6 @@ use contracts::resource::{
     CapacityClaim, CapacityClaimState, FixedDecimal, Money, ResourceApproval, ResourceBillingUnit,
     ResourceRequest, ResourceRequestState, ResourceTarget,
 };
-use production_roles::ProductionRoles;
 use resource_service::{
     ApprovalPolicy,
     credits::PgCreditStore,

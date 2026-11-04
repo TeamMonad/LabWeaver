@@ -7,7 +7,7 @@ use axum::{
     http::{Request, StatusCode},
     routing::get,
 };
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use contracts::environment::{
     DesiredEnvironmentState, EnvironmentInstance, EnvironmentLeaseAuthorization,
     EnvironmentOperationKind, EnvironmentRuntimeAuthorizationResolution, OperationState,
@@ -145,7 +145,12 @@ async fn send(
     let response = router.clone().oneshot(request).await?;
     let status = response.status();
     let bytes = to_bytes(response.into_body(), 1_048_576).await?;
-    Ok((status, serde_json::from_slice(&bytes)?))
+    Ok((
+        status,
+        serde_json::from_slice(&bytes).unwrap_or_else(
+            |_| serde_json::json!({"diagnosticCode": String::from_utf8_lossy(&bytes)}),
+        ),
+    ))
 }
 #[derive(Clone)]
 struct HttpResource {
@@ -366,6 +371,7 @@ async fn retained_environment(f: &Fixture) -> TestResult<EnvironmentInstance> {
     retained.operation.kind = EnvironmentOperationKind::Delete;
     retained.operation.state = OperationState::Succeeded;
     retained.operation.accepted_revision = retained.revision;
+    retained.operation.access_revocation_revision = Some(retained.revision);
     retained.validate()?;
     sqlx::query("UPDATE environment.environment_instances SET revision=$2,desired_state='deleted',observed_state='deleted',contract=$3 WHERE environment_id=$1")
         .bind(retained.id.as_uuid()).bind(i64::try_from(retained.revision.get())?).bind(serde_json::to_value(&retained)?).execute(&f.roles.environment).await?;

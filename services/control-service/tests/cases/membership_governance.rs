@@ -23,7 +23,7 @@ use testcontainers_modules::postgres::Postgres;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 #[path = "../support/production_roles.rs"]
-mod production_roles;
+pub(super) mod production_roles;
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
