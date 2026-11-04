@@ -1212,6 +1212,7 @@ export async function listProjectCreditLedger(options?: FixtureOptions): Promise
 export async function createCreditAdminOperation(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('Credits 管理员操作') }
 export async function estimateProjectResourceCost(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('资源费用估价') }
 export async function estimateProjectBuildCost(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('镜像构建费用估价') }
+export async function getProjectBuildCost(_options?: unknown): Promise<FixtureError> { return unsupportedResponse('读取构建费用') }
 
 // Notification center (#224) preview: one unread approval and one read reminder
 // whose email delivery could not be confirmed. Marking read is a real write, so the preview refuses it.

@@ -91,6 +91,7 @@
               <small>预占 {{ signedAmount(entry.reservedDelta) }} · 支出 {{ signedAmount(entry.spentDelta) }}<template v-if="!isZeroCredits(entry.platformAbsorbed)"> · 平台承担 {{ entry.platformAbsorbed }}</template></small>
               <small>{{ entry.reason }} · {{ formatTimestamp(entry.createdAt) }}</small>
               <small v-if="entry.reversalOf">冲正记录</small>
+              <small v-if="entry.holdId && holdTargets.has(entry.holdId)">关联预占：{{ holdTargets.get(entry.holdId) }}</small>
               <details class="advanced-details">
                 <summary>查看账目内部标识</summary>
                 <small>条目 ID：{{ entry.id }}</small>
@@ -140,7 +141,7 @@
     <div class="section-heading section-heading--compact">
       <div>
         <h4>预占</h4>
-        <p>资源申请、构建和模型调用开始前会按允许的上限预占 Credits，结束后按实际用量扣收并释放剩余部分。</p>
+        <p>资源申请、构建和模型调用开始前会按允许的上限预占 Credits，结束后按实际用量扣收并释放剩余部分。用量未知的预占不按零计算，核实期限到达后释放，迟到的费用由平台承担。</p>
       </div>
     </div>
     <AsyncStateView
@@ -153,41 +154,12 @@
           class="credit-list"
           aria-label="Credits 预占"
         >
-          <li
+          <CreditHoldItem
             v-for="hold in data.items"
             :key="hold.id"
-            class="credit-row"
-          >
-            <div class="credit-main">
-              <strong>{{ creditHoldStateLabel(hold.state) }} · 剩余 {{ hold.remaining }} / {{ hold.amount }}</strong>
-              <small>{{ holdTargetLabel(hold) }}</small>
-              <small>{{ formatTimestamp(hold.createdAt) }}</small>
-              <template v-if="creditHoldUnknownStatus(hold).kind !== 'none'">
-                <span
-                  class="state-chip"
-                  :class="creditHoldUnknownStatus(hold).kind === 'released' ? 'state-chip--released' : 'state-chip--pending'"
-                >{{ holdUnknownMessage(hold) }}</span>
-                <small v-if="creditHoldUnknownStatus(hold).kind === 'released'">
-                  资金已释放，用量仍待核实；这不代表实例、磁盘或外部调用已经停止。
-                </small>
-                <small v-else-if="holdUnknownDueAt(hold)">
-                  核实截止 {{ formatTimestamp(holdUnknownDueAt(hold)!) }}，到期后释放预占。
-                </small>
-              </template>
-              <details class="advanced-details">
-                <summary>查看预占内部标识</summary>
-                <small>预占 ID：{{ hold.id }}</small>
-                <small>业务键：{{ hold.businessKey }}</small>
-                <small>调用方：{{ hold.ownerClientId }}</small>
-                <small v-if="hold.requestId">资源申请 ID：{{ hold.requestId }}</small>
-                <small v-if="hold.buildRequestId">构建 ID：{{ hold.buildRequestId }}<template v-if="hold.buildAttempt"> · 第 {{ hold.buildAttempt }} 次</template></small>
-                <small v-if="hold.modelCallId">模型调用 ID：{{ hold.modelCallId }}</small>
-                <small v-if="hold.reason">原因：{{ hold.reason }}</small>
-                <small v-if="hold.unknownSince">未知自：{{ formatTimestamp(hold.unknownSince) }}</small>
-                <small v-if="hold.expiredUnknownAt">预占释放于：{{ formatTimestamp(hold.expiredUnknownAt) }}</small>
-              </details>
-            </div>
-          </li>
+            :hold="hold"
+            :ledger-entries="ledgerEntries"
+          />
         </ul>
         <div class="credit-pagination">
           <button
@@ -368,17 +340,16 @@ import AsyncStateView from '@/components/common/AsyncStateView.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import DiagnosticBanner from '@/components/common/DiagnosticBanner.vue'
 import AppSelect from '@/components/form/AppSelect.vue'
+import CreditHoldItem from '@/components/credits/CreditHoldItem.vue'
 import {
   canonicalCreditsAmount,
   creditActionLabel,
-  creditHoldStateLabel,
-  creditHoldUnknownStatus,
+  creditHoldTargetLabel,
   creditLedgerKindLabel,
   isDestructiveCreditOperation,
   useProjectCredits,
   type CreditAdminAction,
   type CreditAdminFormInput,
-  type CreditHold,
 } from '@/composables/useProjectCredits'
 import { useAuth } from '@/composables/useAuth'
 import { useProjects } from '@/composables/useProjects'
@@ -420,6 +391,11 @@ const canonicalAmount = computed(() => {
   return amount && amount !== '0.000000' && amount !== '-0.000000' ? amount : null
 })
 const isDestructive = computed(() => isDestructiveCreditOperation({ action: adminAction.value, amount: canonicalAmount.value ?? '' }))
+const ledgerEntries = computed(() => credits.ledger.kind === 'success' ? credits.ledger.data.items : [])
+/** Targets of the holds on the loaded holds page, so a ledger row can name what it settled. */
+const holdTargets = computed(() => new Map(credits.holds.kind === 'success'
+  ? credits.holds.data.items.map((hold) => [hold.id, creditHoldTargetLabel(hold)] as const)
+  : []))
 
 const canSubmitAdmin = computed(() => {
   if (!canManage.value || !props.projectId || !adminReason.value.trim()) return false
@@ -448,23 +424,6 @@ function signedAmount(value: string) {
 /** Holds, releases and unknown markers cannot be reversed (Resource rejects them); reversals are not reversed again. */
 function isReversible(kind: string, reversalOf: string | null | undefined) {
   return !reversalOf && kind !== 'hold' && kind !== 'release' && kind !== 'unknown'
-}
-
-function holdTargetLabel(hold: CreditHold) {
-  if (hold.requestId) return '资源申请'
-  if (hold.buildRequestId) return hold.buildAttempt ? `镜像构建（第 ${hold.buildAttempt} 次）` : '镜像构建'
-  if (hold.modelCallId) return '模型调用'
-  return '其他业务'
-}
-
-function holdUnknownMessage(hold: CreditHold): string {
-  const status = creditHoldUnknownStatus(hold)
-  return status.kind === 'none' ? '' : status.message
-}
-
-function holdUnknownDueAt(hold: CreditHold): string | null {
-  const status = creditHoldUnknownStatus(hold)
-  return status.kind === 'pending' && status.reconciliationDueAt ? status.reconciliationDueAt : null
 }
 
 function prepareReverse(id: string) {
@@ -592,9 +551,6 @@ defineExpose({ reload: () => credits.load({ clearOutcome: true }) })
 .pending-operations { display: grid; gap: var(--space-1); padding: var(--space-3); border-radius: var(--md-sys-shape-small); background: var(--md-sys-color-tertiary-container); color: var(--md-sys-color-on-tertiary-container); font: var(--md-sys-body-small); }
 .pending-operations ul { display: grid; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
 .pending-operations li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); overflow-wrap: anywhere; }
-.state-chip { display: inline-flex; width: fit-content; white-space: nowrap; padding: var(--space-1) var(--space-2); border-radius: var(--md-sys-shape-full); background: var(--md-sys-color-surface-variant); color: var(--md-sys-color-on-surface-variant); font: var(--md-sys-label-small); }
-.state-chip--pending { background: var(--md-sys-color-tertiary-container); color: var(--md-sys-color-on-tertiary-container); }
-.state-chip--released { background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); }
 @media (max-width: 620px) {
   .credits-summary, .two-columns { grid-template-columns: 1fr; }
   .credit-row { flex-direction: column; }

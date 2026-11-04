@@ -4,6 +4,7 @@ import { reactive } from 'vue'
 import ProjectCreditsPanel from '@/components/console/ProjectCreditsPanel.vue'
 import {
   createCreditAdminOperation,
+  getProjectBuildCost,
   getProjectCredits,
   listProjectCreditHolds,
   listProjectCreditLedger,
@@ -14,6 +15,7 @@ vi.mock('@/generated/contracts', async (importOriginal) => {
   return {
     ...actual,
     createCreditAdminOperation: vi.fn(),
+    getProjectBuildCost: vi.fn(),
     getProjectCredits: vi.fn(),
     listProjectCreditHolds: vi.fn(),
     listProjectCreditLedger: vi.fn(),
@@ -41,6 +43,28 @@ const holdEntry = {
   spentDelta: '0.000000', platformAbsorbed: '0.000000', createdAt: '2026-10-12T09:00:00.000Z', rateSnapshots: [], holdId: 'hold-1',
 }
 const grantEntry = { ...holdEntry, id: 'entry-grant', kind: 'grant', reason: '课程额度', balanceDelta: '20.000000', reservedDelta: '0.000000', holdId: null }
+const modelHold = {
+  id: 'hold-model', projectId: 'project-a', amount: '2.000000', remaining: '2.000000', state: 'unknown', measurementUnknown: true,
+  businessKey: 'model-call', ownerClientId: 'agent-service', createdAt: '2026-10-12T09:00:00.000Z', modelCallId: 'call-1',
+  modelRateSnapshot: [
+    { unit: 'llm_input_token', rateId: 'rate-in', rateRevision: 2 },
+    { unit: 'llm_output_token', rateId: 'rate-out', rateRevision: 3 },
+  ],
+  unknownSince: '2026-10-12T09:00:00.000Z', reconciliationDueAt: '2026-10-12T10:00:00.000Z',
+}
+const buildHold = {
+  id: 'hold-build', projectId: 'project-a', amount: '0.600000', remaining: '0.600000', state: 'pending', measurementUnknown: false,
+  businessKey: 'build', ownerClientId: 'agent-service', createdAt: '2026-10-12T09:00:00.000Z', buildRequestId: 'build-1', buildAttempt: 2,
+}
+const buildRecord = {
+  attempt: 2, buildRequestId: 'build-1', executionAuthorized: true, executionDeadline: '2026-10-12T09:30:00.000Z', hold: buildHold,
+  estimate: { projectId: 'project-a', input: { builderBinding: 'buildkit-primary-v1', from: '2026-10-12T09:00:00.000Z', maxDurationMilliseconds: 1_800_000 },
+    until: '2026-10-12T09:30:00.000Z', total: { currency: 'CREDITS', amount: '0.600000' }, lines: [] },
+}
+function settleEntry(id: string, spent: string, absorbed: string) {
+  return { ...holdEntry, id, kind: 'settle', projectId: 'project-a', holdId: 'hold-model', reason: 'measured cost',
+    reservedDelta: `-${spent}`, balanceDelta: `-${spent}`, spentDelta: spent, platformAbsorbed: absorbed }
+}
 
 const mounted: Array<{ unmount: () => void }> = []
 async function mountPanel() {
@@ -63,6 +87,7 @@ describe('ProjectCreditsPanel', () => {
     vi.mocked(listProjectCreditLedger).mockReset().mockResolvedValue({ data: { items: [grantEntry, holdEntry], nextCursor: null }, error: undefined } as never)
     vi.mocked(listProjectCreditHolds).mockReset().mockResolvedValue({ data: { items: [], nextCursor: null }, error: undefined } as never)
     vi.mocked(createCreditAdminOperation).mockReset().mockResolvedValue({ data: [], error: undefined } as never)
+    vi.mocked(getProjectBuildCost).mockReset()
   })
 
   it('never shows an unverified usage as zero', async () => {
@@ -244,5 +269,102 @@ describe('ProjectCreditsPanel', () => {
     const calls = vi.mocked(createCreditAdminOperation).mock.calls
     expect(calls[1]![0].headers).toEqual(calls[0]![0].headers)
     expect(second.find('[data-testid="credits-pending-operations"]').exists()).toBe(false)
+  })
+
+  it('shows an in-flight model call as unknown usage with its finite deadline and rate snapshot, never as zero', async () => {
+    vi.mocked(listProjectCreditHolds).mockResolvedValue({ data: { items: [modelHold], nextCursor: null }, error: undefined } as never)
+    const wrapper = await mountPanel()
+    const hold = wrapper.get('[data-hold-id="hold-model"]')
+    expect(hold.text()).toContain('用量待核实 · 模型调用')
+    expect(hold.text()).toContain('预占上限 2.000000 CREDITS · 剩余 2.000000 CREDITS')
+    expect(hold.get('[data-testid="credit-hold-model-rates"]').text()).toBe('按费率快照计价：模型输入 token 版本 2、模型输出 token 版本 3')
+    const unknown = hold.get('[data-testid="credit-hold-unknown"]').text()
+    expect(unknown).toContain('不按零计算')
+    expect(unknown).toContain('模型调用进行中或尚未上报 token 用量')
+    expect(unknown).toContain('核实截止')
+    expect(unknown).toContain('到期后释放剩余预占')
+    expect(hold.find('[data-testid="credit-hold-settlement"]').exists()).toBe(false)
+  })
+
+  it('shows an expired unknown hold as released funds with usage still unverified', async () => {
+    vi.mocked(listProjectCreditHolds).mockResolvedValue({ data: { items: [{ ...modelHold, state: 'released', remaining: '0.000000', expiredUnknownAt: '2026-10-12T10:00:00.000Z' }], nextCursor: null }, error: undefined } as never)
+    const wrapper = await mountPanel()
+    const hold = wrapper.get('[data-hold-id="hold-model"]')
+    expect(hold.text()).toContain('待核实，预占已释放')
+    expect(hold.get('[data-testid="credit-hold-unknown"]').text()).toContain('之后确认的费用由平台承担')
+  })
+
+  it('sums a model hold\'s settlement and platform-borne tail from linked ledger entries', async () => {
+    vi.mocked(listProjectCreditHolds).mockResolvedValue({ data: { items: [{ ...modelHold, state: 'settled', measurementUnknown: false, remaining: '0.000000' }], nextCursor: null }, error: undefined } as never)
+    vi.mocked(listProjectCreditLedger).mockResolvedValue({ data: { items: [
+      settleEntry('entry-settle-1', '1.500000', '0.000000'),
+      settleEntry('entry-settle-2', '0.500000', '0.250001'),
+      { ...settleEntry('entry-platform', '0.000000', '0.000000'), projectId: null, balanceDelta: '2.000000' },
+      grantEntry,
+    ], nextCursor: null }, error: undefined } as never)
+    const wrapper = await mountPanel()
+    const hold = wrapper.get('[data-hold-id="hold-model"]')
+    expect(hold.text()).toContain('已结算 · 模型调用')
+    expect(hold.get('[data-testid="credit-hold-settlement"]').text()).toContain('扣收 2.000000 CREDITS · 平台承担 0.250001 CREDITS')
+    const ledgerRows = wrapper.findAll('[aria-label="Credits 账目"] li')
+    expect(ledgerRows[0]!.text()).toContain('关联预占：模型调用')
+    expect(ledgerRows[3]!.text()).not.toContain('关联预占')
+  })
+
+  it('does not present a settled hold without loaded settlement entries as a zero charge', async () => {
+    vi.mocked(listProjectCreditHolds).mockResolvedValue({ data: { items: [{ ...modelHold, state: 'settled', measurementUnknown: false, remaining: '0.000000' }], nextCursor: null }, error: undefined } as never)
+    const wrapper = await mountPanel()
+    const settlement = wrapper.get('[data-hold-id="hold-model"] [data-testid="credit-hold-settlement"]').text()
+    expect(settlement).toContain('不在当前账目页')
+    expect(settlement).not.toContain('0.000000')
+  })
+
+  it('reads a build hold\'s cost record on demand and keeps unknown build time unpriced', async () => {
+    vi.mocked(listProjectCreditHolds).mockResolvedValue({ data: { items: [buildHold], nextCursor: null }, error: undefined } as never)
+    vi.mocked(getProjectBuildCost).mockResolvedValue({ data: {
+      ...buildRecord, measurement: { state: 'unknown', reason: 'BuildKit history unavailable' }, firstUnknownObservation: { state: 'unknown', reason: 'BuildKit history unavailable' },
+    }, error: undefined } as never)
+    const wrapper = await mountPanel()
+    const hold = wrapper.get('[data-hold-id="hold-build"]')
+    expect(hold.text()).toContain('预占中 · 镜像构建（第 2 次）')
+    expect(getProjectBuildCost).not.toHaveBeenCalled()
+    await hold.get('[data-testid="credit-hold-build-cost-toggle"]').trigger('click')
+    await flushPromises()
+    expect(getProjectBuildCost).toHaveBeenCalledWith({ path: { projectId: 'project-a', buildRequestId: 'build-1', attempt: 2 } })
+    const record = hold.get('[data-testid="build-cost-record"]')
+    expect(record.get('[data-testid="build-cost-estimate"]').text()).toContain('0.600000 CREDITS（构建器 buildkit-primary-v1，最长 30 分钟）')
+    expect(record.get('[data-testid="build-cost-measurement"]').text()).toBe('构建用时未知，待核实：BuildKit history unavailable')
+    expect(record.get('[data-testid="build-cost-uncharged"]').text()).toContain('实际费用未知，不按零计算')
+    expect(record.find('[data-testid="build-cost-charged"]').exists()).toBe(false)
+  })
+
+  it('shows a settled build charge with its rate lines', async () => {
+    vi.mocked(listProjectCreditHolds).mockResolvedValue({ data: { items: [{ ...buildHold, state: 'settled', remaining: '0.000000' }], nextCursor: null }, error: undefined } as never)
+    vi.mocked(getProjectBuildCost).mockResolvedValue({ data: {
+      ...buildRecord,
+      measurement: { state: 'known', startedAt: '2026-10-12T09:00:00.000Z', finishedAt: '2026-10-12T09:10:00.000Z', historyRef: 'ref-1' },
+      chargedTotal: { currency: 'CREDITS', amount: '0.200000' },
+      chargedLines: [{ rateId: 'rate-build', rateRevision: 4, unit: 'build_second', quantity: 600_000, quantityDivisor: 1000, unitQuantity: 3600,
+        unitPrice: { currency: 'CREDITS', amount: '1.200000' }, amount: { currency: 'CREDITS', amount: '0.200000' } }],
+    }, error: undefined } as never)
+    const wrapper = await mountPanel()
+    await wrapper.get('[data-testid="credit-hold-build-cost-toggle"]').trigger('click')
+    await flushPromises()
+    const record = wrapper.get('[data-testid="build-cost-record"]')
+    expect(record.get('[data-testid="build-cost-charged"]').text()).toBe('0.200000 CREDITS')
+    expect(record.text()).toContain('费率版本 4 · 600000 毫秒 · 单价 1.200000 CREDITS / 3600 秒 · 0.200000 CREDITS')
+  })
+
+  it('keeps the request ID and Chinese reason when the build cost record cannot be read', async () => {
+    vi.mocked(listProjectCreditHolds).mockResolvedValue({ data: { items: [buildHold], nextCursor: null }, error: undefined } as never)
+    vi.mocked(getProjectBuildCost).mockResolvedValue({ data: undefined, error: {
+      type: 'about:blank', title: 'Conflict', status: 409, detail: 'overflow', diagnosticCode: 'LW_RESOURCE_NUMERIC_OVERFLOW', requestId: 'req-build', retryable: false,
+    } } as never)
+    const wrapper = await mountPanel()
+    await wrapper.get('[data-testid="credit-hold-build-cost-toggle"]').trigger('click')
+    await flushPromises()
+    const banner = wrapper.get('[data-testid="build-cost-record"] .diagnostic-banner')
+    expect(banner.get('.diagnostic-message').text()).toContain('超出平台可精确计算的范围')
+    expect(banner.get('.diagnostic-details').text()).toContain('req-build')
   })
 })

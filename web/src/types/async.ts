@@ -113,6 +113,12 @@ function readableDiagnosticMessage(code: string, message: string): string {
       return 'GPU 目录配置无效，当前无法使用 GPU 计价。'
     case 'LW_RESOURCE_ESTIMATE_CHANGED':
       return '规格或费率在估价后发生了变化，原估价已失效。'
+    case 'LW_RESOURCE_CONTRACT_INVALID':
+      return '提交的资源、费率或计量数据不符合平台约定（例如模型 token 费率不是 CREDITS），本次操作没有执行。'
+    case 'LW_RESOURCE_NUMERIC_OVERFLOW':
+      return '数量、时长或金额超出平台可精确计算的范围，无法估价、预占或扣收，不会按免费处理。'
+    case 'LW_RESOURCE_APPROVAL_INVALID':
+      return '资源批准的有效期或时长无效，不能据此预占 Credits、启动或续期资源。'
     case 'LW_CREDITS_INSUFFICIENT':
       return '项目 Credits 可用余额不足，本次操作没有执行。已预占的资金不能用于转出或新的申请。'
     case 'LW_CREDITS_CONFLICT':
