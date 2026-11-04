@@ -126,7 +126,6 @@ pub(crate) async fn current_inputs(
         }
     }
     check_actor_scope(tx, request).await?;
-    check_course_calendar(tx, request).await?;
     let value: serde_json::Value =
         sqlx::query_scalar("SELECT contract FROM control.runtime_authorization_policy")
             .fetch_one(&mut **tx)
@@ -271,6 +270,7 @@ pub async fn resolve_binding(
         .map_err(|_| RuntimeBindingError::Unavailable)?;
     let (identity, spec, status) = current_inputs(&mut tx, request).await?;
     check_policy_use(&status, RuntimePolicyUse::Admission)?;
+    check_course_calendar(&mut tx, request).await?;
     let applied = status
         .applied
         .as_ref()
